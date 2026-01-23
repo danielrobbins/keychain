@@ -1089,7 +1089,10 @@ load_ssh_keys() {
 		[ -n "$timeout" ] && $confirmopt && blurb="${blurb},"
 		$confirmopt && blurb="${blurb}confirm"
 		[ -n "$blurb" ] && blurb=" (${blurb})"
-		mesg "ssh-add: Identities added: $sshkeys${blurb}"
+		mesg "ssh-add: Identities added:"
+		for key in "$@"; do
+			qprint "   - $key${blurb}"
+		done
 	else
 		warn "ssh-add failed: (return code: $ret; output: $sshout)"
 	fi
