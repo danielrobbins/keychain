@@ -688,6 +688,12 @@ all_host_identities() {
 		case $line in
 			*[Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Ff][Ii][Ll][Ee]*)
 				keyf="$(echo "$line" | awk '{print $2}')"
+				# shellcheck disable=SC2088 # preserve literal tilde
+				case "$keyf" in
+					"~/"*)  # Match unexpanded tilde
+						# Manually expand ~ -> $HOME
+						keyf="${HOME}/${keyf#"~/"}"
+				esac
 				if [ -f "$keyf" ]; then
 					echo "sshk:${keyf}"
 				else
