@@ -684,15 +684,25 @@ all_host_identities() {
 	if [ ! -e ~/.ssh/config ]; then
 		warn "No ~/.ssh/config -- can't extract host identities" && return
 	fi
-	while IFS= read -r line; do
+	while IFS= read -r line || [ -n "$line" ]; do
+		# trim leading whitespace to simplify matching
+		line="$(echo "$line" | sed 's/^[[:space:]]*//')"
 		case $line in
-			*[Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Ff][Ii][Ll][Ee]*)
-				keyf="$(echo "$line" | awk '{print $2}')"
+			# skip commented lines
+			\#*)
+				continue
+				;;
+			[Ii][Dd][Ee][Nn][Tt][Ii][Tt][Yy][Ff][Ii][Ll][Ee]*)
+				# collect key path and strip potential surrounding double quotes
+				keyf="$(echo "$line" | awk '{print $2}' | sed -e 's/^"//' -e 's/"$//')"
+				# sub valid homedir prefixes (~, %d, ${HOME}) for absolute homedir
+				keyf="$(echo "$keyf" | sed "s:^\(~\|%d\|\${HOME}\):${HOME}:")"
 				if [ -f "$keyf" ]; then
 					echo "sshk:${keyf}"
 				else
 					echo "miss:${keyf}"
 				fi
+				;;
 		esac
 	done < ~/.ssh/config
 }
