@@ -284,9 +284,10 @@ findpids() {
 	# Return the list of pids; ignore case for Cygwin.
 	# Check only 8 characters since Solaris truncates at that length.
 	# Ignore defunct ssh-agents (bug 28599)
+        # Ignore gpg-agent with non-default --homedir option (issue #202)
 	if [ -n "$fp_psout" ]; then
 		echo "$fp_psout" | \
-			awk "BEGIN{IGNORECASE=1} /defunct/{next}
+			awk "BEGIN{IGNORECASE=1} /defunct/{next} /homedir/{next}
 				/$fp_prog-[a]gen/{print \$1}" | xargs
 		return 0
 	fi
