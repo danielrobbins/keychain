@@ -700,53 +700,58 @@ per-user (mode 700). Older pidfiles are replaced atomically; no in-place edits.
 Modern gpg-agent can also serve as the SSH agent; users with mostly-GPG
 workflows often prefer ``--ssh-spawn-gpg`` to collapse to one process.
 
-== @topic extkeys: Extended-key syntax
+== @topic extkeys: Extended key syntax
 
-Positional key arguments accept six prefixes:
+SSH and GPG keys can be specified as positional arguments for the ``add``
+action. ``keychain add NAME`` will look for ``~/.ssh/NAME`` if
+it exists and treat it as an SSH key; otherwise, it is looked up via ``gpg --list-secret-keys``
+and if found the GnuPG signing key will be loaded and warmed. This *may* also
+warm an associated encryption key, but this is not guaranteed -- see below.
 
-    sshk:PATH       a literal SSH key file path
-    gpgk:KEYID      a GnuPG key ID (legacy generic signing-oriented warm-up)
-    gpgs:KEYID      warm only signing subkeys
-    gpge:KEYID      warm encryption/decryption subkeys
-    gpga:KEYID      warm signing and encryption/decryption subkeys
+In addition to explicit passing of keys by name or path, positional key 
+arguments may accept six extended key prefixes to avoid ambiguity and provide
+more fine-grained control. The following prefixed formats can be mixed freely
+with regular positional key names:
+
+    sshk:PATH       an SSH key file path
+    sshk:NAME       an SSH key name under ``~/.ssh/``
+    gpgk:KEYID      a GnuPG key ID (legacy alias for ``gpgs:``)
+    gpgs:KEYID      warm and prove signing capability using GnuPG's signing path
+    gpge:KEYID      warm and prove encryption/decryption capability
+    gpga:KEYID      warm and prove signing + encryption/decryption capability
     host:HOSTNAME   every IdentityFile for HOSTNAME
                     (resolved via ``ssh -G HOSTNAME``)
 
-Bare positional names without a prefix are auto-classified: ``~/.ssh/NAME`` if
-it exists → ``sshk:``; otherwise looked up via ``gpg --list-secret-keys`` →
-``gpgk:``; otherwise reported as missing.
+*Using the extended key syntax opens up several important features to help ensure
+that your specified GnuPG signing or encryption key is actually loaded and ready for use.*
+This is important because GnuPG's keys and subkeys can be tricky -- OpenPGP encryption 
+capability may live on the primary key or on a separate encryption subkey, and GnuPG's
+passphrase cache behavior can vary by version, platform, and key layout. A signing 
+operation may happen to unlock later decryption on some systems, but Keychain does not rely
+on that as a portable guarantee. 
 
-GPG subkey behavior matters. OpenPGP encryption capability may live on the
-primary key or on a separate encryption subkey, and GnuPG's passphrase cache
-behavior can vary by version, platform, and key layout. A signing operation may
-happen to unlock later decryption on some systems, but Keychain does not rely
-on that as a portable guarantee.
+Extended key syntax helps with this situation. For GPG keys, ``gpgk:KEYID`` is
+equivalent to ``gpgs:KEYID``. Both perform a signing-oriented warm-up: Keychain asks
+GnuPG to perform a signing operation with the requested key, which causes
+``gpg-agent`` to cache the passphrase needed for signing. *This proves signing
+capability, but it does not prove that the same key can decrypt data.*
 
-The GPG prefixes describe the capability Keychain proves:
+Using ``gpge:KEYID`` performs a similar explicit check to ensure functionality. When used,
+*Keychain will encrypt a tiny temporary payload with the requested key and then decrypt it to
+ensure that it is properly loaded and functional, and will fail if it does not
+succeed.* If your workflow decrypts data -- for example, ``pass show ...`` -- use
+``gpge:KEYID``. 
 
-    gpgs:KEYID
-    gpgk:KEYID      perform a signing-oriented warm-up using GnuPG's signing
-                    path
+If your workflow needs both signing and decryption, use ``gpga:KEYID``.
+*Keychain will first warm the signing path, then require the same explicit
+decryption check performed by ``gpge:``.* If GnuPG cannot encrypt to and decrypt
+with the requested key, ``gpga:KEYID`` fails rather than treating signing warm-up as
+enough.
 
-    gpge:KEYID      perform a decryption-oriented warm-up by encrypting a tiny
-                    temporary payload to the requested key and then decrypting
-                    it through ``gpg-agent``
-
-    gpga:KEYID      perform both checks
-
-This means ``gpge:`` is not just a naming hint. It is a behavioral guarantee:
-if Keychain cannot prove that ``gpg-agent`` can decrypt for the requested key,
-``add`` fails instead of silently relying on incidental signing-cache behavior.
-If your workflow decrypts data -- for example, ``pass show ...`` -- use
-``gpge:KEYID``. If you want both signing and decryption warmed, use
-``gpga:KEYID``.
-
-Prefixed and bare positionals can be mixed freely. The old ``--extended`` flag
-is accepted for 2.x compatibility and does not change parsing.
-
-``host:`` expansion is delegated to ``ssh -G`` so the full OpenSSH semantics
+``host:HOSTNAME`` can be used to refer to a specific hostname defined in your local
+OpenSSH config. ``host:`` expansion is delegated to ``ssh -G`` so the full OpenSSH semantics
 (``Match``, ``Include``, ``%d``/``%u``/ ``%h`` substitution, quoted args) apply
--- no parallel parser.
+properly.
 
 == @topic pidfile: Pidfile location and contents
 
