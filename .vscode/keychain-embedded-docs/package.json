@@ -1,0 +1,34 @@
+{
+  "name": "keychain-embedded-docs",
+  "displayName": "Keychain Embedded Docs",
+  "description": "Syntax highlighting for keychain embedded documentation records.",
+  "version": "0.0.1",
+  "publisher": "drobb",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "keychain-embedded-docs",
+        "aliases": [
+          "Keychain Embedded Docs"
+        ],
+        "filenames": [
+          "embedded-docs.txt"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "keychain-embedded-docs",
+        "scopeName": "text.keychain.embedded-docs",
+        "path": "./syntaxes/keychain-embedded-docs.tmLanguage.json"
+      }
+    ]
+  }
+}

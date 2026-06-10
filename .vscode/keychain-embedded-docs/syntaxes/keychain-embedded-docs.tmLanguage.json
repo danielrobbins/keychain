@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Keychain Embedded Docs",
+  "scopeName": "text.keychain.embedded-docs",
+  "patterns": [
+    { "include": "#topic-header" },
+    { "include": "#action-header" },
+    { "include": "#option-header" },
+    { "include": "#global-header" },
+    { "include": "#config-header" },
+    { "include": "#tool-header" },
+    { "include": "#fenced-code" },
+    { "include": "#body-line" }
+  ],
+  "repository": {
+    "topic-header": {
+      "match": "^(==)(\\s+)(@topic)(\\s+)(.+)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.begin.keychain-doc" },
+        "3": { "name": "storage.type.class.pod.perl" },
+        "5": { "name": "entity.name.section.topic.keychain-doc" }
+      }
+    },
+    "action-header": {
+      "match": "^(==)(\\s+)(@action)(\\s+)(.+)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.begin.keychain-doc" },
+        "3": { "name": "storage.type.class.pod.perl" },
+        "5": { "name": "entity.name.function.action.keychain-doc" }
+      }
+    },
+    "option-header": {
+      "match": "^(==)(\\s+)(@option)(\\s+)(.+)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.begin.keychain-doc" },
+        "3": { "name": "storage.type.class.pod.perl" },
+        "5": { "name": "variable.parameter.option.keychain-doc" }
+      }
+    },
+    "global-header": {
+      "match": "^(==)(\\s+)(@global)(\\s+)(.+)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.begin.keychain-doc" },
+        "3": { "name": "storage.type.class.pod.perl" },
+        "5": { "name": "variable.other.global.keychain-doc" }
+      }
+    },
+    "config-header": {
+      "match": "^(==)(\\s+)(@config)(\\s+)(.+)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.begin.keychain-doc" },
+        "3": { "name": "storage.type.class.pod.perl" },
+        "5": { "name": "support.type.config.keychain-doc" }
+      }
+    },
+    "tool-header": {
+      "match": "^(==)(\\s+)(@tool)(\\s+)(.+)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.begin.keychain-doc" },
+        "3": { "name": "storage.type.class.pod.perl" },
+        "5": { "name": "entity.name.type.tool.keychain-doc" }
+      }
+    },
+    "fenced-code": {
+      "name": "markup.fenced_code.block.keychain-doc",
+      "begin": "^```[A-Za-z0-9_-]*\\s*$",
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.raw.begin.keychain-doc" }
+      },
+      "end": "^```\\s*$",
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.raw.end.keychain-doc" }
+      },
+      "contentName": "markup.raw.block.keychain-doc"
+    },
+    "body-line": {
+      "begin": "^(?!==\\s+@)(?=\\S)",
+      "while": "^(?!==\\s+@)(?!\\s*$)",
+      "name": "comment.block.documentation.keychain-doc",
+      "patterns": [
+        { "include": "#double-backtick" },
+        { "include": "#asterisk-emphasis" }
+      ]
+    },
+    "double-backtick": {
+      "name": "entity.name.type.instance.pod.perl",
+      "begin": "(``)(?=\\S)",
+      "beginCaptures": {
+        "1": { "name": "markup.raw.pod.perl" }
+      },
+      "end": "(?<=\\S)(``)",
+      "endCaptures": {
+        "1": { "name": "markup.raw.pod.perl" }
+      },
+      "contentName": "markup.raw.pod.perl"
+    },
+    "asterisk-emphasis": {
+      "begin": "(?<!\\w)(\\*)(?!\\*)(?=\\S)",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.italic.begin.keychain-doc" }
+      },
+      "end": "(?<=\\S)(\\*)(?!\\*)(?!\\w)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.italic.end.keychain-doc" }
+      },
+      "contentName": "markup.italic.keychain-doc"
+    }
+  }
+}
