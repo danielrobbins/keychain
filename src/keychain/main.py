@@ -343,11 +343,13 @@ class KeychainApp:
                 missing_gpg = self.kstate.gpg.list_missing(gpg_s_keys, mode="--sign")
                 self.kstate.gpg.load(missing_gpg, mode="--sign")
             if gpg_e_keys:
-                self.kstate.gpg.load_decryption(gpg_e_keys)
+                if not self.kstate.gpg.load_decryption(gpg_e_keys):
+                    raise KeychainError("Unable to add GPG encryption keys")
             if gpg_a_keys:
                 missing_gpg = self.kstate.gpg.list_missing(gpg_a_keys, mode="--sign")
                 self.kstate.gpg.load(missing_gpg, mode="--sign")
-                self.kstate.gpg.load_decryption(gpg_a_keys)
+                if not self.kstate.gpg.load_decryption(gpg_a_keys):
+                    raise KeychainError("Unable to add GPG encryption keys")
 
             self.out.line()
         return 0

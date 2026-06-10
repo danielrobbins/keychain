@@ -71,6 +71,25 @@ done
     path.chmod(0o700)
 
 
+def _write_gpg_wrapper(path: Path, passfile: Path) -> None:
+    path.write_text(
+        f"""#!/bin/sh
+real_gpg={shlex.quote(shutil.which("gpg") or "gpg")}
+passfile={shlex.quote(str(passfile))}
+decrypt=0
+for arg do
+  [ "$arg" = "--decrypt" ] && decrypt=1
+done
+if [ "$decrypt" = 1 ] && [ -r "$passfile" ]; then
+  exec "$real_gpg" --pinentry-mode loopback --passphrase-file "$passfile" "$@"
+fi
+exec "$real_gpg" "$@"
+""",
+        encoding="utf-8",
+    )
+    path.chmod(0o700)
+
+
 def _fingerprint(env: dict[str, str]) -> str:
     result = _gpg(env, "--batch", "--with-colons", "--list-secret-keys")
     _assert_ok(result)
@@ -104,6 +123,8 @@ def gpg_home(tmp_path: Path):
     pinentry_log.write_text("", encoding="utf-8")
     pinentry = tmp_path / "pinentry-test"
     _write_fake_pinentry(pinentry, passfile, pinentry_log)
+    gpg_wrapper = tmp_path / "gpg-wrapper"
+    _write_gpg_wrapper(gpg_wrapper, passfile)
     (gnupg / "gpg-agent.conf").write_text(
         f"pinentry-program {pinentry}\n"
         "allow-loopback-pinentry\n"
@@ -117,6 +138,7 @@ def gpg_home(tmp_path: Path):
         {
             "HOME": str(home),
             "GNUPGHOME": str(gnupg),
+            "GPG_BIN": str(gpg_wrapper),
             "GPG_TTY": "",
             "PYTHONPATH": str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", ""),
         }

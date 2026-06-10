@@ -626,7 +626,7 @@ class GpgAgent:
         opts += shlex.split(self.k.env.get("KEYCHAIN_GPG_AGENT_ARGS", ""))
         out.info("Starting gpg-agent...")
         try:
-            r = run(["gpg-agent", "--sh"] + opts)
+            r = run(["gpg-agent", "--sh"] + opts, env=self.k.env)
         except (FileNotFoundError, OSError):
             return None
         return SshAgentRef.from_text(r.stdout) if r.returncode == 0 else None
@@ -733,7 +733,6 @@ class GpgAgent:
                     )
                     dec = self._run_gpg(
                         [
-                            "--batch",
                             "--yes",
                             "--no-autostart",
                             "--no-options",
