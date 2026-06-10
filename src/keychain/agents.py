@@ -526,7 +526,12 @@ class SshAgent:
         if not test:
             out.warn("Agent disappeared; refusing to load keys")
             return False
-        out.info(f"Adding {out.value(len(missing))} ssh key(s): " f"{out.value(' '.join(missing))}")
+        if len(missing) == 1:
+            out.info(f"Adding {out.value(len(missing))} ssh key(s): {out.value(missing[0])}")
+        else:
+            out.info(f"Adding {out.value(len(missing))} ssh keys:")
+            for key in missing:
+                out.line(f"   - {out.value(key)}")
         # ssh-add inherits stdio for passphrase prompts, so we cannot use util.run().
         run_env = self.env.overlay()
         if bool(a.get_value("no_gui")) or not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
@@ -544,16 +549,7 @@ class SshAgent:
         except (FileNotFoundError, OSError):
             out.warn("ssh-add not found")
             return False
-        if rc == 0:
-            bits = []
-            timeout = a.get_value("timeout")
-            if timeout is not None:
-                bits.append(f"life={timeout}m")
-            if bool(a.get_value("confirm")):
-                bits.append("confirm")
-            suffix = f" ({','.join(bits)})" if bits else ""
-            out.info(f"ssh-add: Identities added: {' '.join(missing)}{suffix}")
-        else:
+        if rc != 0:
             out.warn(f"ssh-add failed (return code: {rc})")
         return rc == 0
 

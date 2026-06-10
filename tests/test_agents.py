@@ -115,6 +115,41 @@ class TestListSelection:
         assert "SHA256:abc" in capsys.readouterr().out
 
 
+class TestSshAgentLoadOutput:
+    def _agent(self, monkeypatch):
+        def get_value(name):
+            return {"no_gui": True, "confirm": False, "timeout": None}.get(name, False)
+
+        kstate = SimpleNamespace(
+            find_active_agent_env=SshAgentRef(sock="/tmp/agent.sock", pid="1111"),
+            args=SimpleNamespace(get_value=get_value),
+        )
+        agent = agents.SshAgent(kstate, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
+        monkeypatch.setattr(agent, "envcheck", lambda *_args, **_kwargs: agent.env)
+        monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+        return agent
+
+    def test_multiple_loaded_keys_render_as_lists(self, monkeypatch, capsys):
+        """Verify multi-key ssh-add output is readable instead of joining paths onto one long line."""
+        assert self._agent(monkeypatch).load(["/home/user/.ssh/key1", "/home/user/.ssh/key2"]) is True
+
+        err = capsys.readouterr().err
+        assert "Adding 2 ssh keys:" in err
+        assert "   - /home/user/.ssh/key1" in err
+        assert "   - /home/user/.ssh/key2" in err
+        assert "Adding 2 ssh keys: /home/user/.ssh/key1 /home/user/.ssh/key2" not in err
+        assert "ssh-add: Identities added" not in err
+
+    def test_single_loaded_key_stays_compact(self, monkeypatch, capsys):
+        """Verify the common one-key path keeps the compact single-line output."""
+        assert self._agent(monkeypatch).load(["/home/user/.ssh/key1"]) is True
+
+        err = capsys.readouterr().err
+        assert "Adding 1 ssh key(s): /home/user/.ssh/key1" in err
+        assert "ssh-add: Identities added" not in err
+        assert "   - /home/user/.ssh/key1" not in err
+
+
 # ---------------------------------------------------------------------------
 # findpids
 # ---------------------------------------------------------------------------
