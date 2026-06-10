@@ -70,7 +70,10 @@ In addition, for GPG keys specified, similar steps will be taken to ensure that
 gpg-agent has the requested GPG capability cached in memory and ready for use.
 Use ``gpgs:KEYID`` for signing-oriented workflows, ``gpge:KEYID`` for
 decrypt-oriented workflows such as ``pass``, and ``gpga:KEYID`` when both
-capabilities should be warmed.
+capabilities should be warmed. ``gpge:`` is an explicit decryption-path
+guarantee: keychain encrypts a tiny temporary payload to the requested key and
+then decrypts it through ``gpg-agent``. If that check cannot be completed,
+``add`` fails instead of reporting success.
 
 == @section ACTIONS
 
@@ -713,12 +716,30 @@ Bare positional names without a prefix are auto-classified: ``~/.ssh/NAME`` if
 it exists → ``sshk:``; otherwise looked up via ``gpg --list-secret-keys`` →
 ``gpgk:``; otherwise reported as missing.
 
-GPG subkey behavior matters. Many OpenPGP keys have separate signing and
-encryption subkeys. A signing operation may happen to unlock later decryption
-on some GnuPG versions or key layouts, but Keychain does not rely on that as a
-portable guarantee. If your workflow decrypts data -- for example,
-``pass show ...`` -- use ``gpge:KEYID``. If you want both signing and
-decryption warmed, use ``gpga:KEYID``.
+GPG subkey behavior matters. OpenPGP encryption capability may live on the
+primary key or on a separate encryption subkey, and GnuPG's passphrase cache
+behavior can vary by version, platform, and key layout. A signing operation may
+happen to unlock later decryption on some systems, but Keychain does not rely
+on that as a portable guarantee.
+
+The GPG prefixes describe the capability Keychain proves:
+
+    gpgs:KEYID
+    gpgk:KEYID      perform a signing-oriented warm-up using GnuPG's signing
+                    path
+
+    gpge:KEYID      perform a decryption-oriented warm-up by encrypting a tiny
+                    temporary payload to the requested key and then decrypting
+                    it through ``gpg-agent``
+
+    gpga:KEYID      perform both checks
+
+This means ``gpge:`` is not just a naming hint. It is a behavioral guarantee:
+if Keychain cannot prove that ``gpg-agent`` can decrypt for the requested key,
+``add`` fails instead of silently relying on incidental signing-cache behavior.
+If your workflow decrypts data -- for example, ``pass show ...`` -- use
+``gpge:KEYID``. If you want both signing and decryption warmed, use
+``gpga:KEYID``.
 
 Prefixed and bare positionals can be mixed freely. The old ``--extended`` flag
 is accepted for 2.x compatibility and does not change parsing.
