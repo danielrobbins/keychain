@@ -11,6 +11,7 @@ keychain.iml
 __pycache__/
 *.pyc
 .specstory/
+.venv/
 .ci-artifacts*/
 dist/
 build/

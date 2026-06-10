@@ -67,7 +67,10 @@ although it is possible to specify an absolute or relative path to the private
 key file as well. Private key files can be symlinks to the actual key.
 
 In addition, for GPG keys specified, similar steps will be taken to ensure that
-gpg-agent has the GPG key cached in memory and ready for use.
+gpg-agent has the requested GPG capability cached in memory and ready for use.
+Use ``gpgs:KEYID`` for signing-oriented workflows, ``gpge:KEYID`` for
+decrypt-oriented workflows such as ``pass``, and ``gpga:KEYID`` when both
+capabilities should be warmed.
 
 == @section ACTIONS
 
@@ -83,7 +86,10 @@ gpg-agent has the GPG key cached in memory and ready for use.
   ``~/.keychain/`` that scripts can ``source`` to gain access to the agent.
 
 Bare key names are looked up under *~/.ssh/* and as GPG key IDs; absolute paths
-are loaded directly. Symbolic links are supported Extended-key syntax -- ``sshk:PATH``, ``gpgk:KEYID``, ``host:HOSTNAME`` -- is automatically detected and can be used to explicitly specify the lookup method.
+are loaded directly. Symbolic links are supported. Extended-key syntax --
+``sshk:PATH``, ``gpgk:KEYID``, ``gpgs:KEYID``, ``gpge:KEYID``, ``gpga:KEYID``,
+``host:HOSTNAME`` -- is automatically detected and can be used to explicitly
+specify the lookup method.
 
 When one or more KEY arguments are supplied and *none* of them resolve to a
 real SSH key or known GPG identity, ``add`` exits without starting or attaching
@@ -696,16 +702,23 @@ workflows often prefer ``--ssh-spawn-gpg`` to collapse to one process.
 Positional key arguments accept six prefixes:
 
     sshk:PATH       a literal SSH key file path
-    gpgk:KEYID      a GnuPG key ID (generic)
+    gpgk:KEYID      a GnuPG key ID (legacy generic signing-oriented warm-up)
     gpgs:KEYID      warm only signing subkeys
-    gpge:KEYID      warm only encryption subkeys
-    gpga:KEYID      warm all subkeys
+    gpge:KEYID      warm encryption/decryption subkeys
+    gpga:KEYID      warm signing and encryption/decryption subkeys
     host:HOSTNAME   every IdentityFile for HOSTNAME
                     (resolved via ``ssh -G HOSTNAME``)
 
 Bare positional names without a prefix are auto-classified: ``~/.ssh/NAME`` if
 it exists → ``sshk:``; otherwise looked up via ``gpg --list-secret-keys`` →
 ``gpgk:``; otherwise reported as missing.
+
+GPG subkey behavior matters. Many OpenPGP keys have separate signing and
+encryption subkeys. A signing operation may happen to unlock later decryption
+on some GnuPG versions or key layouts, but Keychain does not rely on that as a
+portable guarantee. If your workflow decrypts data -- for example,
+``pass show ...`` -- use ``gpge:KEYID``. If you want both signing and
+decryption warmed, use ``gpga:KEYID``.
 
 Prefixed and bare positionals can be mixed freely. The old ``--extended`` flag
 is accepted for 2.x compatibility and does not change parsing.

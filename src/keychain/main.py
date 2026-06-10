@@ -343,11 +343,11 @@ class KeychainApp:
                 missing_gpg = self.kstate.gpg.list_missing(gpg_s_keys, mode="--sign")
                 self.kstate.gpg.load(missing_gpg, mode="--sign")
             if gpg_e_keys:
-                missing_gpg = self.kstate.gpg.list_missing(gpg_e_keys, mode="--encrypt")
-                self.kstate.gpg.load(gpg_e_keys, mode="--encrypt")
+                self.kstate.gpg.load_decryption(gpg_e_keys)
             if gpg_a_keys:
-                missing_gpg = self.kstate.gpg.list_missing(gpg_a_keys, mode="--armor")
-                self.kstate.gpg.load(gpg_a_keys, mode="--armor")
+                missing_gpg = self.kstate.gpg.list_missing(gpg_a_keys, mode="--sign")
+                self.kstate.gpg.load(missing_gpg, mode="--sign")
+                self.kstate.gpg.load_decryption(gpg_a_keys)
 
             self.out.line()
         return 0

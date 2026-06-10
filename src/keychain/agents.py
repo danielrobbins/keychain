@@ -11,6 +11,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -695,6 +696,74 @@ class GpgAgent:
                 err = (r.stdout + r.stderr).strip()
                 out.warn(f"Error adding gpg key (error code: {r.returncode}; output: {err})")
                 return False
+        return True
+
+    def load_decryption(self, gpg_keys: list[str]) -> bool:
+        out = self.out
+        run_env = dict(self.k.env)
+        if bool(self.k.args.get_value("no_gui")) or not self.k.env.get("DISPLAY"):
+            run_env.pop("DISPLAY", None)
+        with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
+            plain = Path(td) / "plain"
+            cipher = Path(td) / "cipher.gpg"
+            plain.write_text("keychain\n", encoding="utf-8")
+            for k in filter(None, gpg_keys):
+                out.info(f"Adding gpg encryption key: {k}")
+                try:
+                    enc = subprocess.run(
+                        [
+                            self.k.gpg_prog,
+                            "--batch",
+                            "--yes",
+                            "--no-options",
+                            "--trust-model",
+                            "always",
+                            "--encrypt",
+                            "--recipient",
+                            k,
+                            "--output",
+                            str(cipher),
+                            str(plain),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        env=run_env,
+                        timeout=10,
+                        check=False,
+                    )
+                    dec = subprocess.run(
+                        [
+                            self.k.gpg_prog,
+                            "--batch",
+                            "--yes",
+                            "--no-autostart",
+                            "--no-options",
+                            "--use-agent",
+                            "--decrypt",
+                            "--output",
+                            os.devnull,
+                            str(cipher),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        env=run_env,
+                        timeout=30,
+                        check=False,
+                    )
+                except (FileNotFoundError, OSError):
+                    out.warn(f"{self.k.gpg_prog} not found")
+                    return False
+                except subprocess.TimeoutExpired:
+                    out.warn(f"Error adding gpg encryption key: {k} timed out")
+                    return False
+                if enc.returncode != 0 or dec.returncode != 0:
+                    err = (enc.stdout + enc.stderr + dec.stdout + dec.stderr).strip()
+                    out.warn(f"Error adding gpg encryption key (output: {err})")
+                    return False
         return True
 
 
