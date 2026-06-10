@@ -570,6 +570,29 @@ class GpgAgent:
         self.k = k
         self.out = out
 
+    def _gpg_env(self, *, tty: bool = False) -> dict[str, str]:
+        env = dict(self.k.env)
+        if tty and (gpg_tty := get_tty()):
+            env["GPG_TTY"] = gpg_tty
+        if bool(self.k.args.get_value("no_gui")) or not self.k.env.get("DISPLAY"):
+            env.pop("DISPLAY", None)
+        return env
+
+    def _run_gpg(
+        self, args: list[str], *, env: dict[str, str] | None = None, input_: str = "", timeout: int | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [self.k.gpg_prog, *args],
+            input=input_,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=self._gpg_env() if env is None else env,
+            timeout=timeout,
+            check=False,
+        )
+
     # ---- lifecycle ---------------------------------------------------
 
     def start(self, ssh_support: bool) -> SshAgentRef | None:
@@ -656,23 +679,12 @@ class GpgAgent:
 
     def load(self, gpg_keys: list[str], mode: str = "--sign") -> bool:
         out = self.out
-        extra_env: dict[str, str] = {}
-        tty = get_tty()
-        if tty:
-            extra_env["GPG_TTY"] = tty
-        drop_display = bool(self.k.args.get_value("no_gui")) or not self.k.env.get("DISPLAY")
+        run_env = self._gpg_env(tty=True)
         for k in filter(None, gpg_keys):
             out.info(f"Adding gpg key: {k}")
-            # util.run() copies os.environ then layers `env` on top; an empty
-            # value here doesn't unset, so do the unset on our local copy.
-            run_env = dict(self.k.env)
-            run_env.update(extra_env)
-            if drop_display:
-                run_env.pop("DISPLAY", None)
             try:
-                r = subprocess.run(
+                r = self._run_gpg(
                     [
-                        self.k.gpg_prog,
                         "--no-autostart",
                         "--no-options",
                         "--use-agent",
@@ -681,13 +693,7 @@ class GpgAgent:
                         k,
                         "-o-",
                     ],
-                    input="",
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
                     env=run_env,
-                    check=False,
                 )
             except (FileNotFoundError, OSError):
                 out.warn(f"{self.k.gpg_prog} not found")
@@ -700,9 +706,7 @@ class GpgAgent:
 
     def load_decryption(self, gpg_keys: list[str]) -> bool:
         out = self.out
-        run_env = dict(self.k.env)
-        if bool(self.k.args.get_value("no_gui")) or not self.k.env.get("DISPLAY"):
-            run_env.pop("DISPLAY", None)
+        run_env = self._gpg_env()
         with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
             plain = Path(td) / "plain"
             cipher = Path(td) / "cipher.gpg"
@@ -710,9 +714,8 @@ class GpgAgent:
             for k in filter(None, gpg_keys):
                 out.info(f"Adding gpg encryption key: {k}")
                 try:
-                    enc = subprocess.run(
+                    enc = self._run_gpg(
                         [
-                            self.k.gpg_prog,
                             "--batch",
                             "--yes",
                             "--no-options",
@@ -725,17 +728,11 @@ class GpgAgent:
                             str(cipher),
                             str(plain),
                         ],
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
                         env=run_env,
                         timeout=10,
-                        check=False,
                     )
-                    dec = subprocess.run(
+                    dec = self._run_gpg(
                         [
-                            self.k.gpg_prog,
                             "--batch",
                             "--yes",
                             "--no-autostart",
@@ -746,13 +743,8 @@ class GpgAgent:
                             os.devnull,
                             str(cipher),
                         ],
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
                         env=run_env,
                         timeout=30,
-                        check=False,
                     )
                 except (FileNotFoundError, OSError):
                     out.warn(f"{self.k.gpg_prog} not found")
