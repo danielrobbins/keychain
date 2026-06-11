@@ -164,3 +164,66 @@ jobs:
           python -m pip install -e '.[dev]'
       - name: pytest
         run: python -m pytest -v --tb=short --cov=src/keychain --cov-branch --cov-report=term-missing:skip-covered
+
+  # -------------------------------------------------------------------------
+  # Synthetic aggregate check for branch/ruleset protection.
+  #
+  # GitHub branch rules can require this single stable check instead of every
+  # matrix expansion above. Keep this job last and include every CI job in
+  # ``needs`` so a green ``ci-passing`` means the relevant CI tier passed.
+  # -------------------------------------------------------------------------
+  ci-passing:
+    name: ci-passing
+    if: ${{ always() }}
+    needs:
+      - static-analysis
+      - test-fast
+      - test-rocky8-py39
+      - test-full-sweep
+    runs-on: ubuntu-latest
+    env:
+      STATIC_ANALYSIS_RESULT: ${{ needs.static-analysis.result }}
+      TEST_FAST_RESULT: ${{ needs.test-fast.result }}
+      TEST_ROCKY8_RESULT: ${{ needs.test-rocky8-py39.result }}
+      TEST_FULL_SWEEP_RESULT: ${{ needs.test-full-sweep.result }}
+      TEST_FULL_SWEEP_REQUIRED: >-
+        ${{
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        }}
+    steps:
+      - name: Verify aggregate CI status
+        run: |
+          echo "static-analysis: ${STATIC_ANALYSIS_RESULT}"
+          echo "test-fast: ${TEST_FAST_RESULT}"
+          echo "test-rocky8-py39: ${TEST_ROCKY8_RESULT}"
+          echo "test-full-sweep: ${TEST_FULL_SWEEP_RESULT} (required: ${TEST_FULL_SWEEP_REQUIRED})"
+
+          failed=0
+
+          for result in \
+            "${STATIC_ANALYSIS_RESULT}" \
+            "${TEST_FAST_RESULT}" \
+            "${TEST_ROCKY8_RESULT}"
+          do
+            if [ "${result}" != "success" ]; then
+              failed=1
+            fi
+          done
+
+          if [ "${TEST_FULL_SWEEP_REQUIRED}" = "true" ]; then
+            if [ "${TEST_FULL_SWEEP_RESULT}" != "success" ]; then
+              failed=1
+            fi
+          elif [ "${TEST_FULL_SWEEP_RESULT}" != "success" ] && [ "${TEST_FULL_SWEEP_RESULT}" != "skipped" ]; then
+            failed=1
+          fi
+
+          if [ "${failed}" -ne 0 ]; then
+            echo "CI did not pass."
+            exit 1
+          fi
+
+          echo "CI passed."
