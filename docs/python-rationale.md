@@ -60,7 +60,7 @@ no package-manager ceremony, and no entry-point shim.
 Any rewrite that lost that property would have lost something real.
 
 Keychain 3 preserves it by shipping as a Python zipapp: a single executable
-`.pyz` file built from the `keychain` package and runnable on systems with
+`.pyz` file built from the `keychain` source tree and runnable on systems with
 Python 3.9 or newer. The release artifact can be renamed to `keychain`, marked
 executable, and dropped in `PATH` much like the historical shell script.
 
