@@ -50,15 +50,14 @@ jobs:
   # -------------------------------------------------------------------------
   # Fast tier — runs on every event (PR, push, cron, dispatch).
   #
-  # Floor + ceiling on Linux + Windows-on-ceiling. Rationale:
+  # Floor + ceiling on Linux + Windows/macOS-on-ceiling. Rationale:
   #   - 3.9 (floor) catches usage of features added later.
   #   - 3.13 (ceiling) catches deprecations and stdlib drift.
   #   - Windows × 3.13 catches POSIX-only assumptions; OS-portability
   #     bugs almost never differ between Python minor versions, so one
   #     Windows job is enough for PR-time feedback.
-  #   - macOS is intentionally omitted from this tier because it's a
-  #     POSIX system whose failures correlate ~100% with Linux. The
-  #     full sweep below restores macOS coverage on master.
+  #   - macOS × 3.13 catches Darwin-specific POSIX edges, especially
+  #     AF_UNIX socket path limits that Linux does not share.
   # -------------------------------------------------------------------------
   test-fast:
     runs-on: ${{ matrix.os }}
@@ -71,6 +70,8 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.13"
           - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
             python-version: "3.13"
     steps:
       - uses: actions/checkout@v4

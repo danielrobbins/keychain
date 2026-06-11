@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -111,19 +112,22 @@ def _kill_keychain_ssh_agents(home: Path) -> None:
 
 
 @pytest.fixture
-def gpg_home(tmp_path: Path):
-    home = tmp_path / "home"
+def gpg_home():
+    # macOS has a short AF_UNIX socket path limit, and gpg-agent creates
+    # sockets under GNUPGHOME. Pytest's default macOS tmp_path can be too long.
+    root = Path(tempfile.mkdtemp(prefix="kc-gpg-", dir="/tmp" if sys.platform == "darwin" else None))
+    home = root / "home"
     gnupg = home / ".gnupg"
     home.mkdir()
     gnupg.mkdir(mode=0o700)
 
-    passfile = tmp_path / "passphrase"
+    passfile = root / "passphrase"
     passfile.write_text("secret-pass", encoding="utf-8")
-    pinentry_log = tmp_path / "pinentry.log"
+    pinentry_log = root / "pinentry.log"
     pinentry_log.write_text("", encoding="utf-8")
-    pinentry = tmp_path / "pinentry-test"
+    pinentry = root / "pinentry-test"
     _write_fake_pinentry(pinentry, passfile, pinentry_log)
-    gpg_wrapper = tmp_path / "gpg-wrapper"
+    gpg_wrapper = root / "gpg-wrapper"
     _write_gpg_wrapper(gpg_wrapper, passfile)
     (gnupg / "gpg-agent.conf").write_text(
         f"pinentry-program {pinentry}\n"
@@ -150,6 +154,7 @@ def gpg_home(tmp_path: Path):
 
     _run(["gpgconf", "--kill", "gpg-agent"], env, timeout=10)
     _kill_keychain_ssh_agents(home)
+    shutil.rmtree(root, ignore_errors=True)
 
 
 def test_gpge_warms_encryption_subkey_for_decryption(gpg_home) -> None:
