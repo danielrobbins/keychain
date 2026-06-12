@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 from __future__ import annotations
 
+from pathlib import Path
+
 from scripts import build_doc_texts
 
 
@@ -49,3 +51,11 @@ Body.
 
     assert docs["all"] == ["topic:usage", "section:ACTIONS", "action:add"]
     assert docs["section"]["ACTIONS"]["description"] == ""
+
+
+def test_embedded_docs_cover_live_action_tree():
+    """Verify every live action/option has docs, and stale action/option docs fail."""
+    source = Path(__file__).resolve().parents[1] / "man" / "embedded-docs.txt"
+    docs = build_doc_texts.parse_tagged_text(source.read_text(encoding="utf-8"))
+
+    assert build_doc_texts.validate_action_tree_docs(docs) == []

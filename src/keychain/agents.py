@@ -271,6 +271,42 @@ class SshAgent:
         self._allow_gpg = False
         self._allow_forwarded = False
 
+    def _ssh_add_env(self) -> dict[str, str]:
+        """Return the environment used for ``ssh-add`` key-loading calls."""
+        args = self.keychain_state.args
+        base_env = getattr(self.keychain_state, "env", None)
+        run_env = self.env.overlay(base_env)
+
+        no_gui = bool(args.get_value("no_gui"))
+        askpass_program = args.get_value("ssh_askpass_program")
+        askpass_mode = args.get_value("ssh_askpass_mode") or "auto"
+        valid_modes = ("auto", "prefer", "force", "never")
+        if askpass_mode not in valid_modes:
+            raise KeychainError("[ssh.askpass] mode must be one of: auto, prefer, force, never")
+
+        if no_gui or askpass_mode == "never":
+            run_env.pop("DISPLAY", None)
+            run_env.pop("SSH_ASKPASS", None)
+            run_env.pop("SSH_ASKPASS_REQUIRE", None)
+            return run_env
+
+        if askpass_program:
+            run_env["SSH_ASKPASS"] = askpass_program
+
+        if askpass_mode != "auto":
+            if not run_env.get("SSH_ASKPASS"):
+                raise KeychainError(
+                    f"[ssh.askpass] mode={askpass_mode} requires [ssh.askpass] program or SSH_ASKPASS"
+                )
+            run_env["SSH_ASKPASS_REQUIRE"] = askpass_mode
+            return run_env
+
+        if not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
+            run_env.pop("DISPLAY", None)
+            run_env.pop("SSH_ASKPASS", None)
+            run_env.pop("SSH_ASKPASS_REQUIRE", None)
+        return run_env
+
     # ---- list / fingerprint probes -----------------------------------
 
     def list_loaded(self) -> tuple[list[str], int]:
@@ -534,10 +570,7 @@ class SshAgent:
             for key in missing:
                 out.line(f"   - {out.value(key)}")
         # ssh-add inherits stdio for passphrase prompts, so we cannot use util.run().
-        run_env = self.env.overlay()
-        if bool(a.get_value("no_gui")) or not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
-            run_env.pop("DISPLAY", None)
-            run_env.pop("SSH_ASKPASS", None)
+        run_env = self._ssh_add_env()
         cmd = ["ssh-add"]
         timeout = a.get_value("timeout")
         if timeout is not None:

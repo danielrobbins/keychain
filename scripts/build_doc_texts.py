@@ -117,6 +117,59 @@ def render_json(docs: dict[str, Any]) -> str:
     return json.dumps(docs, indent=2, ensure_ascii=False) + "\n"
 
 
+def _import_action_tree():
+    src = str(_ROOT / "src")
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from keychain.runtime.actions import ROOT_ACTION
+
+    return ROOT_ACTION
+
+
+def _walk_actions(action):
+    yield action
+    for child in action.sub_actions.values():
+        yield from _walk_actions(child)
+
+
+def _authored_option_tag(action, opt) -> str:
+    """Return the doc tag expected in embedded docs for *opt*."""
+    tag = opt.doc_tag
+    if action.fq_name == "global" and tag.startswith("option:"):
+        return f"global:{tag.split(':', 1)[1]}"
+    return tag
+
+
+def validate_action_tree_docs(docs: dict[str, Any]) -> list[str]:
+    """Return validation errors for action/option documentation drift."""
+    root = _import_action_tree()
+    authored_tags = set(docs.get("all", ()))
+    expected_action_tags: set[str] = set()
+    expected_option_tags: set[str] = set()
+
+    for action in _walk_actions(root):
+        if action is not root:
+            expected_action_tags.add(action.doc_tag)
+        for opt in action.options.values():
+            expected_option_tags.add(_authored_option_tag(action, opt))
+
+    authored_action_tags = {f"action:{name}" for name in docs.get("action", {})}
+    authored_option_tags = {f"option:{name}" for name in docs.get("option", {})}
+    authored_global_tags = {f"global:{name}" for name in docs.get("global", {})}
+    authored_option_surface_tags = authored_option_tags | authored_global_tags
+
+    errors: list[str] = []
+    for tag in sorted(expected_action_tags - authored_tags):
+        errors.append(f"missing action doc for live action: {tag}")
+    for tag in sorted(expected_option_tags - authored_tags):
+        errors.append(f"missing option doc for live option: {tag}")
+    for tag in sorted(authored_action_tags - expected_action_tags):
+        errors.append(f"stale action doc without live action: {tag}")
+    for tag in sorted(authored_option_surface_tags - expected_option_tags):
+        errors.append(f"stale option/global doc without live option: {tag}")
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the embedded docs JSON blob from tagged text.")
     parser.add_argument("--source", type=Path, default=_SOURCE)
@@ -124,7 +177,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="fail if OUTPUT is out of date")
     args = parser.parse_args(argv)
 
-    rendered = render_json(parse_tagged_text(args.source.read_text(encoding="utf-8")))
+    docs = parse_tagged_text(args.source.read_text(encoding="utf-8"))
+    validation_errors = validate_action_tree_docs(docs)
+    if validation_errors:
+        for error in validation_errors:
+            sys.stderr.write(f"{error}\n")
+        return 1
+
+    rendered = render_json(docs)
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.is_file() else ""
         if current != rendered:

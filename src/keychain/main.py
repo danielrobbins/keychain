@@ -2,7 +2,7 @@
 """Command-line entry point: argument parsing + thin coordinator.
 
 The user-visible interface is an action tree
-(``keychain {add,agent,list,wipe,forget,inspect,status,env,version,help}``).
+(``keychain {add,agent,list,wipe,forget,inspect,env,version,help}``).
 Legacy keychain 2.x flat-flag invocations (``keychain --stop all``,
 ``keychain --list``, plain ``keychain``) are translated to the new form
 by :mod:`keychain.compat` before parsing, so a single internal parser

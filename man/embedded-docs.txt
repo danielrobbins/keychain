@@ -121,7 +121,7 @@ load any keys; use ``add`` when you want prompt-and-load semantics.
 
 == @action agent stop: terminate ssh-agents (default: all in pidfile)
 
-@syntax keychain agent stop [--mine|--others]
+@syntax keychain agent stop [--mine|--others|--all]
 
 Terminate the ssh-agents recorded in the pidfile. Bare ``agent stop`` targets
 every recorded agent; ``--mine`` and ``--others`` narrow the kill list by owner
@@ -184,17 +184,6 @@ Print ``SSH_AUTH_SOCK`` and ``SSH_AGENT_PID`` from the best available source
 ``--target`` is an alias for ``--shell``; ``--json`` is shorthand for ``--shell
 json``.
 
-== @action status: One-screen agent summary (no side effects).
-
-@syntax keychain status [--json]
-
-Print a compact human-readable summary: which agent is reachable, where its
-socket is, how many keys are loaded, whether the env was sourced from the
-pidfile or inherited, and any health-check warnings. Read-only; safe to wire
-into shell prompts or motd snippets.
-
-``--json`` emits the same data as a JSON object.
-
 == @action inspect: Structured snapshot of every state probe.
 
 @syntax keychain inspect [KEYS...] [--json]
@@ -203,51 +192,6 @@ Run every state probe keychain would run during a real ``add`` (host detection,
 paths, perms, env-file, agent reachability, key list, extkey expansion, ...) and
 print the result -- without touching the agent, the pidfile, or the environment.
 Used for diagnosis and for CI integration tests.
-
-== @action config: Show or edit ~/.keychainrc preferences.
-
-@syntax keychain config <show|get KEY|set KEY VALUE|unset KEY|edit|path>
-
-Inspect or mutate the persistent preferences file. Path resolution:
-``$KEYCHAIN_CONFIG`` overrides; otherwise ``~/.keychainrc``. See ``keychain man
-topic:config`` for the full key schema and ``keychain man config.<key>`` for
-individual key documentation.
-
-== @action config show: list every set value
-
-@syntax keychain config show
-
-Print every explicitly set preference as ``section.key = value``.
-
-== @action config get: print one value
-
-@syntax keychain config get KEY
-
-Print one preference value. Exits with status 1 when the key is unset.
-
-== @action config set: set or replace one value
-
-@syntax keychain config set KEY VALUE
-
-Validate and write one preference value into the config file.
-
-== @action config unset: remove one value
-
-@syntax keychain config unset KEY
-
-Remove one preference from the config file.
-
-== @action config edit: open the file in $VISUAL/$EDITOR
-
-@syntax keychain config edit
-
-Open the active config file in ``$VISUAL`` or ``$EDITOR``.
-
-== @action config path: print the path of the file in use
-
-@syntax keychain config path
-
-Print the path of the active config file and exit.
 
 == @action version: Print version banner.
 
@@ -349,6 +293,39 @@ Pass ``-t MINUTES*60`` to ``ssh-add``: the key is forgotten by the agent after
 MIN minutes of inactivity. Common settings: 480 (8h, a workday) or 60 (high-
 security). A common config-file preference.
 
+== @option lockwait: max seconds to wait for the keychain lockfile
+
+Maximum time (in seconds) to wait for keychain's own cooperative lockfile when
+another keychain process is mutating the same agent state. Default 5 seconds.
+Set to 0 to fail immediately if the lock is held.
+
+== @option agents: (hidden) deprecated agent selector
+
+Legacy keychain 2.x compatibility option. It is accepted for compatibility and
+ignored by keychain 3.
+
+== @option inherit: (hidden) deprecated inheritance selector
+
+Legacy keychain 2.x compatibility option. It is accepted for compatibility and
+ignored by keychain 3; use ``--ssh-allow-forwarded`` or ``--noinherit`` when
+you need explicit SSH agent inheritance behavior.
+
+== @option confhost: (hidden) deprecated host config loader
+
+Legacy keychain 2.x compatibility option. Use ``--extended host:HOST`` instead.
+
+== @option attempts: (hidden) deprecated retry count
+
+Legacy keychain 2.x compatibility option. It is accepted for compatibility and
+ignored by keychain 3.
+
+== @option no-lock: skip the keychain lockfile
+
+Skip the cooperative lockfile entirely. Use only in controlled environments (CI
+runners that already serialise externally) where the lock-wait overhead is
+wasteful and simultaneous mutation is impossible by construction. ``--nolock``
+is the legacy spelling.
+
 == @option ignore-missing: skip keys that don't exist
 
 For each KEY positional that doesn't resolve to an existing file (or known GPG
@@ -430,6 +407,12 @@ users' agents.
 Inverse of ``--mine``: terminate only agents whose owner UID does **not** match
 the calling user. Rare; typically a maintenance tool.
 
+== @option all: terminate all matching agents
+
+Terminate both this user's agents and agents owned by others when the caller has
+permission. This is the broadest ``agent stop`` target and should be used with
+care.
+
 == @option list-json: emit machine-readable JSON on stdout
 
 Emit a JSON array of key records on stdout.
@@ -454,10 +437,6 @@ One of ``env`` / ``sh`` / ``csh`` / ``fish`` / ``json`` / ``eval`` /
 == @option env-json: shorthand for --shell json
 
 Equivalent to ``--shell json``.
-
-== @option status-json: emit JSON
-
-Emit the status payload as JSON on stdout.
 
 == @option inspect-json: emit JSON
 
@@ -550,7 +529,13 @@ Override the hostname used in pidfile names. Pidfiles are named ``HOST-sh`` /
 each get their own state. By default keychain probes ``hostname(1)``,
 ``$HOSTNAME``, then ``uname -n``.
 
-%% @config agent-env ssh-args: extra args passed to spawned ``ssh-agent``
+== @global pid-formats: (hidden) pidfile shell formats to emit
+
+Control which shell pidfile formats keychain writes under the state directory.
+The default is ``sh``. This is primarily an internal compatibility setting; most
+users should not need to change it.
+
+== @config agent.env.ssh_args: extra args passed to spawned ``ssh-agent``
 
 Append extra arguments when keychain spawns ``ssh-agent``.
 
@@ -567,7 +552,7 @@ flags, so use it only for niche cases keychain does not model directly.
 If ``KEYCHAIN_SSH_AGENT_ARGS`` is already set in the outer environment, that
 environment value wins.
 
-%% @config agent-env gpg-args: extra args passed to spawned ``gpg-agent``
+== @config agent.env.gpg_args: extra args passed to spawned ``gpg-agent``
 
 Append extra arguments when keychain spawns ``gpg-agent``.
 
@@ -584,18 +569,50 @@ flags, so use it only for niche cases keychain does not model directly.
 If ``KEYCHAIN_GPG_AGENT_ARGS`` is already set in the outer environment, that
 environment value wins.
 
-== @global lockwait: max seconds to wait for the keychain lockfile
+== @config ssh.askpass.program: helper program used by ``ssh-add``
 
-Maximum time (in seconds) to wait for keychain's own cooperative lockfile when
-another keychain process is mutating the same agent state. Default 5 seconds.
-Set to 0 to fail immediately if the lock is held.
+Set the ``SSH_ASKPASS`` helper used when keychain loads SSH keys with
+``ssh-add``. This is useful when a password manager or another trusted helper
+can supply the private-key passphrase.
 
-== @global no-lock: skip the keychain lockfile
+Configure it in ``~/.keychainrc``:
 
-Skip the cooperative lockfile entirely. Use only in controlled environments (CI
-runners that already serialise externally) where the lock-wait overhead is
-wasteful and simultaneous mutation is impossible by construction. ``--nolock``
-is the legacy spelling.
+```
+[ssh.askpass]
+program = /usr/local/bin/op-askpass
+mode = force
+```
+
+The program must be an executable path. Keychain passes it to ``ssh-add`` as
+``SSH_ASKPASS`` only for key-loading calls; it is not used when spawning the
+``ssh-agent`` daemon.
+
+See ``keychain man topic:password-managers`` for a complete example.
+
+== @config ssh.askpass.mode: when ``ssh-add`` should use askpass
+
+Control how strongly keychain asks ``ssh-add`` to use the configured askpass
+helper. Values:
+
+    auto      Use normal OpenSSH behavior. Askpass is used only when the
+              environment supports it.
+    prefer    Prefer askpass over a TTY prompt when OpenSSH supports it.
+    force     Force askpass. This is usually the right mode for password
+              manager helpers in shells where a TTY prompt is not desired.
+    never     Disable askpass for key-loading calls.
+
+Configure it in ``~/.keychainrc``:
+
+```
+[ssh.askpass]
+program = /usr/local/bin/op-askpass
+mode = force
+```
+
+Internally, ``mode`` maps to OpenSSH's ``SSH_ASKPASS_REQUIRE`` environment
+variable. ``auto`` leaves that variable unset.
+
+See ``keychain man topic:password-managers`` for a complete example.
 
 == @global explain: explain this invocation instead of running it
 
@@ -606,23 +623,6 @@ they appear.
 Bespoke documentation for the exact invocation in front of you. Pairs well with
 command-line history: append ``--explain`` to any prior invocation to read about
 it without rerunning it.
-
-== @global agents: (hidden) deprecated legacy agent selector
-
-Deprecated legacy flag. Accepted for old dotfiles, then ignored with a warning.
-
-== @global inherit: (hidden) deprecated legacy inherit selector
-
-Deprecated legacy flag. Accepted for old dotfiles, then ignored with a warning.
-
-== @global confhost: (hidden) deprecated legacy host expander
-
-Deprecated legacy flag. Accepted so the runtime can emit the modern replacement
-hint.
-
-== @global attempts: (hidden) deprecated legacy retry count
-
-Deprecated legacy flag. Accepted for old dotfiles, then ignored with a warning.
 
 == @topic security: Security model
 
@@ -831,61 +831,71 @@ bare tokens still default to ``add`` for 2.x compatibility, but if none of the
 requested keys resolve, keychain refuses to start an agent and exits with an
 error instead of preserving the old side effect.
 
-== @topic windows: Windows-specific notes
-
-Keychain runs on Windows via ``keychain.pyz`` plus the Python launcher
-(``py.exe``). What you get:
-
-* The full action surface (``add``, ``agent start``, ``list``, ``status``,
-  ``inspect``, ``env``, ...). The embedded documentation system (``--help``,
-  ``man``, ``--explain``) works identically to the Linux build.
-* Native Win32 support requires the OpenSSH-for-Windows ssh-agent service.
-  Pageant (PuTTY) is **not** supported.
-* ``--systemd`` is a no-op on Windows.
-* The pager defaults to off (Windows ``more`` doesn't handle ANSI cleanly). Set
-  ``$PAGER`` to ``less`` / ``moar`` / ``bat`` to opt in.
-
-**fork-less environment.** ssh-agent is spawned via ``CreateProcess`` rather
-than ``fork``+``exec``; the pidfile records the OpenSSH service socket path
-instead of a UNIX-domain socket.
-
-See ``keychain man topic:agents`` for the discovery order; on Windows the
-OpenSSH service socket is probed first.
-
 == @topic config: ~/.keychainrc preference file
 
-INI-style preferences file read at startup. Resolution order:
+``~/.keychainrc`` is an INI-style preferences file read at keychain startup. It
+is the right place for settings that describe how you normally want keychain to
+behave: where pidfiles live, how long SSH keys should remain cached, whether
+``ssh-add`` should use an askpass helper, and other per-user defaults.
+
+Command-line flags still win for one-off invocations. Environment variables are
+accepted only when ``--allow-env`` / ``-E`` is used, so normal interactive
+configuration should generally live in ``~/.keychainrc`` instead of shell
+startup exports.
+
+Resolution order:
 
     1. Explicit CLI flag                    (per-invocation)
     2. ``$KEYCHAIN_*`` environment vars     (per-shell)
     3. ``~/.keychainrc``                    (per-user)
     4. Built-in defaults                    (fallback)
 
-Sections (3.0 layout, conceptual grouping):
-
-    [agent]        agent lifecycle / behaviour: ``noask``,
-                   ``quick``, ``confirm``, ``timeout``,
-                   ``systemd``, ``ssh_allow_gpg``,
-                   ``ssh_spawn_gpg``, ``ssh_allow_forwarded``,
-                   ``noinherit``, ``ssh_agent_socket``,
-                   ``gpg2``, ``clear``
-    [agent.env]    extra arguments for spawned agents:
-             ``ssh_args``, ``gpg_args``.
-             ``ssh_args`` / ``gpg_args`` are exported
-             as ``KEYCHAIN_SSH_AGENT_ARGS`` /
-             ``KEYCHAIN_GPG_AGENT_ARGS`` for the agent
-             process to consume (env wins if already set)
-    [keys]         key-resolution: ``confallhosts``,
-                   ``extended``, ``ignore_missing``
-    [paths]        state location: ``dir``, ``host``,
-                   ``absolute``
-    [output]       rendering: ``quiet``, ``debug``, ``nocolor``,
-                   ``theme``, ``nogui``, ``evalopt``
-    [lock]         cooperative locking: ``nolock``, ``lockwait``
-
 Boolean values accept ``true`` / ``false`` / ``yes`` / ``no`` / ``on`` / ``off``
 / ``1`` / ``0``. Integers are decimal. Strings are passed verbatim.
 
-See ``keychain config show`` for the live values, or ``keychain man
-config.<key>`` for one key. The full key list is ``keychain man --list | grep
-^config.``.
+== @topic password-managers: using password managers with SSH keys
+
+Modern password managers can help unlock private SSH keys without changing the
+rest of the keychain workflow. There are two common models:
+
+1. Let the password manager act as the SSH agent. This keeps signing inside the
+   password manager, but keychain no longer controls the normal ``ssh-agent``
+   cache lifetime.
+2. Use the password manager only as an ``SSH_ASKPASS`` provider. The password
+   manager supplies the passphrase once, then ``ssh-add`` loads the key into
+   the regular ``ssh-agent`` that keychain manages.
+
+For users who want keychain's traditional long-lived ``ssh-agent`` cache, the
+second model is usually the better fit.
+
+Example helper for 1Password:
+
+```
+#!/bin/sh
+exec op read "op://Private/id_ed25519/passphrase"
+```
+
+Save that as an executable file, for example
+``~/.local/bin/op-ssh-askpass``:
+
+```
+chmod 700 ~/.local/bin/op-ssh-askpass
+```
+
+Then configure keychain:
+
+```
+[ssh.askpass]
+program = /home/you/.local/bin/op-ssh-askpass
+mode = force
+```
+
+Now a normal keychain invocation can load the key:
+
+```
+eval "$(keychain add --eval ~/.ssh/id_ed25519)"
+```
+
+In this setup, 1Password is used only to answer the passphrase prompt. After
+the key is loaded, the ordinary ``ssh-agent`` performs SSH signatures until the
+agent exits or the key lifetime expires.

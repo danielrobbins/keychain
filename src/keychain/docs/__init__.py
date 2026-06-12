@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+from collections import OrderedDict
 from functools import cache
 from importlib.resources import files
 from typing import Any
@@ -30,7 +31,57 @@ def _entry(tag: str) -> dict[str, str]:
     section, _, key = tag.partition(":")
     if not section or not key:
         return {}
-    return _payload().get(section, {}).get(key, {})
+    entry = _payload().get(section, {}).get(key, {})
+    if entry:
+        return entry
+    if section == "config":
+        return _generated_config_entries().get(key, {})
+    return {}
+
+
+@cache
+def _generated_config_entries() -> dict[str, dict[str, str]]:
+    """Return config-key docs generated from the option tree."""
+    from ..runtime.actions import ROOT_ACTION
+
+    entries: dict[str, dict[str, str]] = {}
+
+    def _walk(action) -> None:
+        for opt in action.options.values():
+            if not opt.config_section:
+                continue
+            key = f"{opt.config_section}.{opt.effective_config_key}"
+            if key in entries:
+                continue
+            cli_text = f"\n\nCommand-line option: ``{opt.option_formats}``." if opt.option else ""
+            entries[key] = {
+                "short_help": opt.short_help,
+                "syntax": "",
+                "description": (
+                    f"Config key: ``[{opt.config_section}] {opt.effective_config_key}``."
+                    f"{cli_text}"
+                ),
+                "section": opt.config_section,
+                "key": opt.effective_config_key,
+                "option_formats": opt.option_formats if opt.option else "",
+            }
+        for child in action.sub_actions.values():
+            _walk(child)
+
+    _walk(ROOT_ACTION)
+    return entries
+
+
+def _all_tags() -> list[str]:
+    """Return authored tags plus generated config-key tags."""
+    tags = list(_payload().get("all", ()))
+    seen = set(tags)
+    for key in _generated_config_entries():
+        tag = f"config:{key}"
+        if tag not in seen:
+            tags.append(tag)
+            seen.add(tag)
+    return tags
 
 
 def _resolve_tags(topics: list[str]) -> list[str]:
@@ -53,12 +104,25 @@ def _resolve_tags(topics: list[str]) -> list[str]:
         if token == "keychain":
             tags.append("tool:keychain")
             continue
-        for section in ("topic", "option", "global", "action"):
+        for section in ("topic", "option", "global", "action", "config"):
             if token in data.get(section, {}):
                 tags.append(f"{section}:{token}")
                 break
+            if section == "config" and token in _generated_config_entries():
+                tags.append(f"config:{token}")
+                break
         else:
             raise KeychainError(f"man: unknown topic: {token}")
+    return tags
+
+
+def _full_manual_tags() -> list[str]:
+    """Return top-level manual tags without duplicate option/config catalogs."""
+    tags: list[str] = []
+    for tag in _payload().get("all", ()):
+        if tag.startswith(("option:", "config:")):
+            continue
+        tags.append(tag)
     return tags
 
 
@@ -76,6 +140,8 @@ def _authored_label(tag: str) -> str:
         return tag.split(":", 1)[1]
     if tag.startswith("topic:"):
         return tag
+    if tag.startswith("config:"):
+        return tag
     if tag.startswith("global:"):
         key = tag.split(":", 1)[1]
         for opt in ROOT_ACTION.options.values():
@@ -88,7 +154,9 @@ def _authored_label(tag: str) -> str:
             return action.command
         for opt in action.options.values():
             if opt.doc_tag == tag:
-                return opt.option_formats
+                if action == ROOT_ACTION:
+                    return opt.option_formats
+                return f"{action.command} {opt.option_formats}"
         for child in action.sub_actions.values():
             found = _walk(child)
             if found is not None:
@@ -113,6 +181,12 @@ def _render_manual_section(tag: str, width: int, out) -> str:
     if not entry:
         return ""
 
+    if tag.startswith("action:") and tag != "action:global":
+        return _render_action_section(tag, entry, width, out)
+
+    if _is_tagged_paragraph(tag):
+        return _render_tagged_paragraph(tag, entry, width, out)
+
     heading = _authored_label(tag)
     lines: list[str] = [str(out.head(heading))]
     if tag.startswith("section:"):
@@ -128,7 +202,214 @@ def _render_manual_section(tag: str, width: int, out) -> str:
     if body:
         lines.append("")
         lines.extend(body)
+    if tag == "topic:config":
+        config_reference = _render_config_reference(out, width)
+        if config_reference:
+            lines.append("")
+            lines.extend(config_reference)
     return "\n".join(lines).rstrip()
+
+
+def _is_tagged_paragraph(tag: str) -> bool:
+    return tag.startswith(("option:", "global:", "config:"))
+
+
+def _action_for_tag(tag: str):
+    from ..runtime.actions import ROOT_ACTION
+
+    def _walk(action):
+        if action.doc_tag == tag:
+            return action
+        for child in action.sub_actions.values():
+            found = _walk(child)
+            if found is not None:
+                return found
+        return None
+
+    return _walk(ROOT_ACTION)
+
+
+def _render_action_section(tag: str, entry: dict[str, str], width: int, out) -> str:
+    """Render actions as man-page tagged paragraphs with local options below."""
+    label_indent = "    "
+    body_indent = "        "
+    option_indent = "            "
+    option_body_indent = "                "
+    body_width = max(40, width - len(body_indent))
+    option_width = max(40, width - len(option_body_indent))
+    action = _action_for_tag(tag)
+    label = action.command if action is not None else _authored_label(tag)
+    lines: list[str] = [f"{label_indent}{out.head(label)}"]
+
+    short_help = entry.get("short_help", "")
+    if short_help:
+        lines.extend(_indent_lines(out.wrap_doc(short_help, body_width) or [out.format_doc(short_help)], body_indent))
+
+    syntax = _syntax_for(tag)
+    if syntax:
+        if len(lines) > 1:
+            lines.append("")
+        syntax_lines = out.wrap_doc(f"Syntax: {syntax}", body_width) or [out.format_doc(f"Syntax: {syntax}")]
+        lines.extend(_indent_lines(syntax_lines, body_indent))
+
+    body = _render_manual_text(entry.get("description", ""), body_width, out)
+    if body:
+        if len(lines) > 1:
+            lines.append("")
+        lines.extend(_indent_lines(body, body_indent))
+
+    action_options = _visible_action_doc_options(action)
+    if action_options:
+        if len(lines) > 1:
+            lines.append("")
+        lines.append(f"{body_indent}{out.head('Options:')}")
+        for opt in action_options:
+            lines.append("")
+            lines.extend(_render_action_option(opt, option_width, option_indent, option_body_indent, out))
+
+    return "\n".join(lines).rstrip()
+
+
+def _visible_action_doc_options(action) -> list[Any]:
+    if action is None:
+        return []
+    seen: set[str] = set()
+    options: list[Any] = []
+    for opt in action.options.values():
+        if not opt.option or not opt.doc_tag:
+            continue
+        dedupe_key = opt.doc_tag
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        options.append(opt)
+    return options
+
+
+def _render_action_option(opt, width: int, label_indent: str, body_indent: str, out) -> list[str]:
+    entry = _entry(opt.doc_tag or "")
+    lines: list[str] = [f"{label_indent}{out.head(opt.option_formats)}"]
+
+    short_help = entry.get("short_help", "") or opt.short_help
+    if short_help:
+        lines.extend(_indent_lines(out.wrap_doc(short_help, width) or [out.format_doc(short_help)], body_indent))
+
+    body = _render_manual_text(entry.get("description", "") or opt.doc_description, width, out)
+    if opt.config_section:
+        body = _strip_config_boilerplate(body)
+        config_note = f"Config key: [{opt.config_section}] {opt.effective_config_key}."
+        body = (out.wrap_doc(config_note, width) or [out.format_doc(config_note)]) + ([""] + body if body else [])
+    if body:
+        if len(lines) > 1:
+            lines.append("")
+        lines.extend(_indent_lines(body, body_indent))
+
+    return lines
+
+
+def _render_tagged_paragraph(tag: str, entry: dict[str, str], width: int, out) -> str:
+    """Render option-like docs using traditional man-page indentation."""
+    label_indent = "    "
+    body_indent = "        "
+    body_width = max(40, width - len(body_indent))
+    lines: list[str] = [f"{label_indent}{out.head(_authored_label(tag))}"]
+
+    short_help = entry.get("short_help", "")
+    if short_help:
+        lines.extend(_indent_lines(out.wrap_doc(short_help, body_width) or [out.format_doc(short_help)], body_indent))
+
+    syntax = _syntax_for(tag)
+    if syntax:
+        if len(lines) > 1:
+            lines.append("")
+        syntax_lines = out.wrap_doc(f"Syntax: {syntax}", body_width) or [out.format_doc(f"Syntax: {syntax}")]
+        lines.extend(_indent_lines(syntax_lines, body_indent))
+
+    body = _render_manual_text(entry.get("description", ""), body_width, out)
+    if body:
+        if len(lines) > 1:
+            lines.append("")
+        lines.extend(_indent_lines(body, body_indent))
+
+    return "\n".join(lines).rstrip()
+
+
+def _render_config_reference(out, width: int) -> list[str]:
+    """Render a generated .keychainrc key reference from parser metadata."""
+    groups: OrderedDict[str, list[tuple[str, dict[str, str]]]] = OrderedDict()
+    for full_key, generated in _generated_config_entries().items():
+        section, _, key = full_key.rpartition(".")
+        groups.setdefault(section, []).append((key, generated))
+
+    lines = ["Configuration reference:", ""]
+    for section in sorted(groups):
+        rows = sorted(groups[section], key=lambda row: row[0])
+        lines.append(f"    [{section}]")
+        lines.append("")
+        for key, generated in rows:
+            tag = f"config:{section}.{key}"
+            entry = _entry(tag) or generated
+            option_formats = generated.get("option_formats", "")
+            short_help = entry.get("short_help", "")
+            canonical = f"{key} = VALUE"
+            lines.append(f"      {canonical}")
+            if short_help:
+                lines.extend(
+                    _indent_lines(
+                        out.wrap_doc(short_help, max(40, width - 8)) or [out.format_doc(short_help)],
+                        "        ",
+                    )
+                )
+            if option_formats:
+                text = f"Same setting as the ``{option_formats}`` command-line option."
+                lines.extend(_indent_lines(out.wrap_doc(text, max(40, width - 8)) or [out.format_doc(text)], "        "))
+            else:
+                body = _render_manual_text(entry.get("description", ""), max(40, width - 8), out)
+                body = _strip_config_boilerplate(body)
+                if body:
+                    lines.extend(_indent_lines(body, "        "))
+            lines.append("")
+
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _indent_lines(lines: list[str], prefix: str) -> list[str]:
+    return [prefix + line if line else "" for line in lines]
+
+
+def _strip_config_boilerplate(lines: list[str]) -> list[str]:
+    """Remove repeated boilerplate from config-only inline docs."""
+    out: list[str] = []
+    skip_fenced = False
+    skip_next_blank = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("Config key:"):
+            skip_next_blank = True
+            continue
+        if stripped.startswith("Configure it in"):
+            skip_fenced = True
+            skip_next_blank = True
+            continue
+        if skip_fenced:
+            if stripped == "```":
+                skip_fenced = False
+            continue
+        if stripped.startswith("See keychain man topic:password-managers"):
+            skip_next_blank = True
+            continue
+        if skip_next_blank and not stripped:
+            skip_next_blank = False
+            continue
+        skip_next_blank = False
+        out.append(line)
+    while out and not out[0].strip():
+        out.pop(0)
+    while out and not out[-1].strip():
+        out.pop()
+    return out
 
 
 def _render_manual_text(text: str, width: int, out) -> list[str]:
@@ -294,7 +575,7 @@ def _classify_positional(action_name: str, value: str) -> tuple[str, str]:
 def run_man(args, out) -> int:
     if bool(args.get_value("list")):
         rows = []
-        for tag in _payload().get("all", ()):
+        for tag in _all_tags():
             if tag.startswith("section:"):
                 continue
             entry = _entry(tag)
@@ -304,7 +585,7 @@ def run_man(args, out) -> int:
 
     topics = list(args.get_value("topics") or [])
     width = int(args.get_value("width") or shutil.get_terminal_size((96, 24)).columns)
-    tags = _resolve_tags(topics) if topics else list(_payload().get("all", ()))
+    tags = _resolve_tags(topics) if topics else _full_manual_tags()
     sections = [_render_manual_section(tag, width, out) for tag in tags]
     out.write("\n\n".join(section for section in sections if section) + "\n")
     return 0

@@ -116,17 +116,28 @@ class TestListSelection:
 
 
 class TestSshAgentLoadOutput:
-    def _agent(self, monkeypatch):
+    def _agent(self, monkeypatch, *, values=None, env=None, patch_run=True):
+        values = values or {}
+
         def get_value(name):
-            return {"no_gui": True, "confirm": False, "timeout": None}.get(name, False)
+            return {
+                "no_gui": True,
+                "confirm": False,
+                "timeout": None,
+                "ssh_askpass_program": None,
+                "ssh_askpass_mode": "auto",
+                **values,
+            }.get(name, False)
 
         kstate = SimpleNamespace(
             find_active_agent_env=SshAgentRef(sock="/tmp/agent.sock", pid="1111"),
             args=SimpleNamespace(get_value=get_value),
+            env=env or {},
         )
         agent = agents.SshAgent(kstate, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
         monkeypatch.setattr(agent, "envcheck", lambda *_args, **_kwargs: agent.env)
-        monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+        if patch_run:
+            monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
         return agent
 
     def test_multiple_loaded_keys_render_as_lists(self, monkeypatch, capsys):
@@ -148,6 +159,56 @@ class TestSshAgentLoadOutput:
         assert "Adding 1 ssh key(s): /home/user/.ssh/key1" in err
         assert "ssh-add: Identities added" not in err
         assert "   - /home/user/.ssh/key1" not in err
+
+    def test_configured_askpass_is_passed_to_ssh_add(self, monkeypatch):
+        """Verify [ssh.askpass] controls the ssh-add environment."""
+        seen = {}
+
+        def fake_run(_cmd, *, env, check):
+            seen.update(env)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(agents.subprocess, "run", fake_run)
+        agent = self._agent(
+            monkeypatch,
+            values={
+                "no_gui": False,
+                "ssh_askpass_program": "/usr/local/bin/op-askpass",
+                "ssh_askpass_mode": "force",
+            },
+            patch_run=False,
+        )
+
+        assert agent.load(["/home/user/.ssh/key1"]) is True
+        assert seen["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+        assert seen["SSH_AGENT_PID"] == "1111"
+        assert seen["SSH_ASKPASS"] == "/usr/local/bin/op-askpass"
+        assert seen["SSH_ASKPASS_REQUIRE"] == "force"
+
+    def test_askpass_never_removes_ambient_gui_prompting(self, monkeypatch):
+        """Verify mode=never strips askpass variables even if the shell provided them."""
+        seen = {}
+
+        def fake_run(_cmd, *, env, check):
+            seen.update(env)
+            return SimpleNamespace(returncode=0)
+
+        monkeypatch.setattr(agents.subprocess, "run", fake_run)
+        agent = self._agent(
+            monkeypatch,
+            values={"no_gui": False, "ssh_askpass_mode": "never"},
+            env={
+                "DISPLAY": ":0",
+                "SSH_ASKPASS": "/bin/askpass",
+                "SSH_ASKPASS_REQUIRE": "force",
+            },
+            patch_run=False,
+        )
+
+        assert agent.load(["/home/user/.ssh/key1"]) is True
+        assert "DISPLAY" not in seen
+        assert "SSH_ASKPASS" not in seen
+        assert "SSH_ASKPASS_REQUIRE" not in seen
 
 
 # ---------------------------------------------------------------------------

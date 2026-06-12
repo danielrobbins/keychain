@@ -60,7 +60,15 @@ class TestHelpVersionOutput:
         assert ex.value.code == 0
         out = capsys.readouterr().out
         assert "See ``keychain config show``" not in out
-        assert "[keys]        key-resolution:" in out or "[keys]         key-resolution:" in out
+        assert "[keys]        key-resolution:" not in out
+        assert "[keys]         key-resolution:" not in out
+        assert "Configuration reference:" in out
+        assert "[ssh.askpass]" in out
+        assert "program = VALUE" in out
+        assert "Set the SSH_ASKPASS helper" in out
+        assert "[agent.env]" in out
+        assert "ssh_args = VALUE" in out
+        assert "Same setting as the --ssh-agent-args command-line option." in out
         assert (
             "[keys]         key-resolution: ``confallhosts``,\n    [keys]         key-resolution: ``confallhosts``,"
             not in out
@@ -72,11 +80,30 @@ class TestHelpVersionOutput:
         assert ex.value.code == 0
         out = capsys.readouterr().out
         assert "keychain add" in out
-        assert "keychain config" in out
+        assert "topic:config" in out
+        assert "keychain config" not in out
+        assert "config:output.quiet" in out
+        assert "config:agent.timeout" in out
+        assert "config:paths.dir" in out
+        assert "config:keys.ignore_missing" in out
+        assert "config:ssh.askpass.program" in out
+        assert "config:ssh.askpass.mode" in out
         assert "action:config" not in out
         assert "option:status-json" not in out
         assert "ACTIONS" not in out
         assert "--quiet" in out
+        assert "keychain agent stop --mine" in out
+        assert "keychain wipe --gpg" in out
+        assert "keychain list --json" in out
+
+    def test_cli_man_generated_config_key_renders(self, capsys):
+        with pytest.raises(SystemExit) as ex:
+            main.main(["man", "config:agent.timeout"])
+        assert ex.value.code == 0
+        out = capsys.readouterr().out
+        assert "config:agent.timeout" in out
+        assert "Config key: [agent] timeout" in out
+        assert "Command-line option: --timeout" in out
 
     def test_cli_man_full_renders_section_markers(self, capsys):
         with pytest.raises(SystemExit) as ex:
@@ -84,7 +111,36 @@ class TestHelpVersionOutput:
         assert ex.value.code == 0
         out = capsys.readouterr().out
         assert "ACTIONS" in out
-        assert "keychain add" in out
+        assert "    keychain add\n        Add keys to the agent" in out
+        assert "    keychain agent stop\n        terminate ssh-agents" in out
+        assert "            --mine\n                terminate only this UID's agents" in out
+        assert "    keychain list\n        List keys currently held by ssh-agent" in out
+        assert "            --json\n                emit machine-readable JSON on stdout" in out
+        assert "    keychain agent stop --mine\n        terminate only this UID's agents" not in out
+        assert "keychain status" not in out
+        assert "status payload" not in out
+
+    def test_cli_man_action_entries_group_local_options(self, capsys):
+        with pytest.raises(SystemExit) as ex:
+            main.main(["man", "agent", "stop"])
+        assert ex.value.code == 0
+        out = capsys.readouterr().out
+        assert out.startswith("    keychain agent stop")
+        assert "        Syntax: keychain agent stop [--mine|--others|--all]" in out
+        assert "        Options:" in out
+        assert "            --mine\n                terminate only this UID's agents" in out
+        assert "            --others\n                terminate agents owned by others" in out
+        assert "            --all\n                terminate all matching agents" in out
+
+    def test_cli_man_option_entries_use_tagged_paragraph_layout(self, capsys):
+        with pytest.raises(SystemExit) as ex:
+            main.main(["man", "option:mine", "option:list-json"])
+        assert ex.value.code == 0
+        out = capsys.readouterr().out
+        assert "    keychain agent stop --mine\n        terminate only this UID's agents" in out
+        assert "        Restrict the kill list" in out
+        assert "    keychain list --json\n        emit machine-readable JSON on stdout" in out
+        assert not out.startswith("keychain agent stop --mine")
 
     def test_removed_top_level_verb_helpinfo_errors(self, capsys):
         assert helpinfo("stop") == 2
