@@ -82,7 +82,7 @@ well-aligned with what a credential helper should be.
 zip file with a shebang. For example:
 
 ```console
-unzip -p /usr/local/bin/keychain keychain/main.py
+$ unzip -p /usr/local/bin/keychain keychain/main.py
 ```
 
 That shows the source for the program installed on the machine. A native
