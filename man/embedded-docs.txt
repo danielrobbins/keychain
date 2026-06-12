@@ -550,26 +550,6 @@ Override the hostname used in pidfile names. Pidfiles are named ``HOST-sh`` /
 each get their own state. By default keychain probes ``hostname(1)``,
 ``$HOSTNAME``, then ``uname -n``.
 
-%% @config agent-env env-file: load extra KEY=value env before agent/tool startup
-
-Load additional environment assignments from ``FILE`` before keychain discovers
-agents, starts new agents, or runs helper tools such as ``ssh-add``.
-
-Configure it in ``~/.keychainrc``:
-
-```
-[agent.env]
-env_file = ~/.config/keychain/agent.env
-```
-
-The file format is a simple ``KEY=value`` list. The first ``=`` splits key from
-value, matching outer quotes are stripped, and ``$VAR`` / ``${VAR}`` / ``%VAR%``
-references are expanded against keychain's current environment snapshot.
-
-Use this for niche, keychain-scoped overrides such as a custom ``PATH`` or extra
-``KEYCHAIN_*_AGENT_ARGS``. Keychain does not auto-discover env files; set
-``env_file`` explicitly when you want this behaviour.
-
 %% @config agent-env ssh-args: extra args passed to spawned ``ssh-agent``
 
 Append extra arguments when keychain spawns ``ssh-agent``.
@@ -812,11 +792,6 @@ units inherit the env.
        keychain env > /run/user/$UID/keychain.env
        # ↑ default ``--shell env`` format
 
-If you need extra environment variables before keychain starts or attaches to
-agents, configure ``[agent.env] env_file`` in ``~/.keychainrc``. That file is
-input to keychain itself; it is separate from the generated ``HOST-envfile``
-export file above.
-
 == @topic compat: keychain 2.x compatibility
 
 Every keychain 2.x flat-flag invocation is translated to the new-style action
@@ -894,9 +869,8 @@ Sections (3.0 layout, conceptual grouping):
                    ``ssh_spawn_gpg``, ``ssh_allow_forwarded``,
                    ``noinherit``, ``ssh_agent_socket``,
                    ``gpg2``, ``clear``
-    [agent.env]    extra arguments and optional env-file
-             overrides for spawned agents / helpers:
-             ``ssh_args``, ``gpg_args``, ``env_file``.
+    [agent.env]    extra arguments for spawned agents:
+             ``ssh_args``, ``gpg_args``.
              ``ssh_args`` / ``gpg_args`` are exported
              as ``KEYCHAIN_SSH_AGENT_ARGS`` /
              ``KEYCHAIN_GPG_AGENT_ARGS`` for the agent
