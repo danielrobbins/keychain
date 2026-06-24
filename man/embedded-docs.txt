@@ -12,27 +12,47 @@ time your local machine is rebooted. Keychain also makes it easy for remote
 cron jobs to securely "hook in" to a long running ``ssh-agent`` process,
 allowing your scripts to take advantage of key-based logins.
 
-Keychain also supports *GnuPG 2.1 and later**, and will automatically start
-``gpg-agent`` if any GPG keys are referenced on the command-line, and will ensure these credentials are cached in memory and available for use.
+Keychain also supports **GnuPG 2.1 and later**, and will automatically start
+``gpg-agent`` if any GPG keys are referenced on the command-line, ensuring these
+credentials are cached in memory and available for use.
+
+**Keychain 3.0.0_beta2+** introduces coordinated multi-terminal initialization,
+eliminating the ``could not acquire lock`` errors that occurred when multiple
+shells started simultaneously. When Visual Studio Code reconnects to WSL and
+restores several terminals at once, all terminals now coordinate automatically
+-- press Enter in any one terminal to initialize keys, and all others are
+notified when complete. See ``keychain man topic:coordination``.
 
 == @topic requirements: Keychain 3, Requirements and Backward Compatibility
 
 Keychain supports most UNIX-like operating systems and intentionally limits
 its scope to modern, widely deployed implementations of OpenSSH and GnuPG.
 
-Keychain was conceived as a single POSIX Bourne shell script that had
-grown steadily more sophisticated since its inception in 2002. In 2026, Daniel Robbins, Keychain's creator and current maintainer, has moved keychain 3 to a new, portable technology: a single Python *zipapp* -- a single executable ``.pyz`` file that is directly runnable on any system with Python 3.9 or newer, without requiring any external Python dependencies. This provides a modern runtime that is far more capable, while maintaining the self-contained, script-based nature of Keychain, supporting its continued evolution.
+**From shell script to Python zipapp.** Keychain was conceived as a single
+POSIX Bourne shell script that grew steadily more sophisticated since its
+inception in 2002. In 2026, Keychain 3 moved to a new, portable technology:
+a single Python **zipapp** -- a single executable ``.pyz`` file that runs on
+any system with Python 3.9 or newer, without requiring external Python
+dependencies. This provides a modern runtime while maintaining the
+self-contained, script-based nature of Keychain.
 
-Keychain 3 has a new action-driven interface (``keychain add id_rsa``, ``keychain agent stop --mine``, ``keychain wipe --ssh``, etc.) and is now the recommended way to drive Keychain going forward. Keychain now has a full embedded documentation engine; help for any action is available via
-``--help <action>``, and an ``--explain`` option can be added to
-any keychain invocation to display targeted documentation related to the action and options specified on the current command-line. A full embedded Keychain man page can be displayed via ``keychain man``, with ``keychain man --list`` displaying all sections that can be displayed individually via
-``keychain man <target>``.
+**Action-driven interface.** Keychain 3 introduces a new action-driven
+interface (``keychain add id_rsa``, ``keychain agent stop --mine``,
+``keychain wipe --ssh``, etc.) and is now the recommended way to drive
+Keychain. A full embedded documentation engine provides help via
+``--help <action>`` or ``--explain`` for context-sensitive documentation.
+The complete man page is available via ``keychain man``, with
+``keychain man --list`` showing all available sections.
 
-As part of Keychain's evolution, maintaining keychain 2.x CLI compatibility was treated as a primary goal, not an afterthought. The legacy flat-flag command line (for example ``keychain --eval --quiet id_rsa``) continues to work exactly as before and is parsed by an explicit compatibility shim.
+**Backward compatibility.** Maintaining keychain 2.x CLI compatibility was a
+primary goal. The legacy flat-flag command line (for example
+``keychain --eval --quiet id_rsa``) continues to work exactly as before via
+an explicit compatibility shim.
 
-Keychain 3 continues to be compatible with Bourne ``sh``, ``csh``/``tcsh`` and
-``fish`` shells. ``bash``, ``ksh`` and ``zsh`` are compatible with the Bourne
-``sh`` built-in to Keychain. Keychain also supports integration with *systemd*.
+**Shell support.** Keychain 3 continues to be compatible with Bourne ``sh``,
+``csh``/``tcsh`` and ``fish`` shells. ``bash``, ``ksh`` and ``zsh`` are
+compatible with the Bourne ``sh`` built-in to Keychain. Keychain also
+supports integration with **systemd**.
 
 == @topic usage: General Usage
 
@@ -44,36 +64,54 @@ you are using Bourne shell or bash, you will create a *~/.profile* or
 eval "$(keychain add id_rsa --eval)"
 ```
 
-Keychain will start ``ssh-agent`` if one isn't already running. Keychain then
-checks to make sure your private keys (in this example, *id_rsa*) are loaded
-into the agent. If they are not, you are prompted for any passphrase necessary
-to decrypt them, so that they are cached in memory and available for use.
+Keychain will start ``ssh-agent`` if one isn't already running, then checks
+to make sure your private keys (in this example, *id_rsa*) are loaded into
+the agent. If they are not, you are prompted for any passphrase necessary to
+decrypt them, so that they are cached in memory and available for use.
 
-In addition to printing some user-friendly output to your terminal, keychain
-will also output important ``ssh-agent`` environment variables, which the ``"$(
-)"`` (you can also use ``"` `"``) captures, and the shell built-in ``eval`` evaluates, causing these variables persist in your current session.
+In addition to printing user-friendly output to your terminal, keychain
+outputs important ``ssh-agent`` environment variables, which the ``"$( )"``
+(you can also use ``"` `"``) captures, and the shell built-in ``eval``
+evaluates, causing these variables to persist in your current session.
 
 These ssh-agent environment variables are also written to
 ``~/.keychain/${HOSTNAME}-sh``, so that subsequent logins and non-interactive
-shells such as cron jobs can source this file to access the running ``ssh-agent`` and make passwordless ssh connections using the cached private keys -- even when you are logged out. These files are collectively called *pidfiles*.
+shells such as cron jobs can source this file to access the running
+``ssh-agent`` and make passwordless ssh connections using the cached private
+keys -- even when you are logged out. These files are collectively called
+**pidfiles**.
+
+**Multi-terminal coordination (3.0.0_beta2+).** When multiple shells start
+simultaneously (common when Visual Studio Code reconnects to WSL), all
+terminals coordinate automatically. Each displays ``Press Enter to initialize
+keys``. Pressing Enter in any one terminal runs ``ssh-add``; other terminals
+wait and are notified when complete. This eliminates the ``could not acquire
+lock`` errors from earlier versions. See ``keychain man topic:coordination``.
 
 The key files specified on the command-line will be searched for in the
-*~/.ssh/* directory, and keychain will expect to find the private key file with
-the same name, as well as a *.pub* public key. Keychain will also see if any
-GnuPG keys are specified, and if so, prompt for any passphrases to cache these keys into ``gpg-agent`` (and start a ``gpg-agent`` if none is running for the current user).
+*~/.ssh/* directory, and keychain will expect to find the private key file
+with the same name, as well as a *.pub* public key. Keychain will also see
+if any GnuPG keys are specified, and if so, prompt for any passphrases to
+cache these keys into ``gpg-agent`` (and start a ``gpg-agent`` if none is
+running for the current user).
 
-Typically, private SSH key files are specified by filename only, without path,
-although it is possible to specify an absolute or relative path to the private
-key file as well. Private key files can be symlinks to the actual key.
+Typically, private SSH key files are specified by filename only, without
+path, although it is possible to specify an absolute or relative path to the
+private key file as well. Private key files can be symlinks to the actual
+key.
 
-In addition, for GPG keys specified, similar steps will be taken to ensure that
-gpg-agent has the requested GPG capability cached in memory and ready for use.
-Use ``gpgs:KEYID`` for signing-oriented workflows, ``gpge:KEYID`` for
-decrypt-oriented workflows such as ``pass``, and ``gpga:KEYID`` when both
-capabilities should be warmed. ``gpge:`` is an explicit decryption-path
-guarantee: keychain encrypts a tiny temporary payload to the requested key and
-then decrypts it through ``gpg-agent``. If that check cannot be completed,
-``add`` fails instead of reporting success.
+For GPG keys, Keychain ensures that gpg-agent has the requested GPG
+capability cached in memory and ready for use. Use ``gpgs:KEYID`` for
+signing-oriented workflows, ``gpge:KEYID`` for decrypt-oriented workflows
+such as ``pass``, and ``gpga:KEYID`` when both capabilities should be warmed.
+The ``gpge:`` prefix performs an explicit encrypt-then-decrypt verification
+cycle -- a tiny temporary payload is encrypted to the key and immediately
+decrypted through ``gpg-agent``. If this verification cannot be completed,
+``add`` fails rather than reporting success. This is more reliable than
+relying on signing warm-up side effects, which may not populate the
+decryption passphrase cache on all GnuPG versions and key configurations.
+The legacy ``gpgk:KEYID`` alias is equivalent to ``gpgs:KEYID`` (signing
+warm-up only).
 
 == @section ACTIONS
 
@@ -88,6 +126,19 @@ then decrypts it through ``gpg-agent``. If that check cannot be completed,
 * Write the agent's environment to a per-user, per-host *pidfile** under
   ``~/.keychain/`` that scripts can ``source`` to gain access to the agent.
 
+**Coordinated multi-terminal initialization (3.0.0_beta2+).** When multiple shells start simultaneously -- common when Visual Studio Code reconnects to WSL and restores several terminals at once -- Keychain 3.0.0_beta2+ uses a coordinated unlock protocol instead of the classic lock-timeout approach:
+
+1. All terminals that detect missing SSH keys display: ``Press Enter to initialize keys``.
+2. Pressing Enter in *any* terminal designates it to run ``ssh-add``.
+3. Other terminals wait automatically and are notified when initialization completes.
+4. When notified, waiting terminals print ``Keys initialized by another terminal.`` and configure their environment without prompting.
+
+This eliminates the ``could not acquire lock`` errors that occurred in earlier versions when multiple terminals raced to run ``ssh-add`` simultaneously.
+
+**Takeover for stuck prompts.** If the terminal that started ``ssh-add`` becomes inaccessible (hidden behind other windows, or the passphrase prompt is not visible), you can type ``takeover`` in any other terminal that is waiting. This cancels the stuck ``ssh-add`` process and allows the visible terminal to complete the initialization instead. The original terminal will then wait for the takeover to complete.
+
+**Transitioning from classic lock behavior.** In Keychain 2.x and 3.0.0_beta1, simultaneous terminal startups would race for a lock, with losers timing out after 5 seconds (or the ``--lockwait`` value). The new coordination model is fundamentally different: terminals cooperate rather than compete, and all terminals succeed together once any one completes the passphrase entry.
+
 Bare key names are looked up under *~/.ssh/* and as GPG key IDs; absolute paths
 are loaded directly. Symbolic links are supported. Extended-key syntax --
 ``sshk:PATH``, ``gpgk:KEYID``, ``gpgs:KEYID``, ``gpge:KEYID``, ``gpga:KEYID``,
@@ -100,8 +151,10 @@ to an agent. This is an intentional compatibility accommodation: keychain 2.x
 bare-token invocation is still accepted, but a mistyped modern action should
 not accidentally spawn a fresh background agent as a side effect.
 
+**Note:** The coordinated unlock flow applies to SSH key loading only. GPG keys use Keychain's explicit GnuPG warm-up paths (``gpgs:``, ``gpge:``, ``gpga:``) and do not participate in the multi-terminal coordination protocol.
 
 ``keychain man topic:extkeys``.
+``keychain man topic:coordination``.
 
 == @action agent: Agent lifecycle (start | stop).
 
@@ -121,7 +174,7 @@ load any keys; use ``add`` when you want prompt-and-load semantics.
 
 == @action agent stop: terminate ssh-agents (default: all in pidfile)
 
-@syntax keychain agent stop [--mine|--others|--all]
+@syntax keychain agent stop [--mine|--others]
 
 Terminate the ssh-agents recorded in the pidfile. Bare ``agent stop`` targets
 every recorded agent; ``--mine`` and ``--others`` narrow the kill list by owner
@@ -184,6 +237,17 @@ Print ``SSH_AUTH_SOCK`` and ``SSH_AGENT_PID`` from the best available source
 ``--target`` is an alias for ``--shell``; ``--json`` is shorthand for ``--shell
 json``.
 
+== @action status: One-screen agent summary (no side effects).
+
+@syntax keychain status [--json]
+
+Print a compact human-readable summary: which agent is reachable, where its
+socket is, how many keys are loaded, whether the env was sourced from the
+pidfile or inherited, and any health-check warnings. Read-only; safe to wire
+into shell prompts or motd snippets.
+
+``--json`` emits the same data as a JSON object.
+
 == @action inspect: Structured snapshot of every state probe.
 
 @syntax keychain inspect [KEYS...] [--json]
@@ -192,6 +256,51 @@ Run every state probe keychain would run during a real ``add`` (host detection,
 paths, perms, env-file, agent reachability, key list, extkey expansion, ...) and
 print the result -- without touching the agent, the pidfile, or the environment.
 Used for diagnosis and for CI integration tests.
+
+== @action config: Show or edit ~/.keychainrc preferences.
+
+@syntax keychain config <show|get KEY|set KEY VALUE|unset KEY|edit|path>
+
+Inspect or mutate the persistent preferences file. Path resolution:
+``$KEYCHAIN_CONFIG`` overrides; otherwise ``~/.keychainrc``. See ``keychain man
+topic:config`` for the full key schema and ``keychain man config.<key>`` for
+individual key documentation.
+
+== @action config show: list every set value
+
+@syntax keychain config show
+
+Print every explicitly set preference as ``section.key = value``.
+
+== @action config get: print one value
+
+@syntax keychain config get KEY
+
+Print one preference value. Exits with status 1 when the key is unset.
+
+== @action config set: set or replace one value
+
+@syntax keychain config set KEY VALUE
+
+Validate and write one preference value into the config file.
+
+== @action config unset: remove one value
+
+@syntax keychain config unset KEY
+
+Remove one preference from the config file.
+
+== @action config edit: open the file in $VISUAL/$EDITOR
+
+@syntax keychain config edit
+
+Open the active config file in ``$VISUAL`` or ``$EDITOR``.
+
+== @action config path: print the path of the file in use
+
+@syntax keychain config path
+
+Print the path of the active config file and exit.
 
 == @action version: Print version banner.
 
@@ -293,39 +402,6 @@ Pass ``-t MINUTES*60`` to ``ssh-add``: the key is forgotten by the agent after
 MIN minutes of inactivity. Common settings: 480 (8h, a workday) or 60 (high-
 security). A common config-file preference.
 
-== @option lockwait: max seconds to wait for the keychain lockfile
-
-Maximum time (in seconds) to wait for keychain's own cooperative lockfile when
-another keychain process is mutating the same agent state. Default 5 seconds.
-Set to 0 to fail immediately if the lock is held.
-
-== @option agents: (hidden) deprecated agent selector
-
-Legacy keychain 2.x compatibility option. It is accepted for compatibility and
-ignored by keychain 3.
-
-== @option inherit: (hidden) deprecated inheritance selector
-
-Legacy keychain 2.x compatibility option. It is accepted for compatibility and
-ignored by keychain 3; use ``--ssh-allow-forwarded`` or ``--noinherit`` when
-you need explicit SSH agent inheritance behavior.
-
-== @option confhost: (hidden) deprecated host config loader
-
-Legacy keychain 2.x compatibility option. Use ``--extended host:HOST`` instead.
-
-== @option attempts: (hidden) deprecated retry count
-
-Legacy keychain 2.x compatibility option. It is accepted for compatibility and
-ignored by keychain 3.
-
-== @option no-lock: skip the keychain lockfile
-
-Skip the cooperative lockfile entirely. Use only in controlled environments (CI
-runners that already serialise externally) where the lock-wait overhead is
-wasteful and simultaneous mutation is impossible by construction. ``--nolock``
-is the legacy spelling.
-
 == @option ignore-missing: skip keys that don't exist
 
 For each KEY positional that doesn't resolve to an existing file (or known GPG
@@ -407,12 +483,6 @@ users' agents.
 Inverse of ``--mine``: terminate only agents whose owner UID does **not** match
 the calling user. Rare; typically a maintenance tool.
 
-== @option all: terminate all matching agents
-
-Terminate both this user's agents and agents owned by others when the caller has
-permission. This is the broadest ``agent stop`` target and should be used with
-care.
-
 == @option list-json: emit machine-readable JSON on stdout
 
 Emit a JSON array of key records on stdout.
@@ -437,6 +507,10 @@ One of ``env`` / ``sh`` / ``csh`` / ``fish`` / ``json`` / ``eval`` /
 == @option env-json: shorthand for --shell json
 
 Equivalent to ``--shell json``.
+
+== @option status-json: emit JSON
+
+Emit the status payload as JSON on stdout.
 
 == @option inspect-json: emit JSON
 
@@ -529,13 +603,7 @@ Override the hostname used in pidfile names. Pidfiles are named ``HOST-sh`` /
 each get their own state. By default keychain probes ``hostname(1)``,
 ``$HOSTNAME``, then ``uname -n``.
 
-== @global pid-formats: (hidden) pidfile shell formats to emit
-
-Control which shell pidfile formats keychain writes under the state directory.
-The default is ``sh``. This is primarily an internal compatibility setting; most
-users should not need to change it.
-
-== @config agent.env.ssh_args: extra args passed to spawned ``ssh-agent``
+%% @config agent-env ssh-args: extra args passed to spawned ``ssh-agent``
 
 Append extra arguments when keychain spawns ``ssh-agent``.
 
@@ -552,7 +620,7 @@ flags, so use it only for niche cases keychain does not model directly.
 If ``KEYCHAIN_SSH_AGENT_ARGS`` is already set in the outer environment, that
 environment value wins.
 
-== @config agent.env.gpg_args: extra args passed to spawned ``gpg-agent``
+%% @config agent-env gpg-args: extra args passed to spawned ``gpg-agent``
 
 Append extra arguments when keychain spawns ``gpg-agent``.
 
@@ -569,50 +637,37 @@ flags, so use it only for niche cases keychain does not model directly.
 If ``KEYCHAIN_GPG_AGENT_ARGS`` is already set in the outer environment, that
 environment value wins.
 
-== @config ssh.askpass.program: helper program used by ``ssh-add``
+== @global lockwait: max seconds to wait for the state lock
 
-Set the ``SSH_ASKPASS`` helper used when keychain loads SSH keys with
-``ssh-add``. This is useful when a password manager or another trusted helper
-can supply the private-key passphrase.
+Maximum time (in seconds) to wait for keychain's state lock when another
+keychain process is mutating shared coordination state. Default 5 seconds.
 
-Configure it in ``~/.keychainrc``:
+**Historical note:** In Keychain 2.x and 3.0.0_beta1, ``--lockwait`` controlled
+the timeout for the single global lock that protected the entire key-loading
+operation. This was the source of the ``could not acquire lock`` errors when
+multiple terminals started simultaneously. Starting in 3.0.0_beta2, the lock
+scope is much narrower (protecting only small coordination state updates) and
+the interactive unlock flow uses a separate activation lock with FIFO-based
+notification. As a result, ``--lockwait`` is now an internal tuning parameter
+that most users will never need to adjust. Set to 0 to fail immediately if the
+state lock is held (rare in normal operation).
 
-```
-[ssh.askpass]
-program = /usr/local/bin/op-askpass
-mode = force
-```
+== @global no-lock: skip the state lock (not recommended for interactive use)
 
-The program must be an executable path. Keychain passes it to ``ssh-add`` as
-``SSH_ASKPASS`` only for key-loading calls; it is not used when spawning the
-``ssh-agent`` daemon.
+Skip the cooperative state lock entirely. **Warning:** This disables the
+coordination protocol that prevents multiple terminals from racing to run
+``ssh-add`` simultaneously. Only use this in controlled environments where
+simultaneous interactive key loading is impossible by construction, such as:
 
-See ``keychain man topic:password-managers`` for a complete example.
+* CI runners that serialize externally
+* Cron jobs with guaranteed non-overlapping execution
+* Single-terminal, non-interactive scripts
 
-== @config ssh.askpass.mode: when ``ssh-add`` should use askpass
-
-Control how strongly keychain asks ``ssh-add`` to use the configured askpass
-helper. Values:
-
-    auto      Use normal OpenSSH behavior. Askpass is used only when the
-              environment supports it.
-    prefer    Prefer askpass over a TTY prompt when OpenSSH supports it.
-    force     Force askpass. This is usually the right mode for password
-              manager helpers in shells where a TTY prompt is not desired.
-    never     Disable askpass for key-loading calls.
-
-Configure it in ``~/.keychainrc``:
-
-```
-[ssh.askpass]
-program = /usr/local/bin/op-askpass
-mode = force
-```
-
-Internally, ``mode`` maps to OpenSSH's ``SSH_ASKPASS_REQUIRE`` environment
-variable. ``auto`` leaves that variable unset.
-
-See ``keychain man topic:password-managers`` for a complete example.
+For normal interactive use -- especially in environments like Visual Studio
+Code + WSL where multiple terminals may start at once -- leaving the lock
+enabled is essential for proper coordination. The lock overhead is now minimal
+(milliseconds) since it protects only small state updates, not the entire
+passphrase prompt duration. ``--nolock`` is the legacy spelling.
 
 == @global explain: explain this invocation instead of running it
 
@@ -623,6 +678,94 @@ they appear.
 Bespoke documentation for the exact invocation in front of you. Pairs well with
 command-line history: append ``--explain`` to any prior invocation to read about
 it without rerunning it.
+
+== @global agents: (hidden) deprecated legacy agent selector
+
+Deprecated legacy flag. Accepted for old dotfiles, then ignored with a warning.
+
+== @global inherit: (hidden) deprecated legacy inherit selector
+
+Deprecated legacy flag. Accepted for old dotfiles, then ignored with a warning.
+
+== @global confhost: (hidden) deprecated legacy host expander
+
+Deprecated legacy flag. Accepted so the runtime can emit the modern replacement
+hint.
+
+== @global attempts: (hidden) deprecated legacy retry count
+
+Deprecated legacy flag. Accepted for old dotfiles, then ignored with a warning.
+
+== @topic coordination: Coordinated key initialization (3.0.0_beta2+)
+
+**The problem.** When multiple terminal shells start simultaneously -- a common
+occurrence when Visual Studio Code reconnects to WSL and restores several
+terminals at once -- each shell may run ``keychain add --eval`` to initialize
+SSH keys. In Keychain 2.x and 3.0.0_beta1, all terminals would race to acquire
+a single lock. One terminal would win and prompt for the passphrase; all others
+would wait for the lock timeout (default 5 seconds) and then fail with
+``could not acquire lock``. Users had to manually delete the lockfile or retry.
+
+This was especially problematic in Visual Studio Code: only one terminal is
+visible at a time, so the terminal running ``ssh-add`` might be hidden behind
+other terminal tabs. Users had to click through each terminal tab to find the
+one prompting for the passphrase, turning what should be a simple workflow into
+a frustrating scavenger hunt.
+
+**The solution (3.0.0_beta2+).** Keychain now uses a coordinated unlock protocol
+designed specifically for multi-terminal scenarios:
+
+1. **State lock (short-lived).** All terminals acquire a brief lock to check
+   agent state and register as a "waiter" if keys are missing. This lock is
+   held for milliseconds, not seconds.
+
+2. **Activation lock (elects the loader).** When the user presses Enter in any
+   terminal, that terminal tries to acquire the activation lock. Only the winner
+   runs ``ssh-add`` and prompts for the passphrase.
+
+3. **FIFO notification (no polling).** Waiting terminals create private FIFO
+   endpoints and block in ``select()``. When the loader completes ``ssh-add``,
+   it writes to all waiter FIFOs, waking them instantly. No polling loops.
+
+4. **Takeover mechanism.** If the terminal running ``ssh-add`` becomes
+   inaccessible (hidden window, stuck prompt), any waiting terminal can type
+   ``takeover``. This sends a cancel request to the loader, which terminates
+   its ``ssh-add`` process and releases the activation lock. The takeover
+   terminal then becomes the loader.
+
+**User experience.** All terminals that detect missing SSH keys display:
+
+```
+[ 🔑 Press Enter to initialize keys 🔑 ]
+```
+
+Pressing Enter in any one terminal starts ``ssh-add``. Other terminals show:
+
+```
+keychain: another terminal is unlocking keys on /dev/pts/3
+  Press Enter to keep waiting, or type 'takeover' to unlock here:
+```
+
+When initialization completes, waiting terminals wake automatically and print:
+
+```
+Keys initialized by another terminal.
+```
+
+**Implementation details.** Coordination state is stored in
+``~/.keychain/<host>.state.json`` under the state lock. Waiter FIFOs live in
+``~/.keychain/<host>-waiters/`` with per-process unique names. The activation
+lock is ``~/.keychain/<host>.activation.lock``. All coordination files are
+mode 0o600 and owner-checked.
+
+**Scope.** The coordinated unlock flow applies to SSH key loading only. GPG
+keys use explicit warm-up paths (``gpgs:``, ``gpge:``, ``gpga:``) and do not
+participate in multi-terminal coordination.
+
+**Legacy behavior.** Users upgrading from Keychain 2.x or 3.0.0_beta1 will
+notice the absence of ``Waiting N seconds for lock...`` messages during
+interactive key loading. This is intentional: internal coordination is quiet,
+and the state lock is held only briefly for metadata updates.
 
 == @topic security: Security model
 
@@ -635,6 +778,8 @@ it without rerunning it.
   owner-only by default.
 * Stale agent processes pointing the env at sockets that no longer exist: probed
   and discarded before use.
+* Multi-terminal race conditions: coordinated unlock (3.0.0_beta2+) uses
+  short-lived locks and FIFO notification to prevent ``could not acquire lock`` errors when multiple shells start simultaneously.
 
 **What keychain does NOT protect against.**
 
@@ -652,10 +797,17 @@ authentication requests on this host's behalf. That is by design (it's the point
 of agent forwarding) but it widens the trust boundary. Don't enable on hosts you
 don't fully control.
 
-**File permissions.** Pidfiles, env-files, and the lockfile all live under
-``~/.keychain/`` (mode 700). On every read keychain ``stat()``\s the file,
-verifies owner == current user, and refuses to operate if either check fails --
-so a world-writable home directory does not expose keys.
+**Coordination security (3.0.0_beta2+).** The coordinated unlock protocol uses
+per-process FIFO endpoints (mode 0o600) for waiter notification. Only the
+activation owner can cancel its own ``ssh-add`` process; other terminals must
+request takeover explicitly by typing ``takeover``. Stale activations are
+recovered only after confirming the owner process is dead and the heartbeat is
+stale. All coordination files are owner-checked and mode 0o600 or stricter.
+
+**File permissions.** Pidfiles, env-files, and coordination state files all
+live under ``~/.keychain/`` (mode 700). On every read keychain ``stat()``s the
+file, verifies owner == current user, and refuses to operate if either check
+fails -- so a world-writable home directory does not expose keys.
 
 == @topic agents: How keychain discovers, attaches, and spawns agents
 
@@ -676,6 +828,13 @@ an existing agent in this order:
 **Pidfile is the source of truth.** Per-host (so NFS-shared homes work) and
 per-user (mode 700). Older pidfiles are replaced atomically; no in-place edits.
 
+**Coordinated key loading (3.0.0_beta2+).** When multiple terminals detect missing
+SSH keys simultaneously, they coordinate via a state file
+(``<host>.state.json``) and two locks: a short-lived state lock for metadata
+updates, and an activation lock that elects which terminal runs ``ssh-add``.
+Waiting terminals are notified via FIFO endpoints when initialization
+completes. See ``keychain man topic:coordination``.
+
 **Why two agents.** ssh-agent handles SSH keys; gpg-agent handles GPG keys.
 Modern gpg-agent can also serve as the SSH agent; users with mostly-GPG
 workflows often prefer ``--ssh-spawn-gpg`` to collapse to one process.
@@ -688,7 +847,7 @@ it exists and treat it as an SSH key; otherwise, it is looked up via ``gpg --lis
 and if found the GnuPG signing key will be loaded and warmed. This *may* also
 warm an associated encryption key, but this is not guaranteed -- see below.
 
-In addition to explicit passing of keys by name or path, positional key 
+In addition to explicit passing of keys by name or path, positional key
 arguments may accept six extended key prefixes to avoid ambiguity and provide
 more fine-grained control. The following prefixed formats can be mixed freely
 with regular positional key names:
@@ -704,11 +863,11 @@ with regular positional key names:
 
 *Using the extended key syntax opens up several important features to help ensure
 that your specified GnuPG signing or encryption key is actually loaded and ready for use.*
-This is important because GnuPG's keys and subkeys can be tricky -- OpenPGP encryption 
+This is important because GnuPG's keys and subkeys can be tricky -- OpenPGP encryption
 capability may live on the primary key or on a separate encryption subkey, and GnuPG's
-passphrase cache behavior can vary by version, platform, and key layout. A signing 
+passphrase cache behavior can vary by version, platform, and key layout. A signing
 operation may happen to unlock later decryption on some systems, but Keychain does not rely
-on that as a portable guarantee. 
+on that as a portable guarantee.
 
 Extended key syntax helps with this situation. For GPG keys, ``gpgk:KEYID`` is
 equivalent to ``gpgs:KEYID``. Both perform a signing-oriented warm-up: Keychain asks
@@ -720,7 +879,7 @@ Using ``gpge:KEYID`` performs a similar explicit check to ensure functionality. 
 *Keychain will encrypt a tiny temporary payload with the requested key and then decrypt it to
 ensure that it is properly loaded and functional, and will fail if it does not
 succeed.* If your workflow decrypts data -- for example, ``pass show ...`` -- use
-``gpge:KEYID``. 
+``gpge:KEYID``.
 
 If your workflow needs both signing and decryption, use ``gpga:KEYID``.
 *Keychain will first warm the signing path, then require the same explicit
@@ -741,14 +900,12 @@ Per user, per host, mode 700 directory:
 
 (overridable by ``--dir`` / ``[paths] dir``).
 
-Files inside, where ``HOST`` is the resolved hostname:
+**Traditional pidfiles.** Files inside, where ``HOST`` is the resolved hostname:
 
-    HOST-pid     KEY=value lines for the running agent
     HOST-sh      Bourne-style ``KEY=value; export KEY``
     HOST-csh     C-shell ``setenv KEY value``
     HOST-fish    fish ``set -x KEY value``
-    HOST-envfile     bare ``KEY=value`` export for non-shell tools
-    .keychain.lock   cooperative mutation lock
+    HOST-envfile bare ``KEY=value`` export for non-shell tools
 
 All files are owner-only (mode 600) and re-written atomically (``write to .tmp;
 rename``). Stale entries are recognised via socket presence + ``kill(0)`` and
@@ -757,6 +914,21 @@ replaced.
 One pidfile per host means that homedirs shared over NFS across many machines
 each get their own agent state -- no ssh-agent confusion when you log in from
 multiple hosts.
+
+**Coordination state (3.0.0_beta2+).** For coordinated multi-terminal initialization:
+
+    HOST.state.json      coordination metadata (activation state, waiters)
+    HOST.state.lock      protects state file and waiter registration
+    HOST.activation.lock elects which terminal runs ssh-add
+    HOST-waiters/        directory for per-process FIFO endpoints
+
+The coordination state file tracks which terminal is running ``ssh-add``,
+registered waiters, and activation status. All coordination files are mode
+0o600 and owner-checked. Waiter FIFOs are named with per-process unique
+identifiers and cleaned up on exit.
+
+**Legacy lockfile.** The traditional ``.keychain.lock`` is retained for
+backward compatibility but is no longer used in the coordinated unlock flow.
 
 == @topic env: Environment emission and shell integration
 
@@ -826,76 +998,83 @@ in ``~/.keychainrc``; the CLI flags work but no longer appear in --help.
 Removed (silent no-ops with a one-time warning): ``--agents``, ``--inherit``,
 ``--confhost``, ``--attempts``.
 
+**Coordination model change (3.0.0_beta2+).** The coordinated unlock protocol
+introduced in 3.0.0_beta2 fundamentally changes how multiple terminals
+initialize keys simultaneously. In Keychain 2.x and 3.0.0_beta1, terminals
+raced for a single lock with losers timing out after 5 seconds. In 3.0.0_beta2+,
+terminals cooperate via FIFO notification and all succeed together. Legacy
+invocations still work, but the behavior is now cooperative rather than
+competitive. Users will notice the absence of ``Waiting N seconds for lock...``
+messages during interactive key loading.
+
 Compatibility is therefore intentionally *high* but not perfect. In particular,
 bare tokens still default to ``add`` for 2.x compatibility, but if none of the
 requested keys resolve, keychain refuses to start an agent and exits with an
 error instead of preserving the old side effect.
 
+== @topic windows: Windows-specific notes
+
+Keychain runs on Windows Subsystem for Linux (WSL) and Git Bash on Windows
+via ``keychain.pyz`` plus the Python launcher (``py.exe``). What you get:
+
+* The full action surface (``add``, ``agent start``, ``list``, ``status``,
+  ``inspect``, ``env``, ...). The embedded documentation system (``--help``,
+  ``man``, ``--explain``) works identically to the Linux build.
+* Coordinated multi-terminal initialization (3.0.0_beta2+) works on WSL and
+  Git Bash. When multiple terminals start simultaneously (common when Visual
+  Studio Code reconnects to WSL), they coordinate automatically to prevent
+  ``could not acquire lock`` errors.
+* WSL requires the standard Linux OpenSSH tools (``ssh-agent``, ``ssh-add``)
+  installed in your WSL distribution.
+* Git Bash uses the MinGW environment and may require Git for Windows' SSH
+  tools.
+
+**Native Windows (untested).** Keychain 3.0.0_beta2 has not been tested on
+native Windows (non-WSL, non-Git-Bash). OpenSSH for Windows ssh-agent service
+support is not confirmed. Unit tests exist for Windows compatibility, but
+end-to-end testing on native Windows has not been performed.
+
+**fork-less environment.** On WSL, ssh-agent is spawned normally via
+``fork()``+``exec()``. Native Windows would require ``CreateProcess`` if
+support is added in the future.
+
+See ``keychain man topic:agents`` for the discovery order; on WSL the standard
+Linux socket paths are used.
+
 == @topic config: ~/.keychainrc preference file
 
-``~/.keychainrc`` is an INI-style preferences file read at keychain startup. It
-is the right place for settings that describe how you normally want keychain to
-behave: where pidfiles live, how long SSH keys should remain cached, whether
-``ssh-add`` should use an askpass helper, and other per-user defaults.
-
-Command-line flags still win for one-off invocations. Environment variables are
-accepted only when ``--allow-env`` / ``-E`` is used, so normal interactive
-configuration should generally live in ``~/.keychainrc`` instead of shell
-startup exports.
-
-Resolution order:
+INI-style preferences file read at startup. Resolution order:
 
     1. Explicit CLI flag                    (per-invocation)
     2. ``$KEYCHAIN_*`` environment vars     (per-shell)
     3. ``~/.keychainrc``                    (per-user)
     4. Built-in defaults                    (fallback)
 
+Sections (3.0 layout, conceptual grouping):
+
+    [agent]        agent lifecycle / behaviour: ``noask``,
+                   ``quick``, ``confirm``, ``timeout``,
+                   ``systemd``, ``ssh_allow_gpg``,
+                   ``ssh_spawn_gpg``, ``ssh_allow_forwarded``,
+                   ``noinherit``, ``ssh_agent_socket``,
+                   ``gpg2``, ``clear``
+    [agent.env]    extra arguments for spawned agents:
+             ``ssh_args``, ``gpg_args``.
+             ``ssh_args`` / ``gpg_args`` are exported
+             as ``KEYCHAIN_SSH_AGENT_ARGS`` /
+             ``KEYCHAIN_GPG_AGENT_ARGS`` for the agent
+             process to consume (env wins if already set)
+    [keys]         key-resolution: ``confallhosts``,
+                   ``extended``, ``ignore_missing``
+    [paths]        state location: ``dir``, ``host``,
+                   ``absolute``
+    [output]       rendering: ``quiet``, ``debug``, ``nocolor``,
+                   ``theme``, ``nogui``, ``evalopt``
+    [lock]         cooperative locking: ``nolock``, ``lockwait``
+
 Boolean values accept ``true`` / ``false`` / ``yes`` / ``no`` / ``on`` / ``off``
 / ``1`` / ``0``. Integers are decimal. Strings are passed verbatim.
 
-== @topic password-managers: using password managers with SSH keys
-
-Modern password managers can help unlock private SSH keys without changing the
-rest of the keychain workflow. There are two common models:
-
-1. Let the password manager act as the SSH agent. This keeps signing inside the
-   password manager, but keychain no longer controls the normal ``ssh-agent``
-   cache lifetime.
-2. Use the password manager only as an ``SSH_ASKPASS`` provider. The password
-   manager supplies the passphrase once, then ``ssh-add`` loads the key into
-   the regular ``ssh-agent`` that keychain manages.
-
-For users who want keychain's traditional long-lived ``ssh-agent`` cache, the
-second model is usually the better fit.
-
-Example helper for 1Password:
-
-```
-#!/bin/sh
-exec op read "op://Private/id_ed25519/passphrase"
-```
-
-Save that as an executable file, for example
-``~/.local/bin/op-ssh-askpass``:
-
-```
-chmod 700 ~/.local/bin/op-ssh-askpass
-```
-
-Then configure keychain:
-
-```
-[ssh.askpass]
-program = /home/you/.local/bin/op-ssh-askpass
-mode = force
-```
-
-Now a normal keychain invocation can load the key:
-
-```
-eval "$(keychain add --eval ~/.ssh/id_ed25519)"
-```
-
-In this setup, 1Password is used only to answer the passphrase prompt. After
-the key is loaded, the ordinary ``ssh-agent`` performs SSH signatures until the
-agent exits or the key lifetime expires.
+See ``keychain config show`` for the live values, or ``keychain man
+config.<key>`` for one key. The full key list is ``keychain man --list | grep
+^config.``.

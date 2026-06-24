@@ -15,6 +15,7 @@ import os
 
 import pytest
 
+from keychain.output import core as output_core
 from keychain.output.core import (
     DEFAULT_THEME,
     ROLES,
@@ -173,6 +174,40 @@ def test_line_suppressed_under_quiet(capsys):
     out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
     out.line("nope")
     assert capsys.readouterr().err == ""
+
+
+def test_ephemeral_line_uses_clearable_terminal_control(monkeypatch, capsys):
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+    monkeypatch.setattr(output_core.shutil, "get_terminal_size", lambda fallback: os.terminal_size((120, 24)))
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
+
+    assert out.ephemeral_line("prompt") is True
+    out.clear_ephemeral_line()
+
+    assert capsys.readouterr().err == "\r\x1b[2Kprompt\r\x1b[2K"
+
+
+def test_ephemeral_line_can_clear_after_input_echo(monkeypatch, capsys):
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+    monkeypatch.setattr(output_core.shutil, "get_terminal_size", lambda fallback: os.terminal_size((120, 24)))
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
+
+    assert out.ephemeral_line("prompt") is True
+    out.clear_ephemeral_line(after_input=True)
+
+    assert capsys.readouterr().err == "\r\x1b[2Kprompt\x1b[1A\r\x1b[2K"
+
+
+def test_ephemeral_line_falls_back_for_non_tty(monkeypatch, capsys):
+    monkeypatch.setattr(os, "isatty", lambda fd: False)
+    monkeypatch.setenv("TERM", "xterm-256color")
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
+
+    assert out.ephemeral_line("prompt") is False
+
+    assert capsys.readouterr().err == "prompt\n"
 
 
 def test_info_suppressed_under_json(capsys):

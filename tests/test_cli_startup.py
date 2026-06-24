@@ -10,6 +10,29 @@ from keychain import main
 from tests.support import set_home
 
 
+class TestKeyboardInterruptHandling:
+    def test_main_exits_130_without_traceback(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            main.platform,
+            "detect",
+            lambda: SimpleNamespace(supported=True, name="linux", reason=""),
+        )
+
+        def interrupt(_app):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(main.KeychainApp, "run", interrupt)
+
+        with pytest.raises(SystemExit) as exc:
+            main.main(["--eval"])
+
+        captured = capsys.readouterr()
+        assert exc.value.code == 130
+        assert "Traceback" not in captured.err
+        assert "KeyboardInterrupt" not in captured.err
+        assert "false;" in captured.out
+
+
 class TestDefaultStartupPermissions:
     def _patch_default_startup(self, monkeypatch):
         monkeypatch.setattr(

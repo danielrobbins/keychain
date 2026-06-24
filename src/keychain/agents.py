@@ -21,6 +21,12 @@ from keychain.state import KeychainState
 from .env import SshAgentRef
 from .util import KeychainError, Output, current_uid, get_tty, pid_alive, run
 
+
+@dataclass(frozen=True)
+class SshAddPlan:
+    cmd: list[str]
+    env: dict[str, str]
+
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
@@ -266,46 +272,11 @@ class SshAgent:
         self.keychain_state = state
         self.out = out
         self.env: SshAgentRef = state.find_active_agent_env
+        self._spawn_context = ""
         # Set by :meth:`start`; consumed by :meth:`envcheck` so per-call
         # plumbing of these flags is not needed.
         self._allow_gpg = False
         self._allow_forwarded = False
-
-    def _ssh_add_env(self) -> dict[str, str]:
-        """Return the environment used for ``ssh-add`` key-loading calls."""
-        args = self.keychain_state.args
-        base_env = getattr(self.keychain_state, "env", None)
-        run_env = self.env.overlay(base_env)
-
-        no_gui = bool(args.get_value("no_gui"))
-        askpass_program = args.get_value("ssh_askpass_program")
-        askpass_mode = args.get_value("ssh_askpass_mode") or "auto"
-        valid_modes = ("auto", "prefer", "force", "never")
-        if askpass_mode not in valid_modes:
-            raise KeychainError("[ssh.askpass] mode must be one of: auto, prefer, force, never")
-
-        if no_gui or askpass_mode == "never":
-            run_env.pop("DISPLAY", None)
-            run_env.pop("SSH_ASKPASS", None)
-            run_env.pop("SSH_ASKPASS_REQUIRE", None)
-            return run_env
-
-        if askpass_program:
-            run_env["SSH_ASKPASS"] = askpass_program
-
-        if askpass_mode != "auto":
-            if not run_env.get("SSH_ASKPASS"):
-                raise KeychainError(
-                    f"[ssh.askpass] mode={askpass_mode} requires [ssh.askpass] program or SSH_ASKPASS"
-                )
-            run_env["SSH_ASKPASS_REQUIRE"] = askpass_mode
-            return run_env
-
-        if not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
-            run_env.pop("DISPLAY", None)
-            run_env.pop("SSH_ASKPASS", None)
-            run_env.pop("SSH_ASKPASS_REQUIRE", None)
-        return run_env
 
     # ---- list / fingerprint probes -----------------------------------
 
@@ -317,7 +288,7 @@ class SshAgent:
         """Return the fingerprint of private key *filename*, or None on failure."""
         return ssh_fingerprint(filename, self.out)
 
-    def list_missing(self, ssh_keys: list[str]) -> list[str]:
+    def list_missing(self, ssh_keys: list[str], *, announce_known: bool = True) -> list[str]:
         have_set = set(self.list_loaded()[0])
         missing: list[str] = []
         for k in filter(None, ssh_keys):
@@ -326,7 +297,8 @@ class SshAgent:
                 self.out.warn(f"Unable to extract fingerprint from keyfile {k}.pub, skipping")
                 continue
             if fp in have_set:
-                self.out.info(f"Known ssh key: {self.out.id(k)}")
+                if announce_known:
+                    self.out.info(f"Known ssh key: {self.out.id(k)}")
             else:
                 missing.append(k)
         return missing
@@ -354,7 +326,9 @@ class SshAgent:
                 if visible and sock_validation.severity:
                     out.warn(msg)
                 else:
-                    (out.note if visible else out.debug)(msg)
+                    out.debug(msg)
+                    if visible:
+                        self._remember_spawn_context(source, sock_validation.reason)
             return None
 
         if pid_str:
@@ -363,7 +337,9 @@ class SshAgent:
                     raise ValueError
             except ValueError:
                 msg = ("SSH_AGENT_PID in {} ({}) is not a live process; ignoring it").format(source, pid_str)
-                (out.note if visible else out.debug)(msg)
+                out.debug(msg)
+                if visible:
+                    self._remember_spawn_context(source, "pid not running")
                 pid_str = ""
 
         if not pid_str:
@@ -390,6 +366,13 @@ class SshAgent:
             out.info(f"Existing ssh-agent ({source}): {out.id(pid_str)}")
         return SshAgentRef(sock, pid_str)
 
+    def _remember_spawn_context(self, source: str, reason: str) -> None:
+        display_reason = {"missing": "socket missing"}.get(reason, reason)
+        if source == "pidfile":
+            self._spawn_context = f"previous pidfile stale: {display_reason}"
+        elif source == "env" and not self._spawn_context:
+            self._spawn_context = f"inherited SSH_AUTH_SOCK stale: {display_reason}"
+
     # ---- lifecycle ---------------------------------------------------
 
     def _our_pid(self) -> int | None:
@@ -404,6 +387,7 @@ class SshAgent:
         updates ``self.env`` in place.
         """
         a = self.keychain_state.args
+        self._spawn_context = ""
         # Latch run-flag flags so :meth:`envcheck` can pull them from self.
         self._allow_gpg = ssh_allow_gpg
         self._allow_forwarded = bool(a.get_value("ssh_allow_forwarded"))
@@ -455,7 +439,8 @@ class SshAgent:
         if ssh_spawn_gpg:
             spawned = self.keychain_state.gpg.start(ssh_support=True)
         else:
-            self.out.info("Starting ssh-agent...")
+            context = f" ({self._spawn_context})" if self._spawn_context else ""
+            self.out.info(f"Starting ssh-agent{context}...")
             cmd = ["ssh-agent", "-s"]
             timeout = a.get_value("timeout")
             if timeout is not None:
@@ -551,9 +536,17 @@ class SshAgent:
             else:
                 raise KeychainError(f"keychain was unable to remove ssh-agent key {k}. output: {r.stderr}")
 
-    def load(self, missing: list[str]) -> bool:
+    def announce_load(self, missing: list[str]) -> None:
         if not missing:
-            return True
+            return
+        noun = "ssh key" if len(missing) == 1 else "ssh keys"
+        self.out.info(f"Need to add {self.out.value(len(missing))} {noun}:")
+        for key in missing:
+            self.out.line(f"   - {self.out.value(key)}")
+
+    def prepare_load(self, missing: list[str], *, announce: bool = True) -> SshAddPlan | None:
+        if not missing:
+            return SshAddPlan([], {})
         a = self.keychain_state.args
         out = self.out
         # Re-validate the agent before loading keys to close the TOCTOU race
@@ -562,15 +555,14 @@ class SshAgent:
         test = self.envcheck("pidfile", self.env, quick=True)
         if not test:
             out.warn("Agent disappeared; refusing to load keys")
-            return False
-        if len(missing) == 1:
-            out.info(f"Adding {out.value(len(missing))} ssh key(s): {out.value(missing[0])}")
-        else:
-            out.info(f"Adding {out.value(len(missing))} ssh keys:")
-            for key in missing:
-                out.line(f"   - {out.value(key)}")
+            return None
+        if announce:
+            self.announce_load(missing)
         # ssh-add inherits stdio for passphrase prompts, so we cannot use util.run().
-        run_env = self._ssh_add_env()
+        run_env = self.env.overlay()
+        if bool(a.get_value("no_gui")) or not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
+            run_env.pop("DISPLAY", None)
+            run_env.pop("SSH_ASKPASS", None)
         cmd = ["ssh-add"]
         timeout = a.get_value("timeout")
         if timeout is not None:
@@ -578,13 +570,21 @@ class SshAgent:
         if bool(a.get_value("confirm")):
             cmd.append("-c")
         cmd.extend(missing)
+        return SshAddPlan(cmd, run_env)
+
+    def load(self, missing: list[str]) -> bool:
+        plan = self.prepare_load(missing)
+        if plan is None:
+            return False
+        if not plan.cmd:
+            return True
         try:
-            rc = subprocess.run(cmd, env=run_env, check=False).returncode
+            rc = subprocess.run(plan.cmd, env=plan.env, check=False).returncode
         except (FileNotFoundError, OSError):
-            out.warn("ssh-add not found")
+            self.out.warn("ssh-add not found")
             return False
         if rc != 0:
-            out.warn(f"ssh-add failed (return code: {rc})")
+            self.out.warn(f"ssh-add failed (return code: {rc})")
         return rc == 0
 
     def passthrough(self, arg: str) -> int:
@@ -669,17 +669,25 @@ class GpgAgent:
     def wipe(self) -> None:
         try:
             r = run(["gpg-connect-agent", "--no-autostart"], input_="RELOADAGENT\n", timeout=5)
-        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-            self.out.info("gpg-agent: Could not contact agent.")
+        except FileNotFoundError:
+            self.out.debug("gpg-agent wipe skipped: gpg-connect-agent not found")
             return
-        if r.stdout.strip() == "OK":
-            self.out.info("gpg-agent: All identities removed.")
-        else:
-            self.out.info(
-                "gpg-agent: Could not remove identities; possibly not running. (output: {})".format(r.stdout.strip())
-            )
+        except subprocess.TimeoutExpired:
+            self.out.debug("gpg-agent wipe skipped: gpg-connect-agent timed out")
+            return
+        except OSError as exc:
+            self.out.debug(f"gpg-agent wipe skipped: {exc}")
+            return
 
-    def list_missing(self, gpg_keys: list[str], mode: str = "--sign") -> list[str]:
+        output = "\n".join(part.strip() for part in (r.stdout, r.stderr) if part.strip())
+        if r.returncode == 0 and r.stdout.strip() == "OK":
+            self.out.info("gpg-agent: All identities removed.")
+        elif output:
+            self.out.debug(f"gpg-agent could not remove identities: {output}")
+        else:
+            self.out.debug("gpg-agent wipe skipped: no agent response")
+
+    def list_missing(self, gpg_keys: list[str], mode: str = "--sign", *, announce_known: bool = True) -> list[str]:
         out = self.out
         missing: list[str] = []
         tty = get_tty()
@@ -703,7 +711,8 @@ class GpgAgent:
                     timeout=10,
                 )
                 if r.returncode == 0:
-                    out.info(f"Known gpg key: {out.id(k)}")
+                    if announce_known:
+                        out.info(f"Known gpg key: {out.id(k)}")
                     continue
             except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
                 pass

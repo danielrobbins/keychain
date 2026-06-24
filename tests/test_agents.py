@@ -116,28 +116,17 @@ class TestListSelection:
 
 
 class TestSshAgentLoadOutput:
-    def _agent(self, monkeypatch, *, values=None, env=None, patch_run=True):
-        values = values or {}
-
+    def _agent(self, monkeypatch):
         def get_value(name):
-            return {
-                "no_gui": True,
-                "confirm": False,
-                "timeout": None,
-                "ssh_askpass_program": None,
-                "ssh_askpass_mode": "auto",
-                **values,
-            }.get(name, False)
+            return {"no_gui": True, "confirm": False, "timeout": None}.get(name, False)
 
         kstate = SimpleNamespace(
             find_active_agent_env=SshAgentRef(sock="/tmp/agent.sock", pid="1111"),
             args=SimpleNamespace(get_value=get_value),
-            env=env or {},
         )
         agent = agents.SshAgent(kstate, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
         monkeypatch.setattr(agent, "envcheck", lambda *_args, **_kwargs: agent.env)
-        if patch_run:
-            monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
+        monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
         return agent
 
     def test_multiple_loaded_keys_render_as_lists(self, monkeypatch, capsys):
@@ -145,71 +134,69 @@ class TestSshAgentLoadOutput:
         assert self._agent(monkeypatch).load(["/home/user/.ssh/key1", "/home/user/.ssh/key2"]) is True
 
         err = capsys.readouterr().err
-        assert "Adding 2 ssh keys:" in err
+        assert "Need to add 2 ssh keys:" in err
         assert "   - /home/user/.ssh/key1" in err
         assert "   - /home/user/.ssh/key2" in err
-        assert "Adding 2 ssh keys: /home/user/.ssh/key1 /home/user/.ssh/key2" not in err
+        assert "Need to add 2 ssh keys: /home/user/.ssh/key1 /home/user/.ssh/key2" not in err
         assert "ssh-add: Identities added" not in err
 
-    def test_single_loaded_key_stays_compact(self, monkeypatch, capsys):
-        """Verify the common one-key path keeps the compact single-line output."""
+    def test_single_loaded_key_uses_consistent_list_layout(self, monkeypatch, capsys):
+        """Verify the common one-key path uses the same scannable layout as multi-key output."""
         assert self._agent(monkeypatch).load(["/home/user/.ssh/key1"]) is True
 
         err = capsys.readouterr().err
-        assert "Adding 1 ssh key(s): /home/user/.ssh/key1" in err
+        assert "Need to add 1 ssh key:" in err
         assert "ssh-add: Identities added" not in err
-        assert "   - /home/user/.ssh/key1" not in err
+        assert "   - /home/user/.ssh/key1" in err
 
-    def test_configured_askpass_is_passed_to_ssh_add(self, monkeypatch):
-        """Verify [ssh.askpass] controls the ssh-add environment."""
-        seen = {}
+    def test_prepare_load_can_skip_announcement(self, monkeypatch, capsys):
+        """Verify wait-driven activation can show the key list once before invoking ssh-add."""
+        plan = self._agent(monkeypatch).prepare_load(["/home/user/.ssh/key1"], announce=False)
 
-        def fake_run(_cmd, *, env, check):
-            seen.update(env)
-            return SimpleNamespace(returncode=0)
+        assert plan is not None
+        assert plan.cmd == ["ssh-add", "/home/user/.ssh/key1"]
+        assert capsys.readouterr().err == ""
 
-        monkeypatch.setattr(agents.subprocess, "run", fake_run)
-        agent = self._agent(
-            monkeypatch,
-            values={
-                "no_gui": False,
-                "ssh_askpass_program": "/usr/local/bin/op-askpass",
-                "ssh_askpass_mode": "force",
-            },
-            patch_run=False,
-        )
 
-        assert agent.load(["/home/user/.ssh/key1"]) is True
-        assert seen["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
-        assert seen["SSH_AGENT_PID"] == "1111"
-        assert seen["SSH_ASKPASS"] == "/usr/local/bin/op-askpass"
-        assert seen["SSH_ASKPASS_REQUIRE"] == "force"
+# ---------------------------------------------------------------------------
+# gpg-agent wipe output
+# ---------------------------------------------------------------------------
 
-    def test_askpass_never_removes_ambient_gui_prompting(self, monkeypatch):
-        """Verify mode=never strips askpass variables even if the shell provided them."""
-        seen = {}
 
-        def fake_run(_cmd, *, env, check):
-            seen.update(env)
-            return SimpleNamespace(returncode=0)
+class TestGpgAgentWipe:
+    def _agent(self, monkeypatch, returncode=1, stdout="", stderr="", debug=False):
+        def fake_run(cmd, **kwargs):
+            assert cmd == ["gpg-connect-agent", "--no-autostart"]
+            assert kwargs["input_"] == "RELOADAGENT\n"
+            assert kwargs["timeout"] == 5
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
-        monkeypatch.setattr(agents.subprocess, "run", fake_run)
-        agent = self._agent(
-            monkeypatch,
-            values={"no_gui": False, "ssh_askpass_mode": "never"},
-            env={
-                "DISPLAY": ":0",
-                "SSH_ASKPASS": "/bin/askpass",
-                "SSH_ASKPASS_REQUIRE": "force",
-            },
-            patch_run=False,
-        )
+        monkeypatch.setattr(agents, "run", fake_run)
+        out = Output.build(quiet=False, debug=debug, eval_mode=False, color=False)
+        return agents.GpgAgent(SimpleNamespace(), out)
 
-        assert agent.load(["/home/user/.ssh/key1"]) is True
-        assert "DISPLAY" not in seen
-        assert "SSH_ASKPASS" not in seen
-        assert "SSH_ASKPASS_REQUIRE" not in seen
+    def test_blank_failure_is_quiet_by_default(self, monkeypatch, capsys):
+        """Verify a no-agent/no-output gpg wipe failure does not render a janky empty output detail."""
+        self._agent(monkeypatch, returncode=1).wipe()
 
+        err = capsys.readouterr().err
+        assert err == ""
+        assert "output:" not in err
+
+    def test_failure_details_are_debug_only(self, monkeypatch, capsys):
+        """Verify non-empty gpg wipe diagnostics are available in debug mode without polluting normal startup output."""
+        self._agent(monkeypatch, returncode=1, stderr="ERR 67108983 No agent running\n", debug=True).wipe()
+
+        err = capsys.readouterr().err
+        assert "gpg-agent could not remove identities" in err
+        assert "No agent running" in err
+        assert "output:" not in err
+
+    def test_success_stays_visible(self, monkeypatch, capsys):
+        """Verify a confirmed gpg-agent wipe still reports success to the user."""
+        self._agent(monkeypatch, returncode=0, stdout="OK\n").wipe()
+
+        assert "gpg-agent: All identities removed." in capsys.readouterr().err
 
 # ---------------------------------------------------------------------------
 # findpids
@@ -395,6 +382,59 @@ class TestSshEnvcheckUnknownSource:
         joined = " ".join(captured)
         assert str(sock_path) in joined
         assert "forwarded" not in joined.lower()
+
+
+class TestSshAgentStartupOutput:
+    def _agent_with_args(self, tmp_path):
+        from keychain import state
+        from keychain.paths import KeychainPaths
+        from keychain.runtime.config import RuntimeConfig
+
+        args = RuntimeConfig.resolve(["add", "--no-inherit", "--no-gui"])
+        paths = KeychainPaths(keydir=tmp_path, host="h")
+        kstate = state.KeychainState(paths=paths, env={}, args=args)
+        out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
+        return agents.SshAgent(kstate, out), paths
+
+    def _fake_spawn(self, monkeypatch):
+        def fake_run(cmd, *_args, **_kwargs):
+            assert cmd[0] == "ssh-agent"
+            return SimpleNamespace(
+                returncode=0,
+                stdout='SSH_AUTH_SOCK="/tmp/keychain-test-agent.sock"; export SSH_AUTH_SOCK\n'
+                "SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(agents, "run", fake_run)
+
+    def test_stale_pidfile_socket_missing_is_spawn_context(self, tmp_path, monkeypatch, capsys):
+        """Verify common WSL-style stale pidfiles are folded into the spawn line instead of a standalone note."""
+        agent, paths = self._agent_with_args(tmp_path)
+        paths.write(SshAgentRef(sock=str(tmp_path / "missing-agent.sock"), pid="999999"), _out())
+        self._fake_spawn(monkeypatch)
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        err = capsys.readouterr().err
+        assert "Starting ssh-agent (previous pidfile stale: socket missing)..." in err
+        assert "SSH_AUTH_SOCK in pidfile points" not in err
+
+    def test_suspicious_pidfile_socket_rejection_stays_visible(self, tmp_path, monkeypatch, capsys):
+        """Verify non-stale-looking socket failures still warn because they may indicate bad state."""
+        agent, paths = self._agent_with_args(tmp_path)
+        bad_sock = tmp_path / "not-a-socket"
+        bad_sock.write_text("not a socket", encoding="utf-8")
+        paths.write(SshAgentRef(sock=str(bad_sock), pid="999999"), _out())
+        self._fake_spawn(monkeypatch)
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        err = capsys.readouterr().err
+        assert "SSH_AUTH_SOCK in pidfile points" in err
+        assert "rejected socket (not-socket)" in err
+        assert "Starting ssh-agent..." in err
+        assert "previous pidfile stale" not in err
 
 
 # ---------------------------------------------------------------------------

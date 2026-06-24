@@ -278,20 +278,3 @@ def test_apply_keychainrc_coerces_bool_and_int_values(tmp_path, monkeypatch):
 
     assert args.get_value("debug") is True
     assert args.get_value("timeout") == 15
-
-
-def test_apply_keychainrc_accepts_config_only_ssh_askpass(tmp_path, monkeypatch):
-    """Verify config-only ssh.askpass keys are accepted by the .keychainrc schema.
-
-    This should pass because askpass is intentionally configured as a persistent
-    preference rather than a normal command-line option.
-    """
-    rc = tmp_path / ".keychainrc"
-    rc.write_text("[ssh.askpass]\nprogram = /usr/local/bin/op-askpass\nmode = force\n")
-    monkeypatch.setenv("KEYCHAIN_CONFIG", str(rc))
-
-    args = RuntimeConfig.resolve(["add", "-E"])
-
-    assert args.get_value("ssh_askpass_program") == "/usr/local/bin/op-askpass"
-    assert args.get_value("ssh_askpass_mode") == "force"
-    assert args.rc_warnings == []

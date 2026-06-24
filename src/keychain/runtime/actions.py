@@ -477,18 +477,8 @@ class Action(Element):
 # -------------------------------------------------------------------------------
 ROOT_ACTION = Action(fq_name="global", varname="global")
 
-ROOT_ACTION.add_option(
-    option="--help",
-    cli_aliases=("-h",),
-    action_adapter=_help_action_adapter,
-    doc_tag="action:help",
-)
-ROOT_ACTION.add_option(
-    option="--version",
-    cli_aliases=("-V",),
-    action_adapter=_version_action_adapter,
-    doc_tag="action:version",
-)
+ROOT_ACTION.add_option(option="--help", cli_aliases=("-h",), action_adapter=_help_action_adapter)
+ROOT_ACTION.add_option(option="--version", cli_aliases=("-V",), action_adapter=_version_action_adapter)
 ROOT_ACTION.add_option(option="--explain", see_also=("man",))
 
 # Security gate: all KEYCHAIN_* env var ingestion is disabled by default.
@@ -582,7 +572,6 @@ Option(
     type="str",
     config_section="agent.env",
     actions={cmd_add, agent_start},
-    doc_tag="config:agent.env.ssh_args",
 )
 Option(
     option="--gpg-agent-args",
@@ -590,30 +579,6 @@ Option(
     type="str",
     config_section="agent.env",
     actions={cmd_add, agent_start},
-    doc_tag="config:agent.env.gpg_args",
-)
-Option(
-    varname="ssh_askpass_program",
-    type="str",
-    config_section="ssh.askpass",
-    config_key="program",
-    actions={cmd_add, agent_start},
-    hidden=True,
-    doc_tag="config:ssh.askpass.program",
-)
-Option(
-    varname="ssh_askpass_mode",
-    type="str",
-    default="auto",
-    config_section="ssh.askpass",
-    config_key="mode",
-    actions={cmd_add, agent_start},
-    hidden=True,
-    doc_tag="config:ssh.askpass.mode",
-    validator=(
-        lambda value: value in ("auto", "prefer", "force", "never"),
-        "[ssh.askpass] mode must be one of: auto, prefer, force, never",
-    ),
 )
 
 # Add/Agent start misslabeled globals
@@ -623,7 +588,6 @@ Option(
     default=5,
     actions={cmd_add, agent_start},
     config_section="lock",
-    doc_tag="option:lockwait",
     validator=(lambda value: value >= 0, "--lockwait requires an argument zero or greater."),
 )
 Option(
@@ -632,7 +596,6 @@ Option(
     argparse_action="append",
     actions={cmd_add, agent_start},
     deprecated=True,
-    doc_tag="option:agents",
     deprecation_message="--agents is deprecated, ignoring.",
 )
 Option(
@@ -660,13 +623,7 @@ Option(
     deprecated=True,
     deprecation_message="--attempts is now deprecated.",
 )
-Option(
-    option="--no-lock",
-    cli_aliases=("--nolock",),
-    actions={cmd_add, agent_start},
-    config_section="lock",
-    doc_tag="option:no-lock",
-)
+Option(option="--no-lock", cli_aliases=("--nolock",), actions={cmd_add, agent_start}, config_section="lock")
 
 agent_stop.add_option(option="--mine", exclusive_group="target")
 agent_stop.add_option(option="--others", exclusive_group="target")

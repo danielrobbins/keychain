@@ -182,6 +182,22 @@ class KeychainPaths:
     def lockf(self):
         return self.keydir / f"{self.host}-lockf"
 
+    @property
+    def state_file(self) -> Path:
+        return self.keydir / f"{self.host}.state.json"
+
+    @property
+    def state_lockf(self) -> Path:
+        return self.keydir / f"{self.host}.state.lock"
+
+    @property
+    def activation_lockf(self) -> Path:
+        return self.keydir / f"{self.host}.activation.lock"
+
+    @property
+    def waiters_dir(self) -> Path:
+        return self.keydir / f"{self.host}-waiters"
+
     def render_env(
         self, env: SshAgentRef | Mapping[str, str], shell: str = "env", shell_env: Mapping[str, str] | None = None
     ) -> str:

@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,10 @@ from tests.support import set_home
 POSIX_AGENT_ONLY = pytest.mark.skipif(
     not platform.detect().supported,
     reason="agent lifecycle e2e coverage requires a supported POSIX-shaped host",
+)
+LINUX_AGENT_ONLY = pytest.mark.skipif(
+    not platform.detect().supported or not sys.platform.startswith("linux"),
+    reason="real ssh-agent lifecycle e2e coverage is Linux-only in CI",
 )
 
 
@@ -94,7 +99,7 @@ def playbook(tmp_path, monkeypatch, capsys):
     runner.run("agent", "stop", "--mine", expect_exit=None)
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_basic_agent_lifecycle(playbook: PlaybookRunner):
     """Test that an agent can be started and isolated cleanly."""
     playbook.set_host("testhost")
@@ -126,7 +131,7 @@ def test_basic_agent_lifecycle(playbook: PlaybookRunner):
     assert state_after["pidfile"]["pid_alive"] is False
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_hostname_variable_priority(playbook: PlaybookRunner):
     """Verify that socket.gethostname() accurately beats out stale $HOSTNAME variables."""
     # Set the bash env to something stale
@@ -141,7 +146,7 @@ def test_hostname_variable_priority(playbook: PlaybookRunner):
     assert not (playbook.keydir / "stale-bash-host-sh").exists(), "Used stale env var"
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_tilde_expansion_bug(playbook: PlaybookRunner):
     """Verify that --dir ~/mykeys expands to the absolute path and not literally CWD/~"""
     playbook.set_host("testhost")
@@ -158,7 +163,7 @@ def test_tilde_expansion_bug(playbook: PlaybookRunner):
     assert not (playbook.home / "~").exists()
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_stale_pidfile_cleanup(playbook: PlaybookRunner):
     """Verify that obsolete shell-variant pidfiles are wiped to prevent drift."""
     playbook.set_host("testhost")
@@ -176,7 +181,7 @@ def test_stale_pidfile_cleanup(playbook: PlaybookRunner):
         assert not stale_file.exists(), f"Stale file {stale_file.name} was left behind!"
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_eval_shell_output(playbook: PlaybookRunner):
     """Verify that --eval correctly generates eval-ready assignments."""
     playbook.set_host("testhost")
@@ -247,7 +252,7 @@ def test_add_with_only_missing_keys_does_not_start_agent(playbook: PlaybookRunne
     assert not (playbook.keydir / "testhost-sh").exists()
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_inspect_command(playbook: PlaybookRunner):
     """Verify that keychain inspect successfully outputs state."""
     playbook.set_host("testhost")
@@ -292,7 +297,7 @@ def test_version_json_emits_expected_keys(playbook: PlaybookRunner):
     assert "url" in payload
 
 
-@POSIX_AGENT_ONLY
+@LINUX_AGENT_ONLY
 def test_agent_args_from_env_and_config(playbook: PlaybookRunner):
     """Verify that agent args flow from environment and config file into subprocess calls."""
     import keychain.agents

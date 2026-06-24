@@ -1,5 +1,80 @@
 # ChangeLog
 
+## 3.0.0_beta2
+
+Second public beta of Keychain 3.x, collecting all changes made after the
+`3.0.0_beta1` tag.
+
+This release transforms the multi-terminal experience and strengthens GPG key
+handling. The headline feature is a coordinated unlock protocol that eliminates
+the frustrating "could not acquire lock" errors when multiple shells start
+simultaneously -- a common occurrence when Visual Studio Code reconnects to
+WSL and restores several terminals at once.
+
+Highlights:
+
+- **Coordinated multi-terminal initialization (solves issue #214).** Keychain
+  now uses an elegant coordination protocol instead of the classic lock-timeout
+  race. When multiple terminals detect missing SSH keys:
+
+  - All terminals display: `Press Enter to initialize keys`
+  - Pressing Enter in *any* terminal runs `ssh-add` in that terminal
+  - Other terminals wait automatically and are notified when initialization completes
+  - Waiting terminals print `Keys initialized by another terminal.` and configure
+    their environment without prompting
+
+  This eliminates the `could not acquire lock` errors that plagued earlier
+  versions. The technical implementation uses a short-lived state lock for
+  metadata updates, a dedicated activation lock to elect the loader, and FIFO
+  endpoints for instant kernel-level notification (no polling). A takeover
+  mechanism allows any waiting terminal to cancel a stuck `ssh-add` by typing
+  `takeover`, ensuring you're never blocked by a hidden or inaccessible prompt.
+  Internal coordination is quiet -- no more `Waiting N seconds for lock...`
+  messages during interactive key loading.
+
+- **Improved startup and key-loading output.**
+  - Multi-key `ssh-add` prompts render as compact lists instead of long inline
+    messages
+  - Common stale pidfile/socket cases (especially in WSL restart scenarios) are
+    folded into the `Starting ssh-agent...` context instead of producing
+    separate noisy notes
+  - Empty `gpg-agent` wipe diagnostics no longer render awkward `(output: )`
+    text; non-actionable no-agent details are debug output
+  - Successful remote initialization is reported as `Keys initialized by another
+    terminal.`
+
+- **Reliable GPG warm-up with explicit verification.** The `gpge:KEYID` and
+  `gpga:KEYID` extended key syntax now perform a complete encrypt-then-decrypt
+  verification cycle instead of relying on signing warm-up side effects. A tiny
+  temporary payload is encrypted to the requested key and immediately decrypted
+  through `gpg-agent`. If this verification cannot be completed, `add` fails
+  rather than reporting success. This is significantly more reliable across
+  different GnuPG versions and key configurations, where signing warm-up may
+  not populate the decryption passphrase cache. The legacy `gpgk:KEYID` alias
+  remains equivalent to `gpgs:KEYID` (signing warm-up only).
+
+- **Enhanced documentation.** The embedded man page now includes comprehensive
+  coverage of the coordination model (`keychain man topic:coordination`),
+  updated guidance for `--lockwait` and `--no-lock` options, and clearer
+  explanations of GPG warm-up guarantees. New design documents and a formal
+  UX acceptance checklist support manual multi-terminal testing.
+
+- **Focused test coverage.** New tests validate the coordination state file,
+  waiter FIFO registration, activation lock handoff, takeover/cancel mechanics,
+  and GPG end-to-end warm-up for both signing and encryption/decryption paths.
+  Test infrastructure improvements ensure the checkout's source code is tested
+  rather than any installed version, and CI coverage now includes macOS GPG
+  validation.
+
+Beta notes:
+
+- The coordinated unlock flow applies to SSH key loading only. GPG keys use
+  explicit warm-up paths (`gpgs:`, `gpge:`, `gpga:`) and do not participate
+  in multi-terminal coordination.
+- Terminal prompt erasing is best-effort: used on ANSI-capable terminals,
+  falling back to ordinary line output when stderr is redirected, `TERM=dumb`,
+  or the prompt would wrap.
+
 ## 3.0.0_beta1
 
 Initial public beta of Keychain 3.x.

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import sys
 import threading
 from collections.abc import Iterable, Mapping
@@ -80,6 +81,7 @@ _MODERN_PALETTE: dict[str, str] = {
 _NO_ANSI: dict[str, str] = {k: "" for k in _LEGACY_PALETTE}
 
 _DOC_INLINE_MARKUP_RE = re.compile(r"``([^`]+)``|`([^`]+)`|(?<!\*)\*([^*\n]+)\*(?!\*)")
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _roles_for(palette: Mapping[str, str]) -> dict[str, str]:
@@ -113,6 +115,7 @@ _GLYPHS_MODERN: dict[str, str] = {
     "debug": "\u22ef",  # ⋯
     "bar": "\u258c",  # ▌
     "arrow": "\u21b3",  # ↳
+    "key": "\U0001f511", # 🔑
 }
 _GLYPHS_ASCII: dict[str, str] = {
     "info": "*",
@@ -123,6 +126,7 @@ _GLYPHS_ASCII: dict[str, str] = {
     "debug": ":",
     "bar": "|",
     "arrow": ">",
+    "key": "~"
 }
 # Glyph -> palette colour role (used to colour the glyph itself).
 _GLYPH_COLOR: dict[str, str] = {
@@ -279,6 +283,10 @@ def _split_doc_inline(text: str) -> list[tuple[str, str]]:
 
 def _strip_doc_inline(text: str) -> str:
     return "".join(chunk for chunk, _kind in _split_doc_inline(text))
+
+
+def _visible_width(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
 
 
 @dataclass(frozen=True)
@@ -527,6 +535,31 @@ class Output:
             return
         print(_stringify(msg), file=sys.stderr)
 
+    def ephemeral_line(self, msg: Renderable) -> bool:
+        """Render a clearable stderr line for interactive prompts.
+
+        Returns ``True`` when the line was emitted without a newline and can be
+        cleared by :meth:`clear_ephemeral_line`. When terminal control is not
+        safe, falls back to :meth:`line` and returns ``False``.
+        """
+        if self._silent or self.quiet:
+            return False
+        text = _stringify(msg)
+        if not self._can_use_ephemeral_line(text):
+            self.line(text)
+            return False
+        sys.stderr.write(f"\r\x1b[2K{text}")
+        sys.stderr.flush()
+        return True
+
+    def clear_ephemeral_line(self, *, after_input: bool = False) -> None:
+        """Clear the last :meth:`ephemeral_line` prompt when terminal-safe."""
+        if self._silent or self.quiet or not self._terminal_control_enabled():
+            return
+        prefix = "\x1b[1A" if after_input else ""
+        sys.stderr.write(f"{prefix}\r\x1b[2K")
+        sys.stderr.flush()
+
     def info(self, msg: Renderable) -> None:
         """Informational message (▸). Suppressed by quiet / json."""
         if self._silent or self.quiet:
@@ -593,3 +626,20 @@ class Output:
 
     def banner_line(self, body: str) -> None:
         self.banner(body)
+
+    def _can_use_ephemeral_line(self, text: str) -> bool:
+        if not self._terminal_control_enabled():
+            return False
+        columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+        return _visible_width(text) < max(1, columns - 4)
+
+    def _terminal_control_enabled(self) -> bool:
+        if self.json:
+            return False
+        term = (os.environ.get("TERM") or "").lower()
+        if not term or term == "dumb":
+            return False
+        try:
+            return bool(os.isatty(sys.stderr.fileno()))
+        except (OSError, ValueError):
+            return False

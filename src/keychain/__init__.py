@@ -49,18 +49,20 @@ def _resolve_version() -> str:
             return text
     except (FileNotFoundError, ModuleNotFoundError, OSError):
         pass
-    # 2. Fall back to installed-package metadata (pip install ., wheels, ...).
-    try:
-        return version("keychain")
-    except PackageNotFoundError:
-        pass
-    # 3. Fall back to the VERSION file at the source-tree root (running
-    # uninstalled from a checkout, e.g. ``python -m keychain``).
+    # 2. Fall back to the VERSION file at the source-tree root (running
+    # uninstalled from a checkout, e.g. ``python -m keychain``). This must
+    # come before installed-package metadata so a development checkout is not
+    # shadowed by an older ``keychain`` installed in the active environment.
     here = Path(__file__).resolve()
     for parent in (here.parent, *here.parents):
         candidate = parent / "VERSION"
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8").strip() or "0.0.0"
+    # 3. Fall back to installed-package metadata (pip install ., wheels, ...).
+    try:
+        return version("keychain")
+    except PackageNotFoundError:
+        pass
     return "0.0.0"
 
 

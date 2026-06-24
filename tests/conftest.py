@@ -4,7 +4,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
 
 def pytest_configure() -> None:
-    root = Path(__file__).resolve().parents[1]
-    subprocess.run([sys.executable, str(root / "scripts" / "build_doc_texts.py")], check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "build_doc_texts.py")], check=True)

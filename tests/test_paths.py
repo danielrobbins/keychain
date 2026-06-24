@@ -59,6 +59,10 @@ class TestKeychainPathsProperties:
         assert kp.pidfile_path("csh").name == "box-csh"
         assert kp.pidfile_path("fish").name == "box-fish"
         assert kp.lockf.name == "box-lockf"
+        assert kp.state_file.name == "box.state.json"
+        assert kp.state_lockf.name == "box.state.lock"
+        assert kp.activation_lockf.name == "box.activation.lock"
+        assert kp.waiters_dir.name == "box-waiters"
 
     def test_pidfile_for_fish(self):
         kp = KeychainPaths(keydir=Path("/tmp/.keychain"), host="box")
