@@ -3,7 +3,7 @@
 
 Three layers, smallest first:
 
-* :class:`Span` -- a typed coloured fragment carrying a *role* name. Its
+* :class:`Span` -- a typed colored fragment carrying a *role* name. Its
   ``__str__`` looks up the active :class:`Theme` from a thread-local set
   by :meth:`Output.build` and renders the wrapped text with that theme's
   ANSI prefix and reset.
@@ -47,6 +47,10 @@ ROLES: tuple[str, ...] = (
     "dim",  # parentheticals, "(none)", placeholder text
     "heading",  # section / panel titles
     "kbd",  # shell snippets in prose
+    "doc_text",  # normal prose inside embedded docs
+    "doc_code",  # inline `code` spans inside prose docs
+    "doc_emph",  # emphasized *text* inside prose docs
+    "underlined_heading",  # bold cyan + underline for action/option/config/section headings
 )
 
 DEFAULT_THEME = "modern"
@@ -64,6 +68,9 @@ _LEGACY_PALETTE: dict[str, str] = {
     "RED": "\033[31;01m",
     "PURP": "\033[35;01m",
     "YEL": "\033[33;01m",
+    "AMBER": "\033[33m",
+    "DOC": "\033[37m",
+    "BOLD": "\033[1m",
     "DIM": "\033[2m",
     "OFF": "\033[0m",
 }
@@ -75,18 +82,21 @@ _MODERN_PALETTE: dict[str, str] = {
     "RED": "\033[38;5;203m",  # warm salmon
     "PURP": "\033[38;5;141m",  # muted mauve
     "YEL": "\033[38;5;221m",  # gold
+    "AMBER": "\033[38;5;179m",  # softened amber for inline prose code
+    "DOC": "\033[38;5;250m",  # readable but quieter than emphasis
+    "BOLD": "\033[1m\033[38;5;255m",  # bright white emphasis
     "DIM": "\033[38;5;245m",  # neutral grey
     "OFF": "\033[0m",
 }
 _NO_ANSI: dict[str, str] = {k: "" for k in _LEGACY_PALETTE}
 
-_DOC_INLINE_MARKUP_RE = re.compile(r"``([^`]+)``|`([^`]+)`|(?<!\*)\*([^*\n]+)\*(?!\*)")
+_DOC_INLINE_MARKUP_RE = re.compile(r"`([^`\n]+)`|(?<!\*)\*([^*\n]+)\*(?!\*)")
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 def _roles_for(palette: Mapping[str, str]) -> dict[str, str]:
     """Map :data:`ROLES` onto a palette. Single source of truth for the
-    role -> colour binding (changing a role's colour is a one-line edit)."""
+    role -> color binding (changing a role's color is a one-line edit)."""
     return {
         "plain": "",
         "identifier": palette["CYANN"],
@@ -99,6 +109,10 @@ def _roles_for(palette: Mapping[str, str]) -> dict[str, str]:
         "dim": palette["DIM"],
         "heading": palette["CYANN"],
         "kbd": palette["CYANN"],
+        "doc_text": palette["DOC"],
+        "doc_code": palette["AMBER"],
+        "doc_emph": palette["BOLD"],
+        "underlined_heading": f"\x1b[1m\x1b[4m{palette['CYANN']}",
     }
 
 
@@ -115,7 +129,7 @@ _GLYPHS_MODERN: dict[str, str] = {
     "debug": "\u22ef",  # ⋯
     "bar": "\u258c",  # ▌
     "arrow": "\u21b3",  # ↳
-    "key": "\U0001f511", # 🔑
+    "key": "\U0001f511",  # 🔑
 }
 _GLYPHS_ASCII: dict[str, str] = {
     "info": "*",
@@ -126,9 +140,9 @@ _GLYPHS_ASCII: dict[str, str] = {
     "debug": ":",
     "bar": "|",
     "arrow": ">",
-    "key": "~"
+    "key": "~",
 }
-# Glyph -> palette colour role (used to colour the glyph itself).
+# Glyph -> palette color role (used to color the glyph itself).
 _GLYPH_COLOR: dict[str, str] = {
     "info": "CYANN",
     "ok": "GREEN",
@@ -232,7 +246,7 @@ def _active_theme() -> Theme:
 
 @dataclass(frozen=True)
 class Span:
-    """A coloured run of text tagged with a role.
+    """A colored run of text tagged with a role.
 
     Renders against the *active* theme via :meth:`__str__`, so f-string
     interpolation works without leaking ANSI past the span:
@@ -271,10 +285,8 @@ def _split_doc_inline(text: str) -> list[tuple[str, str]]:
             parts.append((text[pos : match.start()], "text"))
         if match.group(1) is not None:
             parts.append((match.group(1), "code"))
-        elif match.group(2) is not None:
-            parts.append((match.group(2), "code"))
         else:
-            parts.append((match.group(3), "emph"))
+            parts.append((match.group(2), "emph"))
         pos = match.end()
     if pos < len(text):
         parts.append((text[pos:], "text"))
@@ -294,7 +306,7 @@ class Output:
     """Stateless output sink (one per process).
 
     ``Output.build()`` is the one true constructor for normal use; it
-    parses theme/colour/policy arguments and installs the active theme on
+    parses theme/color/policy arguments and installs the active theme on
     the thread-local that :class:`Span` reads from. ``Output.silent()``
     returns a no-op sink for probes that must not emit anything.
     """
@@ -379,7 +391,7 @@ class Output:
             _silent=True,
         )
 
-    # ---- back-compat colour accessor (deprecated) ----------------------
+    # ---- back-compat color accessor (deprecated) ----------------------
     def c(self, name: str) -> str:
         """Return the legacy palette ANSI prefix for *name* (e.g. 'CYANN').
 
@@ -392,7 +404,7 @@ class Output:
 
     # ---- glyph accessor ------------------------------------------------
     def glyph(self, role: str) -> str:
-        """Return *role*'s glyph wrapped in its theme colour (or bare)."""
+        """Return *role*'s glyph wrapped in its theme color (or bare)."""
         g = self.glyphs.get(role, "*")
         col = _GLYPH_COLOR.get(role, "")
         if col and self.colors.get(col):
@@ -440,6 +452,10 @@ class Output:
         """Shell snippet in prose."""
         return Span(str(s), "kbd")
 
+    def underlined_heading(self, s: object) -> Span:
+        """Bold cyan + underline for action/option/config/section headings."""
+        return Span(str(s), "underlined_heading")
+
     def style(self, *roles: str) -> str:
         """Return the concatenated ANSI prefix for one or more roles.
 
@@ -453,19 +469,20 @@ class Output:
         """Render the minimal inline doc markup used by embedded help text.
 
         Supported today:
-        - ``code`` / `code`
+        - `code`
         - *emphasis*
 
-        When colour is disabled the markup is stripped but the text remains.
+        When color is disabled the markup is stripped but the text remains.
         """
         if not text:
             return ""
         if not self.colors.get("OFF"):
             return _strip_doc_inline(text)
 
-        code_on = self.colors.get("YEL", "")
-        emph_on = "\x1b[1m"
-        off = self.colors.get("OFF", "")
+        text_on = self._theme.roles.get("doc_text", "")
+        code_on = self._theme.roles.get("doc_code", "")
+        emph_on = self._theme.roles.get("doc_emph", "")
+        off = self._theme.reset
         out: list[str] = []
         for chunk, kind in _split_doc_inline(text):
             if kind == "code":
@@ -473,14 +490,14 @@ class Output:
             elif kind == "emph":
                 out.append(f"{emph_on}{chunk}{off}")
             else:
-                out.append(chunk)
+                out.append(f"{text_on}{chunk}{off}" if text_on else chunk)
         return "".join(out)
 
     def wrap_doc(self, text: str, width: int, *, prefix: str = "", continuation: str = "") -> list[str]:
         """Wrap minimal inline-markup text while preserving rendered styling.
 
         Width calculations are based on the plain-text form so wrapped output
-        stays stable whether colour is enabled or not.
+        stays stable whether color is enabled or not.
         """
         lines: list[str] = []
         line = prefix
@@ -510,7 +527,7 @@ class Output:
                     line += (
                         self.format_doc(token if kind != "emph" else f"*{token}*")
                         if kind == "emph"
-                        else self.format_doc(f"``{token}``")
+                        else self.format_doc(f"`{token}`")
                     )
                 line_len += len(token)
                 line_has_text = True
@@ -527,7 +544,12 @@ class Output:
 
         Never suppressed by quiet/json -- this is protocol output.
         """
-        sys.stdout.write(msg)
+        try:
+            sys.stdout.write(msg)
+        except UnicodeEncodeError:
+            # Fallback for terminals that can't encode unicode (e.g., Windows cp1252).
+            # Replace unencodable characters with '?' to avoid crashing.
+            sys.stdout.write(msg.encode(sys.stdout.encoding, errors="replace").decode(sys.stdout.encoding))
 
     def line(self, msg: Renderable = "") -> None:
         """Plain stderr line. Suppressed by quiet / json."""

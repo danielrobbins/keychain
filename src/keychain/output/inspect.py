@@ -18,9 +18,9 @@ def _format_kv_rows(rows: list, out: Output) -> list[str]:
 
     Each row is ``(label, value, hint)`` or ``(label, value, hint, severity)``.
     Severity is ``""`` (info), ``"warn"`` (yellow) or ``"err"`` (red); it
-    colours the value and the hint together so security-relevant rows stand
+    colors the value and the hint together so security-relevant rows stand
     out without a separate badge column. Boolean values render as
-    ``● yes`` / ``✖ no`` in the severity colour (green/red by default).
+    ``● yes`` / ``✖ no`` in the severity color (green/red by default).
     """
     if not rows:
         return []
@@ -172,6 +172,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
             [
                 ("ssh keys", ", ".join(state.ssh_keys) or "(none)", ""),
                 ("gpg keys", ", ".join(state.gpg_keys) or "(none)", ""),
+                ("pkcs11 providers", ", ".join(state.pkcs11_keys) or "(none)", ""),
                 ("missing", ", ".join(miss) or "(none)", "these keys could not be located" if miss else ""),
             ],
             out,
@@ -260,6 +261,7 @@ def render_inspect_json(state: KeychainState) -> None:
         payload["resolved_keys"] = {
             "ssh": list(state.ssh_keys),
             "gpg": list(state.gpg_keys),
+            "pkcs11": list(state.pkcs11_keys),
             "missing": list(state.missing_keys),
         }
     print(json.dumps(payload, default=str))

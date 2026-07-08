@@ -58,6 +58,7 @@ class TestKeychainPathsProperties:
         assert kp.pidfile_path("sh").name == "box-sh"
         assert kp.pidfile_path("csh").name == "box-csh"
         assert kp.pidfile_path("fish").name == "box-fish"
+        assert kp.ssh_agent_socket_path.name == "box-agent.sock"
         assert kp.lockf.name == "box-lockf"
         assert kp.state_file.name == "box.state.json"
         assert kp.state_lockf.name == "box.state.lock"
@@ -147,10 +148,12 @@ class TestKeychainPathsWriteRead:
     def test_clear_removes_pidfiles(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="box")
         kp.write(SshAgentRef.from_text(AGENT_SH_OUTPUT), _out())
+        kp.ssh_agent_socket_path.write_text("stale", encoding="utf-8")
         kp.clear()
         assert not kp.pidfile_path("sh").exists()
         assert not kp.pidfile_path("csh").exists()
         assert not kp.pidfile_path("fish").exists()
+        assert not kp.ssh_agent_socket_path.exists()
 
     def test_write_uses_mkstemp_in_target_dir(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="box")

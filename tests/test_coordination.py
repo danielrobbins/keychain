@@ -360,7 +360,8 @@ class TestKeychainAppCoordination:
             def list_missing(self, ssh_keys, *, announce_known=True):
                 return list(ssh_keys) if not loaded else []
 
-            def prepare_load(self, missing, *, announce=True):
+            def prepare_load(self, missing, pkcs11=None, *, announce=True):
+                assert pkcs11 == []
                 assert announce is True
                 return SshAddPlan(["ssh-add", *missing], {"SSH_AUTH_SOCK": self.env.sock})
 
@@ -382,7 +383,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, out)
         app._kstate = kstate
 
-        assert app._do_add(["id_ed25519"], [], [], [], [], False, False) == 0
+        assert app._do_add(["id_ed25519"], [], [], [], [], [], False, False) == 0
 
         assert loaded == [(["ssh-add", "id_ed25519"], {"SSH_AUTH_SOCK": "/tmp/agent.sock"})]
         assert not paths.lockf.exists()
@@ -434,10 +435,11 @@ class TestKeychainAppCoordination:
             def list_missing(self, ssh_keys, *, announce_known=True):
                 return [] if remote_done else list(ssh_keys)
 
-            def announce_load(self, _missing):
+            def announce_load(self, _missing, _pkcs11=None):
                 return None
 
-            def prepare_load(self, missing, *, announce=True):
+            def prepare_load(self, missing, pkcs11=None, *, announce=True):
+                assert pkcs11 == []
                 assert announce is False
                 return SshAddPlan(["ssh-add", *missing], {"SSH_AUTH_SOCK": self.env.sock})
 
@@ -454,7 +456,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, _visible_out())
         app._kstate = kstate
 
-        assert app._do_add(["id_ed25519"], [], [], [], [], False, False) == 0
+        assert app._do_add(["id_ed25519"], [], [], [], [], [], False, False) == 0
 
         assert owner_calls == [["ssh-add", "id_ed25519"]]
         assert wait_modes == [False]

@@ -2,7 +2,7 @@
 """Lightweight table renderer.
 
 Single public function :func:`render_table`. Box-drawing characters when the
-terminal is UTF-8 capable; ASCII fallback otherwise. ANSI colour codes inside
+terminal is UTF-8 capable; ASCII fallback otherwise. ANSI color codes inside
 cells are tolerated when computing column widths via :func:`visible_width`.
 
 Kept dependency-free and small on purpose -- a third-party ``tabulate`` /
@@ -15,7 +15,7 @@ import re
 import sys
 from collections.abc import Iterable, Sequence
 
-# Strip ANSI CSI sequences when measuring column widths so coloured cells
+# Strip ANSI CSI sequences when measuring column widths so colored cells
 # still align. We don't need a perfect parser -- ``\x1b[...m`` covers SGR.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -40,8 +40,8 @@ def render_table(
     """Render *rows* (and optional *headers*) as an aligned text table.
 
     Returns the rendered string (no trailing newline). Empty input yields ``""``.
-    Cells are coerced to ``str``; ANSI colour codes inside cells are honoured
-    and excluded from width calculations so coloured tables still align.
+    Cells are coerced to ``str``; ANSI color codes inside cells are honoured
+    and excluded from width calculations so colored tables still align.
     *header_style* is an ANSI escape applied to each header cell (cleared
     with ``\\x1b[0m``); pass ``""`` for plain headers.
     """
@@ -120,7 +120,7 @@ def render_panel(
         ╰───────────────────╯
 
     ASCII fallback uses ``+``/``-``/``|`` like :func:`render_table`. ANSI
-    colour codes inside *body_lines* are honoured for width calculations.
+    color codes inside *body_lines* are honoured for width calculations.
     """
     box = _BOX_UNICODE if _use_unicode() else _BOX_ASCII
     h, v, top, _mid, bot = box

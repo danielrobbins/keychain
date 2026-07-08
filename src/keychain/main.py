@@ -2,7 +2,7 @@
 """Command-line entry point: argument parsing + thin coordinator.
 
 The user-visible interface is an action tree
-(``keychain {add,agent,list,wipe,forget,inspect,status,env,version,help}``).
+(``keychain {add,agent,list,wipe,forget,inspect,env,version,help}``).
 Legacy keychain 2.x flat-flag invocations (``keychain --stop all``,
 ``keychain --list``, plain ``keychain``) are translated to the new form
 by :mod:`keychain.compat` before parsing, so a single internal parser
@@ -45,13 +45,14 @@ class _MissingKeys:
     gpg_s: list[str] = field(default_factory=list)
     gpg_e: list[str] = field(default_factory=list)
     gpg_a: list[str] = field(default_factory=list)
+    pkcs11: list[str] = field(default_factory=list)
 
     @property
     def any(self) -> bool:
-        return bool(self.ssh or self.gpg or self.gpg_s or self.gpg_e or self.gpg_a)
+        return bool(self.ssh or self.gpg or self.gpg_s or self.gpg_e or self.gpg_a or self.pkcs11)
 
     def labels(self) -> list[str]:
-        return [*self.ssh, *self.gpg, *self.gpg_s, *self.gpg_e, *self.gpg_a]
+        return [*self.ssh, *self.gpg, *self.gpg_s, *self.gpg_e, *self.gpg_a, *self.pkcs11]
 
 
 def banner(out: Output) -> None:
@@ -68,7 +69,7 @@ def banner(out: Output) -> None:
 
 def versinfo(out: Output) -> None:
     out.line()
-    out.line("   Copyright 2026 Daniel Robbins, BreezyOps")
+    out.line(" Copyright 2026 Daniel Robbins.")
     out.line()
     out.line(" Keychain is free software: you can redistribute it and/or modify")
     out.line(f" it under the terms of the {out.id('GNU General Public License version 3')} as")
@@ -234,7 +235,7 @@ class KeychainApp:
     def _handle_agent_start_action(self) -> int:
         self._verify_keydir()
         ssh_spawn_gpg, ssh_allow_gpg = self._agent_settings()
-        return self._do_add([], [], [], [], [], ssh_spawn_gpg, ssh_allow_gpg)
+        return self._do_add([], [], [], [], [], [], ssh_spawn_gpg, ssh_allow_gpg)
 
     def _handle_wipe_action(self) -> int:
         self._verify_keydir()
@@ -254,8 +255,10 @@ class KeychainApp:
         if not keys_arg and not conf_arg:
             return 0
         resolved = self._resolve_requested_keys(gpg_lookup=False)
-        if resolved.gpg:
-            raise KeychainError("forget only supports SSH keys; use wipe --gpg to remove all gpg-agent identities.")
+        if resolved.gpg or resolved.pkcs11:
+            raise KeychainError(
+                "forget only supports SSH key files; use wipe --gpg to remove all gpg-agent identities."
+            )
         self.kstate.ssh.remove(resolved.ssh)
         self.out.line()
         return 0
@@ -264,7 +267,12 @@ class KeychainApp:
         self._verify_keydir()
         resolved = self._resolve_requested_keys()
         requested_keys = list(self.args.get_value("keys") or [])
-        if requested_keys and not resolved.ssh and not any((resolved.gpg, resolved.gpg_s, resolved.gpg_e, resolved.gpg_a)) and resolved.missing:
+        if (
+            requested_keys
+            and not resolved.ssh
+            and not any((resolved.gpg, resolved.gpg_s, resolved.gpg_e, resolved.gpg_a, resolved.pkcs11))
+            and resolved.missing
+        ):
             raise KeychainError(
                 "No requested keys could be resolved; refusing to start an agent. "
                 "Run 'keychain help add' for more information."
@@ -276,6 +284,7 @@ class KeychainApp:
             resolved.gpg_s,
             resolved.gpg_e,
             resolved.gpg_a,
+            resolved.pkcs11,
             ssh_spawn_gpg,
             ssh_allow_gpg,
         )
@@ -307,6 +316,7 @@ class KeychainApp:
         gpg_s_keys: list[str],
         gpg_e_keys: list[str],
         gpg_a_keys: list[str],
+        pkcs11_keys: list[str],
         ssh_spawn_gpg: bool,
         ssh_allow_gpg: bool,
     ) -> int:
@@ -335,13 +345,13 @@ class KeychainApp:
             return 0
 
         with coord.state_lock():
-            missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys)
+            missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys)
 
         if not missing.any:
             self.out.line()
             return 0
 
-        waiter = coord.create_waiter() if missing.ssh and coord.can_prompt() else None
+        waiter = coord.create_waiter() if (missing.ssh or missing.pkcs11) and coord.can_prompt() else None
         if waiter is None:
             self._activate_direct(coord, missing, wipe_pending)
             self.out.line()
@@ -349,14 +359,14 @@ class KeychainApp:
 
         try:
             with coord.state_lock():
-                missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys)
+                missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys)
                 if not missing.any:
                     self.out.line()
                     return 0
                 state_snapshot = coord.load_state()
                 coord.register_waiter(state_snapshot, waiter, missing.labels())
                 coord.save_state(state_snapshot)
-            self.kstate.ssh.announce_load(missing.ssh)
+            self.kstate.ssh.announce_load(missing.ssh, missing.pkcs11)
 
             handoff_wait = False
             quiet_handoff_wait = False
@@ -379,6 +389,7 @@ class KeychainApp:
                         gpg_s_keys,
                         gpg_e_keys,
                         gpg_a_keys,
+                        pkcs11_keys,
                         status=status,
                     )
                     if not missing.any:
@@ -405,7 +416,9 @@ class KeychainApp:
                     handoff_wait = False
                     takeover = coord.request_takeover(waiter)
                     if takeover.get("status") in ("canceled", "inactive"):
-                        missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys)
+                        missing = self._missing_keys(
+                            ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys
+                        )
                         if not missing.any:
                             self.out.info("Keys initialized by another terminal.")
                             self.out.line()
@@ -422,7 +435,7 @@ class KeychainApp:
                 quiet_handoff_wait = handoff_wait
 
                 with coord.state_lock():
-                    missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys)
+                    missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys)
                     if not missing.any:
                         self.out.info("Keys initialized by another terminal.")
                         self.out.line()
@@ -471,6 +484,7 @@ class KeychainApp:
         gpg_s_keys: list[str],
         gpg_e_keys: list[str],
         gpg_a_keys: list[str],
+        pkcs11_keys: list[str],
         *,
         announce_known: bool = True,
     ) -> _MissingKeys:
@@ -484,6 +498,9 @@ class KeychainApp:
             gpg_a=self.kstate.gpg.list_missing(gpg_a_keys, mode="--sign", announce_known=announce_known)
             if gpg_a_keys
             else [],
+            pkcs11=self.kstate.ssh.list_missing_pkcs11(pkcs11_keys, announce_known=announce_known)
+            if pkcs11_keys
+            else [],
         )
 
     def _missing_keys_after_notification(
@@ -493,6 +510,7 @@ class KeychainApp:
         gpg_s_keys: list[str],
         gpg_e_keys: list[str],
         gpg_a_keys: list[str],
+        pkcs11_keys: list[str],
         *,
         status: str,
     ) -> _MissingKeys:
@@ -504,6 +522,7 @@ class KeychainApp:
                 gpg_s_keys,
                 gpg_e_keys,
                 gpg_a_keys,
+                pkcs11_keys,
                 announce_known=False,
             )
             if not missing.any or attempt == attempts - 1:
@@ -538,8 +557,8 @@ class KeychainApp:
             status = "failed"
             try:
                 self._wipe_before_activation(missing, wipe_pending)
-                if missing.ssh:
-                    plan = self.kstate.ssh.prepare_load(missing.ssh, announce=waiter is None)
+                if missing.ssh or missing.pkcs11:
+                    plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
                     if plan is None:
                         raise KeychainError("Unable to add keys")
                     owner = ActivationOwner(coord, waiter, missing.labels(), self.out)

@@ -123,7 +123,7 @@ class TestResolveAction:
             ssh = _SSH()
 
             def resolve_requested_keys(self, _out, *, gpg_lookup=True):
-                return keys.ResolvedKeys([], [], [], [], [], [])
+                return keys.ResolvedKeys([], [], [], [], [], [], [])
 
         _State.args = ns
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
@@ -150,13 +150,13 @@ class TestResolveAction:
             ssh = _SSH()
 
             def resolve_requested_keys(self, _out, *, gpg_lookup=True):
-                return keys.ResolvedKeys([], ["ABCD1234"], [], [], [], [])
+                return keys.ResolvedKeys([], ["ABCD1234"], [], [], [], [], [])
 
         _State.args = ns
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         app = KeychainApp(ns, out)
         app._kstate = _State()
-        with pytest.raises(KeychainError, match="forget only supports SSH keys"):
+        with pytest.raises(KeychainError, match="forget only supports SSH key files"):
             app._handle_forget_action()
 
     def test_systemd_set_env_warns_on_timeout(self, monkeypatch, capsys):
@@ -183,7 +183,7 @@ class TestResolveAction:
             paths = _Paths()
 
             def resolve_requested_keys(self, _out, *, gpg_lookup=True):
-                return keys.ResolvedKeys([], [], [], [], [], ["ghost-key"])
+                return keys.ResolvedKeys([], [], [], [], [], [], ["ghost-key"])
 
         _State.args = ns
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
@@ -194,6 +194,31 @@ class TestResolveAction:
 
         with pytest.raises(KeychainError, match="No requested keys could be resolved; refusing to start an agent"):
             app._handle_add_action()
+
+    def test_add_with_pkcs11_request_does_not_trigger_missing_only_rejection(self):
+        ns = RuntimeConfig.resolve(["add", "pkcs11:/usr/lib/pkcs11/opensc-pkcs11.so"])
+
+        class _Paths:
+            def verify_keydir(self, _user, _out):
+                return None
+
+        class _State:
+            user = "tester"
+            paths = _Paths()
+
+            def resolve_requested_keys(self, _out, *, gpg_lookup=True):
+                return keys.ResolvedKeys([], [], [], [], [], ["/usr/lib/pkcs11/opensc-pkcs11.so"], [])
+
+        _State.args = ns
+        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+        app = KeychainApp(ns, out)
+        app._kstate = _State()
+        app._agent_settings = lambda: (False, False)
+        app._do_add = lambda ssh, gpg, gpg_s, gpg_e, gpg_a, pkcs11, *_rest: pkcs11 == [
+            "/usr/lib/pkcs11/opensc-pkcs11.so"
+        ]
+
+        assert app._handle_add_action() is True
 
     def test_quick_and_clear_incompatible(self):
         ns = RuntimeConfig.resolve(["add", "--quick", "--clear"])

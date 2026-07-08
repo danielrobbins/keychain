@@ -119,6 +119,25 @@ def test_style_with_no_color_is_empty():
     assert out.style("heading", "dim") == ""
 
 
+def test_doc_inline_code_uses_soft_amber_not_heading_cyan(monkeypatch):
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")
+    rendered = out.format_doc("Use `keychain man`.")
+
+    assert THEMES["modern"].roles["doc_code"] in rendered
+    assert THEMES["modern"].roles["heading"] not in rendered
+
+
+def test_doc_text_is_quieter_than_emphasis(monkeypatch):
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")
+    rendered = out.format_doc("Normal *important* text.")
+
+    assert THEMES["modern"].roles["doc_text"] in rendered
+    assert THEMES["modern"].roles["doc_emph"] in rendered
+    assert THEMES["modern"].roles["dim"] not in rendered
+
+
 def test_note_glyph_uses_green_accent(monkeypatch):
     monkeypatch.setattr(os, "isatty", lambda fd: True)
     out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")

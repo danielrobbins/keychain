@@ -433,12 +433,12 @@ class KeychainState:
     def resolved_keys(self) -> keys.ResolvedKeys:
         """Resolved SSH/GPG/missing keys for the user's args."""
         if not (self.cmdline_keys or self.confallhosts):
-            return keys.ResolvedKeys([], [], [], [], [], [])
+            return keys.ResolvedKeys([], [], [], [], [], [], [])
         return self.resolve_requested_keys(Output.silent())
 
     def resolve_requested_keys(self, out: Output, *, gpg_lookup: bool = True) -> keys.ResolvedKeys:
         if not (self.cmdline_keys or self.confallhosts):
-            return keys.ResolvedKeys([], [], [], [], [], [])
+            return keys.ResolvedKeys([], [], [], [], [], [], [])
         gpg_prog = self.gpg_prog if gpg_lookup else "gpg"
         return keys.resolve_requested_keys(
             self.confallhosts, self.extended, self.cmdline_keys, gpg_prog, out, gpg_lookup=gpg_lookup
@@ -451,6 +451,10 @@ class KeychainState:
     @property
     def gpg_keys(self) -> list[str]:
         return list(self.resolved_keys.gpg)
+
+    @property
+    def pkcs11_keys(self) -> list[str]:
+        return list(self.resolved_keys.pkcs11)
 
     @property
     def missing_keys(self) -> list[str]:

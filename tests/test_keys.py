@@ -36,7 +36,7 @@ def captured_hosts(monkeypatch):
 
     def fake(h):
         seen.append(h)
-        return keys.ResolvedKeys([f"/expanded/{h}"], [], [], [], [], [])
+        return keys.ResolvedKeys([f"/expanded/{h}"], [], [], [], [], [], [])
 
     monkeypatch.setattr(keys, "expand_host", fake)
     return seen
@@ -44,7 +44,7 @@ def captured_hosts(monkeypatch):
 
 def test_no_config_warns(fake_home):
     out = _Out()
-    assert keys.all_host_identities(out) == keys.ResolvedKeys([], [], [], [], [], [])
+    assert keys.all_host_identities(out) == keys.ResolvedKeys([], [], [], [], [], [], [])
     assert any("No ~/.ssh/config" in w for w in out.warnings)
 
 
@@ -133,7 +133,7 @@ def test_resolve_requested_keys_skips_gpg_probe_when_disabled(fake_home, monkeyp
 
     monkeypatch.setattr(keys, "run", fail_run)
     out = keys.resolve_requested_keys(False, False, ["barekey"], "gpg", _Out(), gpg_lookup=False)
-    assert out == keys.ResolvedKeys([], [], [], [], [], ["barekey"])
+    assert out == keys.ResolvedKeys([], [], [], [], [], [], ["barekey"])
 
 
 def test_resolve_requested_keys_mixes_prefixed_and_bare(fake_home, monkeypatch):
@@ -163,7 +163,7 @@ def test_extended_flag_does_not_change_bare_key_resolution(fake_home, monkeypatc
 
     monkeypatch.setattr(keys, "run", fail_run)
     out = keys.resolve_requested_keys(False, True, ["id_test"], "gpg", _Out())
-    assert out == keys.ResolvedKeys([str(keyfile)], [], [], [], [], [])
+    assert out == keys.ResolvedKeys([str(keyfile)], [], [], [], [], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ class TestExtendedPrefixParsing:
 
     def test_miss_prefix_warns(self):
         out = _Out()
-        assert keys.extkey_expand(["miss:nope"], out) == keys.ResolvedKeys([], [], [], [], [], [])
+        assert keys.extkey_expand(["miss:nope"], out) == keys.ResolvedKeys([], [], [], [], [], [], [])
         assert any("Unrecognized" in w for w in out.warnings)
 
     def test_host_prefix_calls_expand_host(self, monkeypatch):
@@ -198,7 +198,7 @@ class TestExtendedPrefixParsing:
 
         def fake(h):
             seen.append(h)
-            return keys.ResolvedKeys([f"/expanded/{h}"], [], [], [], [], [])
+            return keys.ResolvedKeys([f"/expanded/{h}"], [], [], [], [], [], [])
 
         monkeypatch.setattr(keys, "expand_host", fake)
         out = _Out()
@@ -207,17 +207,24 @@ class TestExtendedPrefixParsing:
         assert result.ssh == ["/expanded/bastion"]
         assert out.warnings == []
 
+    def test_pkcs11_prefix_kept_as_is(self):
+        out = _Out()
+        assert keys.extkey_expand(["pkcs11:/usr/lib/pkcs11/opensc-pkcs11.so"], out).pkcs11 == [
+            "/usr/lib/pkcs11/opensc-pkcs11.so"
+        ]
+        assert out.warnings == []
+
     def test_unknown_prefix_warns(self):
         out = _Out()
         result = keys.extkey_expand(["SSHK:capitals"], out)
         # Capitalised prefix is not the documented one and is rejected.
-        assert result == keys.ResolvedKeys([], [], [], [], [], [])
+        assert result == keys.ResolvedKeys([], [], [], [], [], [], [])
         assert any("Unrecognized" in w for w in out.warnings)
 
     def test_unknown_prefix_with_no_colon_warns(self):
         out = _Out()
         result = keys.extkey_expand(["bareword"], out)
-        assert result == keys.ResolvedKeys([], [], [], [], [], [])
+        assert result == keys.ResolvedKeys([], [], [], [], [], [], [])
         assert any("Unrecognized" in w for w in out.warnings)
 
     def test_empty_string_filtered_silently(self):
@@ -227,7 +234,7 @@ class TestExtendedPrefixParsing:
 
     def test_host_with_no_identityfile_yields_nothing(self, monkeypatch):
         # ``ssh -G hostname`` returning no identityfile lines -> empty list.
-        monkeypatch.setattr(keys, "expand_host", lambda h: keys.ResolvedKeys([], [], [], [], [], []))
+        monkeypatch.setattr(keys, "expand_host", lambda h: keys.ResolvedKeys([], [], [], [], [], [], []))
         out = _Out()
-        assert keys.extkey_expand(["host:no-keys.example"], out) == keys.ResolvedKeys([], [], [], [], [], [])
+        assert keys.extkey_expand(["host:no-keys.example"], out) == keys.ResolvedKeys([], [], [], [], [], [], [])
         assert out.warnings == []

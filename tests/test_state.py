@@ -161,9 +161,10 @@ def test_resolved_keys_classifies_real_and_missing(tmp_path, paths):
 
 def test_resolved_keys_empty_when_no_args(paths):
     st = state.KeychainState(paths=paths)
-    assert st.resolved_keys == keys.ResolvedKeys([], [], [], [], [], [])
+    assert st.resolved_keys == keys.ResolvedKeys([], [], [], [], [], [], [])
     assert st.ssh_keys == []
     assert st.gpg_keys == []
+    assert st.pkcs11_keys == []
     assert st.missing_keys == []
 
 

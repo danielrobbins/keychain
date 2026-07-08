@@ -29,10 +29,10 @@ def test_render_table_with_headers_aligns_columns():
 
 def test_render_table_honours_ansi_for_alignment():
     plain = render_table([["abc"]])
-    coloured = render_table([["\x1b[32mabc\x1b[0m"]])
-    # The coloured cell occupies the same visible width as the plain one,
+    colored = render_table([["\x1b[32mabc\x1b[0m"]])
+    # The colored cell occupies the same visible width as the plain one,
     # so the table outline is identical.
-    assert plain.splitlines()[0] == coloured.splitlines()[0]
+    assert plain.splitlines()[0] == colored.splitlines()[0]
 
 
 def test_render_table_pads_short_rows():

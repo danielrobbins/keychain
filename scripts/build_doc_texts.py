@@ -6,7 +6,7 @@ import json
 import re
 import sys
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -25,15 +25,29 @@ class Section:
     short_help: str = ""
     syntax: str = ""
     body: str = ""
+    metadata: dict[str, str] = field(default_factory=dict)
 
     @property
     def tag(self) -> str:
         return f"{self.kind}:{self.name}"
 
 
-def _split_heading(rest: str) -> tuple[str, str]:
+def _split_heading(rest: str) -> tuple[str, str, dict[str, str]]:
     name, sep, short_help = rest.partition(":")
-    return (name.rstrip(), short_help.strip() if sep else "")
+    # Extract metadata from short_help if present (format: "text [key=value, ...]")
+    import re
+
+    match = re.match(r"^(.*?)\s*\[(.*?)\]\s*$", short_help or "")
+    if match:
+        clean_short_help = match.group(1).strip()
+        metadata_str = match.group(2)
+        metadata = {}
+        for item in metadata_str.split(","):
+            if "=" in item:
+                k, v = item.split("=", 1)
+                metadata[k.strip()] = v.strip()
+        return (name.rstrip(), clean_short_help, metadata)
+    return (name.rstrip(), (short_help or "").strip(), {})
 
 
 def get_heading(stripped: str, *, lineno: int) -> Section | None:
@@ -42,8 +56,8 @@ def get_heading(stripped: str, *, lineno: int) -> Section | None:
     if match is None:
         return None
     kind, rest = match.groups()
-    name, short_help = _split_heading(rest or "")
-    return Section(lineno=lineno, kind=kind, name=name, short_help=short_help)
+    name, short_help, metadata = _split_heading(rest or "")
+    return Section(lineno=lineno, kind=kind, name=name, short_help=short_help, metadata=metadata)
 
 
 def parse_sections(text: str) -> list[Section]:
@@ -65,6 +79,8 @@ def parse_sections(text: str) -> list[Section]:
         current_lines = []
 
     for lineno, line in enumerate(text.splitlines(keepends=True), start=1):
+        if line.lstrip().startswith("%% @"):
+            raise ValueError(f"line {lineno}: pseudo-heading must use == @")
         new_section = get_heading(line, lineno=lineno)
         if new_section:
             # A heading always starts a new section, so flush any active one first.
@@ -105,11 +121,15 @@ def parse_tagged_text(text: str) -> dict[str, Any]:
             raise ValueError(f"duplicate doc tag {tag}")
         out["all"].append(tag)
         out.setdefault(section.kind, OrderedDict())
-        out[section.kind][section.name] = {
+        entry = {
             "short_help": section.short_help,
             "syntax": section.syntax,
             "description": section.body,
         }
+        # Add metadata for topics (category, priority, etc.)
+        if section.kind == "topic" and section.metadata:
+            entry["metadata"] = section.metadata
+        out[section.kind][section.name] = entry
     return out
 
 

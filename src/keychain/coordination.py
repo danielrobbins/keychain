@@ -24,7 +24,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from .paths import KeychainPaths
 from .util import LockFile, Output, current_uid, get_tty, pid_alive, unlink_quiet
@@ -583,7 +583,7 @@ class ActivationOwner:
         self._cancel_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
 
-    def run_ssh_add(self, cmd: list[str], env: dict[str, str]) -> str:
+    def run_ssh_add(self, cmd: list[str] | list[list[str]], env: dict[str, str]) -> str:
         self.cancel_endpoint = self.coord.create_cancel_endpoint()
         cancel_path = str(self.cancel_endpoint.fifo_path) if self.cancel_endpoint is not None else ""
 
@@ -593,7 +593,15 @@ class ActivationOwner:
             self.coord.save_state(state)
 
         try:
-            return self._run_child(cmd, env)
+            if cmd and isinstance(cmd[0], list):
+                commands = cast(list[list[str]], cmd)
+            else:
+                commands = [cast(list[str], cmd)]
+            for child_cmd in commands:
+                status = self._run_child(child_cmd, env)
+                if status != "success":
+                    return status
+            return "success"
         finally:
             self._stop.set()
             self._join_threads()
@@ -644,7 +652,9 @@ class ActivationOwner:
         self._cancel_thread.start()
 
     def _start_heartbeat_thread(self) -> None:
-        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, name="keychain-activation-heartbeat", daemon=True)
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop, name="keychain-activation-heartbeat", daemon=True
+        )
         self._heartbeat_thread.start()
 
     def _join_threads(self) -> None:

@@ -23,7 +23,9 @@ pytestmark = pytest.mark.skipif(
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _run(cmd: list[str], env: dict[str, str], *, input_: str | None = None, timeout: int = 30) -> subprocess.CompletedProcess:
+def _run(
+    cmd: list[str], env: dict[str, str], *, input_: str | None = None, timeout: int = 30
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         input=input_,
@@ -130,10 +132,7 @@ def gpg_home():
     gpg_wrapper = root / "gpg-wrapper"
     _write_gpg_wrapper(gpg_wrapper, passfile)
     (gnupg / "gpg-agent.conf").write_text(
-        f"pinentry-program {pinentry}\n"
-        "allow-loopback-pinentry\n"
-        "default-cache-ttl 600\n"
-        "max-cache-ttl 600\n",
+        f"pinentry-program {pinentry}\n" "allow-loopback-pinentry\n" "default-cache-ttl 600\n" "max-cache-ttl 600\n",
         encoding="utf-8",
     )
 
@@ -196,7 +195,21 @@ def test_gpge_warms_encryption_subkey_for_decryption(gpg_home) -> None:
     cipher = home / "cipher.gpg"
     out = home / "out.txt"
     plain.write_text("plaintext\n", encoding="utf-8")
-    _assert_ok(_gpg(env, "--batch", "--yes", "--trust-model", "always", "--encrypt", "-r", fingerprint, "-o", str(cipher), str(plain)))
+    _assert_ok(
+        _gpg(
+            env,
+            "--batch",
+            "--yes",
+            "--trust-model",
+            "always",
+            "--encrypt",
+            "-r",
+            fingerprint,
+            "-o",
+            str(cipher),
+            str(plain),
+        )
+    )
 
     _run(["gpgconf", "--kill", "gpg-agent"], env, timeout=10)
     passfile.unlink()
