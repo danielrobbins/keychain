@@ -1,5 +1,41 @@
 # ChangeLog
 
+## 3.0.0_beta3
+
+Third public beta of Keychain 3.x, collecting changes made after the
+`3.0.0_beta2` tag.
+
+This release focuses on feature additions and robustness. It makes Keychain
+more dependable during shell startup, easier to configure,
+supports smartcards or other PKCS#11-backed SSH tokens, closes
+a known `.keychainrc` documentation gap, and significantly enhances
+the integrated documentation and documentation rendering.
+
+Highlights:
+
+- **More reliable agent startup.** Keychain now keeps its managed `ssh-agent`
+  socket in a stable location under `~/.keychain/` instead of depending on
+  temporary `/tmp/ssh-*` paths. This helps avoid cases where the agent is
+  still running but its socket directory has been cleaned up, a problem that
+  showed up clearly under WSL but is not unique to it.
+
+- **Better smartcard and hardware-token support.** You can now ask Keychain to
+  load a PKCS#11 provider directly with `pkcs11:/path/to/provider.so`. This is
+  useful for SSH keys stored on smartcards, security keys, and similar devices.
+  This addresses issue #216.
+
+- Improved Documentation Formatting. Significant improvements in the
+  embedded documentation renderer used by `keychain man`. Pager support
+  integrated. Supported .keychainrc config settings are now fully
+  documented, streamlined and available. Addresses issue #217.
+
+- **Improved 2.9.8 compatibility details.** A few legacy command-line edge
+  cases with `--stop` and `--wipe` now print a more accurate error message.
+
+- Copyright has been updated to reflect assignment/ownership by Daniel
+  Robbins, the person, removing reference to BreezyOps / Funtoo Solutions,
+  Inc.
+
 ## 3.0.0_beta2
 
 Second public beta of Keychain 3.x, collecting all changes made after the

@@ -2,20 +2,20 @@
 """Authored embedded-doc records for keychain.
 
 This is the single source of truth for every doc string keychain emits:
-``--help`` cheat sheets, argparse ``help=`` strings, ``keychain man``,
-``keychain --explain``, and the generated ``keychain.1`` man page.
+`--help` cheat sheets, argparse `help=` strings, `keychain man`,
+and `keychain --explain`.
 
 **Formatting rules:**
 
 To make keychain-specific principals stand out from the surrounding prose and
 secondary commands, keychain documentation follows these formatting conventions:
 
-* Keychain actions and options/arguments should be in double-backticks (``like this``).
-* External commands directly related to keychain (e.g. ``ssh-agent``, ``ssh-add``, ``ssh``, ``scp``) should also be in double-backticks.
-* Ancillary commands that users are expected to know but aren't the focus of the docs (e.g. ``eval``, ``systemctl``) should be in asterisks (e.g. *eval*, *systemctl*).
+* Keychain actions and options/arguments should be in single backticks (`like this`).
+* External commands directly related to keychain (e.g. `ssh-agent`, `ssh-add`, `ssh`, `scp`) should also be in single backticks.
+* Ancillary commands that users are expected to know but aren't the focus of the docs (e.g. `eval`, `systemctl`) should be in asterisks (e.g. *eval*, *systemctl*).
 * Configuration files and directories exclusive to keychain should be in
-  double-backticks (e.g. ``~/.keychain/``, ``~/.keychainrc``)
-* More general files like ``~/.ssh/config`` should be emphasized with asterisks (e.g. *~/.ssh/config*, *~/.bash_profile*).
+    single backticks (e.g. `~/.keychain/`, `~/.keychainrc`)
+* More general files like `~/.ssh/config` should be emphasized with asterisks (e.g. *~/.ssh/config*, *~/.bash_profile*).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from typing import Any, Optional
 
 from keychain.output.core import Output
 
-from ..doc_texts import DOC_TEXT
+from ..docs import _entry
 
 OUTPUT_ACTIONS = frozenset(("man", "version", "help"))
 NO_BANNER_ACTIONS = frozenset(("inspect", "list", "env"))
@@ -91,11 +91,11 @@ class Element:
 
     @property
     def short_help(self) -> str:
-        return DOC_TEXT.short_help(self.doc_tag or "")
+        return _entry(self.doc_tag or "").get("short_help", "")
 
     @property
     def doc_description(self) -> str:
-        return DOC_TEXT.description(self.doc_tag or "")
+        return _entry(self.doc_tag or "").get("description", "")
 
 
 @dataclass(eq=False)
@@ -110,7 +110,6 @@ class Option(Element):
     argparse_action: str | None = None  # explicit argparse action= override (e.g. "store_true", "append")
     exclusive_group: str | None = None  # bucket key for add_mutually_exclusive_group()
     env: str | None = None  # environment variable to set when option is specified
-    hidden: bool = False  # skip this option in visible help output; used for deprecated options
     config_section: str | None = None  # INI section name for config file binding
     config_key: str | None = None  # INI key override; defaults to name if omitted
     examples: tuple[tuple[str, str], ...] = ()  # (description, command) pairs for docs
@@ -118,7 +117,30 @@ class Option(Element):
     deprecated: bool = False  # deprecated options are auto-hidden and emit policy feedback when used
     deprecation_message: str | Callable[[Any], str] | None = None  # warning/error text for deprecated usage
     deprecation_error: bool = False  # deprecated options can hard-fail instead of warning
+    has_docs: bool | None = None  # None = default policy; non-deprecated options require docs, deprecated ones do not
     validator: tuple[Callable[[Any], bool], str | Callable[[Any], str]] | None = None  # value rule + failure text
+    config_doc_tag: str | None = (
+        None  # standalone config-doc tag for config-only preferences; otherwise CLI docs are reused
+    )
+    config_invert_bool: bool = (
+        False  # for bool options whose config atom represents the opposite semantic, e.g. ``lock`` for ``--no-lock``
+    )
+
+    @property
+    def hidden(self) -> bool:
+        return self.deprecated
+
+    @property
+    def short_help(self) -> str:
+        return _entry(self.doc_tag or "").get("short_help", "") or _entry(self.config_doc_tag or "").get(
+            "short_help", ""
+        )
+
+    @property
+    def doc_description(self) -> str:
+        return _entry(self.doc_tag or "").get("description", "") or _entry(self.config_doc_tag or "").get(
+            "description", ""
+        )
 
     @property
     def option_formats(self):
@@ -146,9 +168,10 @@ class Option(Element):
             self.varname = self.option.lstrip("-").replace("-", "_")
         if not self.doc_tag:
             key = self.option.lstrip("-") if self.option else self.varname.replace("_", "-")
-            self.doc_tag = f"option:{key}"
-        if self.deprecated:
-            self.hidden = True
+            section = "global" if self.actions and all(act.fq_name == "global" for act in self.actions) else "option"
+            self.doc_tag = f"{section}:{key}"
+        if self.has_docs is None:
+            self.has_docs = not self.deprecated
 
         self._cli_value: Any = UNSET
 
@@ -260,7 +283,10 @@ class Option(Element):
             section = rc_data.get(self.config_section, {})
             effective_key = self.config_key or self.varname
             if effective_key in section:
-                return self._coerce(section[effective_key])
+                value = self._coerce(section[effective_key])
+                if self.config_invert_bool and self.type == "bool":
+                    return not bool(value)
+                return value
 
         # 4. Fallback Default
         if self.default is not None:
@@ -401,7 +427,7 @@ class Action(Element):
     def _option_rows(self) -> list[tuple[str, str]]:
         rows: list[tuple[str, str]] = []
         for opt in self.options.values():
-            if opt.hidden:
+            if opt.hidden or not opt.option:
                 continue
             rows.append((opt.option_formats, opt.short_help))
         return rows
@@ -482,22 +508,38 @@ ROOT_ACTION.add_option(option="--version", cli_aliases=("-V",), action_adapter=_
 ROOT_ACTION.add_option(option="--explain", see_also=("man",))
 
 # Security gate: all KEYCHAIN_* env var ingestion is disabled by default.
-# Set --allow-env (or -E) to permit KEYCHAIN_CONFIG, KEYCHAIN_THEME,
+# Set --allow-env (or -E) to permit KEYCHAIN_CONFIG,
 # KEYCHAIN_SSH_AGENT_ARGS, and KEYCHAIN_GPG_AGENT_ARGS to take effect.
 ROOT_ACTION.add_option(option="--allow-env", cli_aliases=("-E",), type="bool", default=False)
 
 ROOT_ACTION.add_option(option="--quiet", cli_aliases=("-q",), config_section="output")
-ROOT_ACTION.add_option(option="--debug", cli_aliases=("-D",), config_section="output")
-ROOT_ACTION.add_option(option="--nocolor", cli_aliases=("--no-color",), config_section="output")
-ROOT_ACTION.add_option(option="--theme", type="str", hidden=True, config_section="output")
-ROOT_ACTION.add_option(option="--no-gui", cli_aliases=("--nogui",), config_section="output", hidden=True)
+ROOT_ACTION.add_option(option="--debug", cli_aliases=("-D",))
+ROOT_ACTION.add_option(
+    option="--nocolor",
+    cli_aliases=("--no-color",),
+    config_section="output",
+    config_key="color",
+    config_invert_bool=True,
+    config_doc_tag="config:output.color",
+)
+ROOT_ACTION.add_option(option="--theme", type="str", config_section="output")
+ROOT_ACTION.add_option(
+    option="--no-gui",
+    cli_aliases=("--nogui",),
+    config_section="output",
+    config_key="gui",
+    config_invert_bool=True,
+    config_doc_tag="config:output.gui",
+)
 
-# Deprecated NO-OPs
-ROOT_ACTION.add_option(option="--gpg2", hidden=True, config_section="agent")
-ROOT_ACTION.add_option(option="--absolute", hidden=True, config_section="paths")
+# Compatibility / advanced globals
+ROOT_ACTION.add_option(option="--gpg2", deprecated=True)
+ROOT_ACTION.add_option(option="--absolute", config_section="paths")
 ROOT_ACTION.add_option(option="--dir", type="str", default="~/.keychain", config_section="paths")
-ROOT_ACTION.add_option(option="--host", type="str", config_section="paths")
-ROOT_ACTION.add_option(option="--pid-formats", type="str", default="sh", config_section="paths")
+ROOT_ACTION.add_option(option="--host", type="str")
+ROOT_ACTION.add_option(
+    varname="pid_formats", type="str", default="sh", config_section="paths", config_doc_tag="config:paths.pid_formats"
+)
 
 cmd_add = ROOT_ACTION.add_action(
     fq_name="add",
@@ -534,13 +576,11 @@ cmd_man = ROOT_ACTION.add_action(fq_name="man", arguments=({"name": "topics", "n
 cmd_version = ROOT_ACTION.add_action(fq_name="version")
 
 # Add shared options
-Option(
-    option="--eval", actions={cmd_add, agent_start}, config_section="output", config_key="eval", see_also=("--systemd",)
-)
+Option(option="--eval", actions={cmd_add, agent_start}, see_also=("--systemd",))
 Option(option="--systemd", actions={cmd_add, agent_start}, config_section="agent", see_also=("--eval",))
 
-cmd_add.add_option(option="--quick", cli_aliases=("-Q",), config_section="agent")
-cmd_add.add_option(varname="noask", option="--no-passphrase", cli_aliases=("--noask",), config_section="agent")
+cmd_add.add_option(option="--quick", cli_aliases=("-Q",))
+cmd_add.add_option(varname="noask", option="--no-passphrase", cli_aliases=("--noask",))
 cmd_add.add_option(option="--confirm", config_section="agent", doc_tag="option:confirm")
 cmd_add.add_option(
     option="--timeout",
@@ -550,44 +590,44 @@ cmd_add.add_option(
     validator=(lambda value: value > 0, "--timeout requires a numeric argument greater than zero"),
 )
 cmd_add.add_option(varname="ignore_missing", option="--ignore-missing", config_section="keys")
-cmd_add.add_option(option="--clear", hidden=True, config_section="agent", doc_tag="option:clear")
-cmd_add.add_option(option="--extended", cli_aliases=("--ext", "-e"), hidden=True, config_section="keys")
+cmd_add.add_option(option="--clear", config_section="agent", doc_tag="option:clear")
+cmd_add.add_option(option="--extended", cli_aliases=("--ext", "-e"), deprecated=True, config_section="keys")
 cmd_add.add_option(option="--confallhosts", config_section="keys", doc_tag="option:confallhosts")
 
-Option(option="--ssh-allow-gpg", actions={cmd_add, agent_start}, hidden=True, config_section="agent")
-Option(option="--ssh-spawn-gpg", actions={cmd_add, agent_start}, hidden=True, config_section="agent")
-Option(option="--ssh-allow-forwarded", actions={cmd_add, agent_start}, hidden=True, config_section="agent")
+Option(option="--ssh-allow-gpg", actions={cmd_add, agent_start}, config_section="agent")
+Option(option="--ssh-spawn-gpg", actions={cmd_add, agent_start}, config_section="agent")
+Option(option="--ssh-allow-forwarded", actions={cmd_add, agent_start}, config_section="agent")
 Option(
     varname="no_inherit",
     option="--no-inherit",
     cli_aliases=("--noinherit",),
     actions={cmd_add, agent_start},
-    hidden=True,
     config_section="agent",
+    config_key="inherit",
+    config_invert_bool=True,
+    config_doc_tag="config:agent.inherit",
 )
-Option(option="--ssh-agent-socket", actions={cmd_add, agent_start}, type="str", hidden=True, config_section="agent")
+Option(option="--ssh-agent-socket", actions={cmd_add, agent_start}, type="str", config_section="agent")
 Option(
-    option="--ssh-agent-args",
     varname="ssh_args",
     type="str",
     config_section="agent.env",
+    config_doc_tag="config:agent.env.ssh_args",
     actions={cmd_add, agent_start},
 )
 Option(
-    option="--gpg-agent-args",
     varname="gpg_args",
     type="str",
     config_section="agent.env",
+    config_doc_tag="config:agent.env.gpg_args",
     actions={cmd_add, agent_start},
 )
 
-# Add/Agent start misslabeled globals
 Option(
     option="--lockwait",
     type="int",
     default=5,
     actions={cmd_add, agent_start},
-    config_section="lock",
     validator=(lambda value: value >= 0, "--lockwait requires an argument zero or greater."),
 )
 Option(
@@ -613,7 +653,7 @@ Option(
     actions={cmd_add, agent_start},
     deprecated=True,
     deprecation_error=True,
-    deprecation_message=lambda value: f"--confhost is deprecated; use --extended host:{value} instead.",
+    deprecation_message=lambda value: f"--confhost is deprecated; use host:{value} instead.",
 )
 Option(
     option="--attempts",
@@ -623,7 +663,7 @@ Option(
     deprecated=True,
     deprecation_message="--attempts is now deprecated.",
 )
-Option(option="--no-lock", cli_aliases=("--nolock",), actions={cmd_add, agent_start}, config_section="lock")
+Option(option="--no-lock", cli_aliases=("--nolock",), actions={cmd_add, agent_start})
 
 agent_stop.add_option(option="--mine", exclusive_group="target")
 agent_stop.add_option(option="--others", exclusive_group="target")
@@ -649,4 +689,3 @@ cmd_version.add_option(option="--json", doc_tag="option:version-json")
 cmd_man.add_option(varname="list", option="--list", doc_tag="option:man-list")
 cmd_man.add_option(varname="no_pager", option="--no-pager", doc_tag="option:man-no-pager")
 cmd_man.add_option(varname="width", option="--width", type="int", doc_tag="option:man-width")
-cmd_man.add_option(varname="man_groff", option="--groff", doc_tag="option:man-groff")

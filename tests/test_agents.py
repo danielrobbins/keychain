@@ -157,6 +157,38 @@ class TestSshAgentLoadOutput:
         assert plan.cmd == ["ssh-add", "/home/user/.ssh/key1"]
         assert capsys.readouterr().err == ""
 
+    def test_prepare_load_for_pkcs11_provider_uses_ssh_add_s(self, monkeypatch, capsys):
+        plan = self._agent(monkeypatch).prepare_load([], ["/usr/lib/pkcs11/opensc-pkcs11.so"], announce=False)
+
+        assert plan is not None
+        assert plan.cmd == ["ssh-add", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"]
+        assert capsys.readouterr().err == ""
+
+    def test_prepare_load_combines_file_keys_and_pkcs11_provider(self, monkeypatch):
+        plan = self._agent(monkeypatch).prepare_load(
+            ["/home/user/.ssh/key1"], ["/usr/lib/pkcs11/opensc-pkcs11.so"], announce=False
+        )
+
+        assert plan is not None
+        assert plan.cmd == [
+            ["ssh-add", "/home/user/.ssh/key1"],
+            ["ssh-add", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"],
+        ]
+
+    def test_list_missing_pkcs11_skips_known_provider(self, monkeypatch):
+        agent = self._agent(monkeypatch)
+        monkeypatch.setattr(agent, "list_loaded", lambda: (["SHA256:known"], 0))
+        monkeypatch.setattr(agents, "pkcs11_provider_fingerprints", lambda *_a, **_k: ["SHA256:known"])
+
+        assert agent.list_missing_pkcs11(["/usr/lib/pkcs11/opensc-pkcs11.so"]) == []
+
+    def test_list_missing_pkcs11_marks_unknown_provider_missing(self, monkeypatch):
+        agent = self._agent(monkeypatch)
+        monkeypatch.setattr(agent, "list_loaded", lambda: (["SHA256:known"], 0))
+        monkeypatch.setattr(agents, "pkcs11_provider_fingerprints", lambda *_a, **_k: ["SHA256:other"])
+
+        assert agent.list_missing_pkcs11(["/usr/lib/pkcs11/opensc-pkcs11.so"]) == ["/usr/lib/pkcs11/opensc-pkcs11.so"]
+
 
 # ---------------------------------------------------------------------------
 # gpg-agent wipe output
@@ -197,6 +229,7 @@ class TestGpgAgentWipe:
         self._agent(monkeypatch, returncode=0, stdout="OK\n").wipe()
 
         assert "gpg-agent: All identities removed." in capsys.readouterr().err
+
 
 # ---------------------------------------------------------------------------
 # findpids
@@ -436,6 +469,20 @@ class TestSshAgentStartupOutput:
         assert "Starting ssh-agent..." in err
         assert "previous pidfile stale" not in err
 
+    def test_spawned_agent_waits_for_socket_to_appear(self, tmp_path, monkeypatch):
+        """Verify default ssh-agent startup pins the socket under the keydir.
+
+        This avoids relying on ssh-agent's default /tmp/ssh-* temp directory,
+        which can disappear during early WSL startup.
+        """
+        agent, _paths = self._agent_with_args(tmp_path)
+        self._fake_spawn(monkeypatch)
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        assert agent.env.sock == "/tmp/keychain-test-agent.sock"
+        assert agent.env.pid == "12345"
+
 
 # ---------------------------------------------------------------------------
 # Issue #21: KEYCHAIN_{SSH,GPG}_AGENT_ARGS append flags to the spawn command
@@ -520,5 +567,5 @@ class TestAgentArgsPassthrough:
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
         monkeypatch.delenv("SSH_AGENT_PID", raising=False)
         self._build_ssh_agent(tmp_path).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
-        # Default invocation has no extra tokens beyond ssh-agent -s.
-        assert cap[-1] == ["ssh-agent", "-s"]
+        # Default invocation pins the socket under the keydir.
+        assert cap[-1] == ["ssh-agent", "-s", "-a", str(tmp_path / "h-agent.sock")]

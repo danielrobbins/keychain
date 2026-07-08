@@ -74,6 +74,63 @@ class Compat:
             return None
         return [f"-{letter}" for letter in letters]
 
+    def _expand_argv(self, argv: list[str]) -> list[str]:
+        """Expand only legacy action-bearing short clusters before analysis.
+
+        This keeps the compatibility layer's view of argv consistent across
+        translation and validation without teaching it about every ordinary
+        short-option cluster that argparse already understands natively.
+        """
+        expanded: list[str] = []
+        seen_dashdash = False
+        for token in argv:
+            if seen_dashdash:
+                expanded.append(token)
+                continue
+            if token == "--":
+                seen_dashdash = True
+                expanded.append(token)
+                continue
+            split = self.split_short_cluster(token)
+            if split is not None:
+                expanded.extend(split)
+            else:
+                expanded.append(token)
+        return expanded
+
+    def legacy_parse_error(self, argv: list[str]) -> str | None:
+        """Return a legacy-specific validation error for 2.x value-actions.
+
+        This preserves the old parser's targeted diagnostics for a small number
+        of flat action flags that historically validated their arguments before
+        any deeper command dispatch occurred.
+        """
+        if self.looks_new_style(argv):
+            return None
+
+        expanded = self._expand_argv(argv)
+        for i, token in enumerate(expanded):
+            if token == "--":
+                break
+            key, eq_value = self.split_eq(token)
+            if key not in self.value_actions:
+                continue
+            value = eq_value
+            if value is None:
+                if i + 1 >= len(expanded):
+                    value = None
+                else:
+                    candidate = expanded[i + 1]
+                    value = None if candidate == "--" or candidate.startswith("-") else candidate
+
+            if key in ("--stop", "-k"):
+                if value not in ("all", "mine", "others"):
+                    return "Please specify 'all', 'mine' or 'others' for --stop"
+            elif key == "--wipe":
+                if value not in ("ssh", "gpg", "all"):
+                    return "Please specify ssh, gpg or all for --wipe action"
+        return None
+
     def looks_new_style(self, argv: list[str]) -> bool:
         """Return ``True`` if argv already starts with a known action verb (e.g. ``['add', ...]``)."""
         for token in argv:
@@ -96,21 +153,7 @@ class Compat:
         out_keys: list[str] = []
         subcmd: str | None = None
         sub_args: list[str] = []
-        expanded: list[str] = []
-        seen_dashdash = False
-        for token in argv:
-            if seen_dashdash:
-                expanded.append(token)
-                continue
-            if token == "--":
-                seen_dashdash = True
-                expanded.append(token)
-                continue
-            split = self.split_short_cluster(token)
-            if split is not None:
-                expanded.extend(split)
-            else:
-                expanded.append(token)
+        expanded = self._expand_argv(argv)
         i = 0
         after_dashdash = False
         while i < len(expanded):

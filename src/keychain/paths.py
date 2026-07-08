@@ -198,6 +198,10 @@ class KeychainPaths:
     def waiters_dir(self) -> Path:
         return self.keydir / f"{self.host}-waiters"
 
+    @property
+    def ssh_agent_socket_path(self) -> Path:
+        return self.keydir / f"{self.host}-agent.sock"
+
     def render_env(
         self, env: SshAgentRef | Mapping[str, str], shell: str = "env", shell_env: Mapping[str, str] | None = None
     ) -> str:
@@ -212,7 +216,7 @@ class KeychainPaths:
 
     def clear(self) -> None:
         """Remove all runtime files for this keychain."""
-        unlink_quiet(*self.all_pidfiles)
+        unlink_quiet(*self.all_pidfiles, self.ssh_agent_socket_path)
 
     def write(self, agent_env: SshAgentRef, out: Output) -> None:
         """Write shell-specific pidfiles from the canonical agent env."""
@@ -220,7 +224,7 @@ class KeychainPaths:
             out.debug("skipping creation of pidfiles!")
             return
 
-        self.clear()
+        unlink_quiet(*self.all_pidfiles)
 
         for fmt in self.pid_formats:
             pidf_cls = _PID_FACTORIES.get(fmt)
@@ -240,8 +244,7 @@ class KeychainPaths:
         owner = get_owner(self.keydir)
         if owner and owner != me:
             raise KeychainError(
-                f"{self.keydir} is owned by {owner}, not {me}. "
-                "Remove or chown the directory and re-run keychain."
+                f"{self.keydir} is owned by {owner}, not {me}. " "Remove or chown the directory and re-run keychain."
             )
         if owner and lax_perms(self.keydir):
             raise KeychainError(lax_perm_warning(self.keydir))

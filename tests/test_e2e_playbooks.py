@@ -320,6 +320,13 @@ def test_agent_args_from_env_and_config(playbook: PlaybookRunner):
     assert "-t" in ssh_cmd_1 and "3601" in ssh_cmd_1, f"SSH_AGENT_ARGS missing from environment; cmd: {ssh_cmd_1}"
 
     intercepted_cmds.clear()
+    playbook.set_host("testhost-env-ignored")
+    playbook.run("agent", "start", "--quiet")
+
+    ssh_cmd_ignored = next((c for c in intercepted_cmds if "ssh-agent" in c[0]), [])
+    assert "3601" not in ssh_cmd_ignored, f"SSH_AGENT_ARGS should require -E; cmd: {ssh_cmd_ignored}"
+
+    intercepted_cmds.clear()
     playbook.monkeypatch.delenv("KEYCHAIN_SSH_AGENT_ARGS", raising=False)
 
     # 2. Test via .keychainrc
@@ -327,7 +334,7 @@ def test_agent_args_from_env_and_config(playbook: PlaybookRunner):
     rc.write_text("[agent.env]\nssh_args=-t 3602\n")
 
     playbook.set_host("testhost-config")
-    playbook.run("agent", "start", "--quiet", "-E")
+    playbook.run("agent", "start", "--quiet")
 
     ssh_cmd_2 = next((c for c in intercepted_cmds if "ssh-agent" in c[0]), [])
     assert "-t" in ssh_cmd_2 and "3602" in ssh_cmd_2, f"SSH_AGENT_ARGS missing from config file; cmd: {ssh_cmd_2}"

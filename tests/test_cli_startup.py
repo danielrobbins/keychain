@@ -42,8 +42,9 @@ class TestDefaultStartupPermissions:
         )
         monkeypatch.setattr("keychain.state.current_user", lambda: "me")
         monkeypatch.setattr(
-            main.KeychainApp, "_resolve_requested_keys",
-            lambda *_a, **_k: main.keys.ResolvedKeys([], [], [], [], [], [])
+            main.KeychainApp,
+            "_resolve_requested_keys",
+            lambda *_a, **_k: main.keys.ResolvedKeys([], [], [], [], [], [], []),
         )
         monkeypatch.setattr(main.KeychainApp, "_agent_settings", lambda *_a, **_k: (False, False))
         monkeypatch.setattr(main.KeychainApp, "_do_add", lambda *_a, **_k: 0)

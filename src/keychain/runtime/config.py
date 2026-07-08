@@ -13,6 +13,11 @@ from typing import Any
 from .actions import ROOT_ACTION, UNSET, Action, Option
 from .compat import COMPAT
 
+_AGENT_ARG_ENVS = {
+    "ssh_args": "KEYCHAIN_SSH_AGENT_ARGS",
+    "gpg_args": "KEYCHAIN_GPG_AGENT_ARGS",
+}
+
 
 class _CaseInsensitiveConfigParser(configparser.ConfigParser):
     """ConfigParser that normalizes section names and keys to lowercase.
@@ -70,8 +75,8 @@ class RuntimeConfig:
 
     def apply_keychainrc(self, environ_overrides: dict[str, str] | None = None) -> None:
         """Read .keychainrc and build the effective env mapping."""
-        self.environ = environ_overrides if environ_overrides is not None else dict(os.environ)
-        self.env = dict(self.environ)
+        base_environ = environ_overrides if environ_overrides is not None else dict(os.environ)
+        self.environ = dict(base_environ)
 
         # SECURITY: KEYCHAIN_* env vars are gated by --allow-env / -E.
         # Direct access to os.environ for KEYCHAIN_* vars is prohibited —
@@ -80,11 +85,17 @@ class RuntimeConfig:
         allow_env = self.get_value("allow_env")
 
         # Locate configuration file (KEYCHAIN_CONFIG is gated)
-        config_path = self.environ.get("KEYCHAIN_CONFIG") if allow_env else None
+        config_path = base_environ.get("KEYCHAIN_CONFIG") if allow_env else None
         if config_path:
             rc_path = Path(config_path)
         else:
-            rc_path = Path(self.environ.get("HOME", "~")).expanduser() / ".keychainrc"
+            rc_path = Path(base_environ.get("HOME", "~")).expanduser() / ".keychainrc"
+
+        if not allow_env:
+            for key in list(self.environ):
+                if key.startswith("KEYCHAIN_"):
+                    del self.environ[key]
+        self.env = dict(self.environ)
 
         # Validate sections layout using AST — keys stored lowercase for
         # case-insensitive matching against the parser output.
@@ -93,9 +104,7 @@ class RuntimeConfig:
         def _scan_sections(node: Action):
             for opt in node.options.values():
                 if opt.config_section:
-                    all_options_by_section[opt.config_section.lower()].add(
-                        opt.effective_config_key.lower()
-                    )
+                    all_options_by_section[opt.config_section.lower()].add(opt.effective_config_key.lower())
             for child in node.sub_actions.values():
                 _scan_sections(child)
 
@@ -120,15 +129,15 @@ class RuntimeConfig:
             except configparser.Error as e:
                 self.rc_warnings.append(f"Failed to parse {rc_path}: {e}")
 
-        # Inject KEYCHAIN_ envs derived from runtime values (gated by --allow-env)
-        if allow_env:
-            ssh_args = self.get_value("ssh_args")
-            if ssh_args and "KEYCHAIN_SSH_AGENT_ARGS" not in self.env:
-                self.env["KEYCHAIN_SSH_AGENT_ARGS"] = str(ssh_args)
+        for varname, env_name in _AGENT_ARG_ENVS.items():
+            value = self._agent_arg_value(varname, env_name, base_environ, allow_env)
+            if value:
+                self.env[env_name] = str(value)
 
-            gpg_args = self.get_value("gpg_args")
-            if gpg_args and "KEYCHAIN_GPG_AGENT_ARGS" not in self.env:
-                self.env["KEYCHAIN_GPG_AGENT_ARGS"] = str(gpg_args)
+    def _agent_arg_value(self, varname: str, env_name: str, base_environ: dict[str, str], allow_env: bool) -> Any:
+        if allow_env and env_name in base_environ:
+            return base_environ[env_name]
+        return self.get_value(varname)
 
     def get_option(self, varname: str, action_node: Action | None = None) -> Option | None:
         """Return the authored option visible from an action context.
@@ -364,6 +373,8 @@ class RuntimeConfig:
         if adapted is not None:
             return adapted
         if action_node == ROOT_ACTION:
+            if legacy_error := COMPAT.legacy_parse_error(tokens):
+                raise ParserError(legacy_error)
             return COMPAT.translate(tokens)
         return tokens
 
@@ -403,6 +414,9 @@ class RuntimeConfig:
         if message.startswith(prefix) and "'" in message[len(prefix) :]:
             arg = message[len(prefix) :].split("'", 1)[0]
             return f"Unrecognized argument '{arg}'. Run '{help_cmd}' for more information."
+
+        if message.startswith("Please specify "):
+            return message
 
         return f"{message} Run '{help_cmd}' for more information."
 

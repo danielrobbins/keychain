@@ -57,12 +57,58 @@ class TestParseArgsLegacy:
         assert ns.action == "inspect"
         assert ns.get_value("keys") == ["id_rsa", "id_ed25519"]
 
-    @pytest.mark.skip(
-        reason="Invalid legacy stop values are currently translated into `agent stop` without parser rejection; discuss whether compat should restore an explicit error."
+    @pytest.mark.parametrize(
+        "argv,varname,expected",
+        [
+            (["--noask"], "noask", True),
+            (["--nogui"], "no_gui", True),
+            (["--nolock"], "no_lock", True),
+            (["--noinherit"], "no_inherit", True),
+            (["--nocolor"], "nocolor", True),
+            (["--confirm"], "confirm", True),
+            (["--quick"], "quick", True),
+            (["--gpg2"], "gpg2", True),
+            (["--absolute"], "absolute", True),
+            (["--extended"], "extended", True),
+            (["--ssh-allow-gpg"], "ssh_allow_gpg", True),
+            (["--ssh-allow-forwarded"], "ssh_allow_forwarded", True),
+        ],
     )
+    def test_legacy_298_flag_spellings_remain_accepted(self, argv, varname, expected):
+        """Verify key 2.9.8 long-form spellings still parse with their historical meaning.
+
+        These are compatibility-sensitive public flags from the 2.9.8 shell implementation.
+        If one of these stops parsing, that is a real back-compat regression to review.
+        """
+        ns = RuntimeConfig.resolve(argv)
+        assert ns.action == "add"
+        assert ns.get_value(varname) is expected
+
+    def test_legacy_298_ssh_agent_socket_still_takes_a_value(self):
+        """Verify the legacy socket override spelling from 2.9.8 still parses unchanged."""
+        ns = RuntimeConfig.resolve(["--ssh-agent-socket", "/tmp/keychain.sock"])
+        assert ns.action == "add"
+        assert ns.get_value("ssh_agent_socket") == "/tmp/keychain.sock"
+
     def test_legacy_invalid_stop_value_rejected(self):
-        with pytest.raises(SystemExit):
-            RuntimeConfig.resolve(["--stop", "bogus"])
+        ns = RuntimeConfig.resolve(["--stop", "bogus"])
+        assert ns.action == "help"
+        assert ns.parse_error == "Please specify 'all', 'mine' or 'others' for --stop"
+
+    def test_legacy_missing_stop_value_rejected(self):
+        ns = RuntimeConfig.resolve(["--stop"])
+        assert ns.action == "help"
+        assert ns.parse_error == "Please specify 'all', 'mine' or 'others' for --stop"
+
+    def test_legacy_invalid_wipe_value_rejected(self):
+        ns = RuntimeConfig.resolve(["--wipe", "bogus"])
+        assert ns.action == "help"
+        assert ns.parse_error == "Please specify ssh, gpg or all for --wipe action"
+
+    def test_legacy_missing_wipe_value_rejected(self):
+        ns = RuntimeConfig.resolve(["--wipe"])
+        assert ns.action == "help"
+        assert ns.parse_error == "Please specify ssh, gpg or all for --wipe action"
 
     @pytest.mark.parametrize(
         "argv,flag,replacement",

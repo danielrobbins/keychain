@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import os
-
 from keychain.runtime.config import RuntimeConfig
 
 
@@ -183,29 +181,21 @@ def test_has_option_reflects_active_action(monkeypatch, tmp_path):
     assert args.has_option("timeout") is False
 
 
-def test_apply_keychainrc_injects_agent_args_into_env():
-    """Verify that agent argument settings are exported into the effective environment.
+def test_apply_keychainrc_injects_config_agent_args_without_allow_env(tmp_path):
+    """Verify that .keychainrc agent args do not require the environment gate."""
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[agent.env]\nssh_args = -t 3600\ngpg_args = --max-cache-ttl 7200\n")
 
-    This should pass because apply_keychainrc builds a derived environment mapping
-    and mirrors agent argument options into KEYCHAIN_* variables without mutating os.environ.
-    """
-    args = RuntimeConfig.resolve(["add", "--ssh-agent-args=-t 3600", "--gpg-agent-args=--max-cache-ttl 7200", "-E"])
-
-    args.apply_keychainrc({"HOME": "/home/test"})
+    args = RuntimeConfig.resolve(["add"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
 
     assert args.env["KEYCHAIN_SSH_AGENT_ARGS"] == "-t 3600"
     assert args.env["KEYCHAIN_GPG_AGENT_ARGS"] == "--max-cache-ttl 7200"
-    assert "KEYCHAIN_SSH_AGENT_ARGS" not in os.environ
-    assert "KEYCHAIN_GPG_AGENT_ARGS" not in os.environ
 
 
-def test_apply_keychainrc_base_env_wins_over_agent_args():
-    """Verify that an existing base environment overrides derived agent-arg exports.
-
-    This should pass because apply_keychainrc treats the provided base environment
-    as higher priority than values synthesized from RuntimeConfig fields.
-    """
-    args = RuntimeConfig.resolve(["add", "--ssh-agent-args=-t 3600", "--gpg-agent-args=--max-cache-ttl 7200", "-E"])
+def test_apply_keychainrc_ignores_agent_arg_env_without_allow_env():
+    """Verify that raw KEYCHAIN_* agent args are ignored unless explicitly enabled."""
+    args = RuntimeConfig.resolve(["add"])
 
     args.apply_keychainrc(
         {
@@ -215,8 +205,55 @@ def test_apply_keychainrc_base_env_wins_over_agent_args():
         }
     )
 
+    assert "KEYCHAIN_SSH_AGENT_ARGS" not in args.env
+    assert "KEYCHAIN_GPG_AGENT_ARGS" not in args.env
+
+
+def test_apply_keychainrc_agent_arg_env_wins_over_config_with_allow_env(tmp_path):
+    """Verify that allowed KEYCHAIN_* agent args override .keychainrc values."""
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[agent.env]\nssh_args = -t 3600\ngpg_args = --max-cache-ttl 7200\n")
+
+    args = RuntimeConfig.resolve(["add", "-E"])
+    args.apply_keychainrc(
+        {
+            "HOME": str(tmp_path),
+            "KEYCHAIN_SSH_AGENT_ARGS": "-d",
+            "KEYCHAIN_GPG_AGENT_ARGS": "--debug-level guru",
+        }
+    )
+
     assert args.env["KEYCHAIN_SSH_AGENT_ARGS"] == "-d"
     assert args.env["KEYCHAIN_GPG_AGENT_ARGS"] == "--debug-level guru"
+
+
+def test_agent_arg_cli_options_are_not_public_surface():
+    """Verify that advanced agent args are config/env-only."""
+    args = RuntimeConfig.resolve(["add", "--ssh-agent-args", "-t 3600"])
+    gpg_args = RuntimeConfig.resolve(["add", "--gpg-agent-args", "--debug-level guru"])
+
+    assert args.parse_error == "Unrecognized option '--ssh-agent-args'. Run 'keychain help add' for more information."
+    assert (
+        gpg_args.parse_error == "Unrecognized option '--gpg-agent-args'. Run 'keychain help add' for more information."
+    )
+
+
+def test_pid_formats_cli_option_is_not_public_surface():
+    """Verify that pidfile format selection is config-only."""
+    args = RuntimeConfig.resolve(["add", "--pid-formats", "sh,fish"])
+
+    assert args.parse_error == "Unrecognized option '--pid-formats'. Run 'keychain help add' for more information."
+
+
+def test_apply_keychainrc_reads_config_only_pid_formats(tmp_path):
+    """Verify that [paths] pid_formats remains a working config key."""
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[paths]\npid_formats = sh,fish,envfile\n")
+
+    args = RuntimeConfig.resolve(["add"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
+
+    assert args.get_value("pid_formats") == "sh,fish,envfile"
 
 
 def test_apply_keychainrc_warns_on_unknown_section(tmp_path, monkeypatch):
@@ -271,10 +308,42 @@ def test_apply_keychainrc_coerces_bool_and_int_values(tmp_path, monkeypatch):
     raw config strings before storing them on RuntimeConfig.
     """
     rc = tmp_path / ".keychainrc"
-    rc.write_text("[output]\ndebug = true\n[agent]\ntimeout = 15\n")
+    rc.write_text("[output]\nquiet = true\n[agent]\ntimeout = 15\n")
     monkeypatch.setenv("KEYCHAIN_CONFIG", str(rc))
 
     args = RuntimeConfig.resolve(["-E"])
 
-    assert args.get_value("debug") is True
+    assert args.get_value("quiet") is True
     assert args.get_value("timeout") == 15
+
+
+def test_apply_keychainrc_inverted_bool_keys_use_positive_atoms(tmp_path, monkeypatch):
+    """Verify positive config atoms map to legacy negative runtime flags.
+
+    This should pass because some config booleans are intentionally authored in
+    positive form even though the CLI flag remains negative for compatibility.
+    """
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[output]\ncolor = false\ngui = false\n" "[agent]\ninherit = false\n")
+    monkeypatch.setenv("KEYCHAIN_CONFIG", str(rc))
+
+    args = RuntimeConfig.resolve(["-E"])
+
+    assert args.get_value("nocolor") is True
+    assert args.get_value("no_gui") is True
+    assert args.get_value("no_inherit") is True
+
+
+def test_apply_keychainrc_inverted_bool_true_keeps_positive_behavior(tmp_path, monkeypatch):
+    """Verify positive config atoms remain false on the legacy negative vars when enabled.
+
+    This should pass because ``lock = true`` or ``color = true`` should preserve
+    the normal positive behavior and therefore leave the negative runtime flags false.
+    """
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[output]\ncolor = true\n")
+    monkeypatch.setenv("KEYCHAIN_CONFIG", str(rc))
+
+    args = RuntimeConfig.resolve(["-E"])
+
+    assert args.get_value("nocolor") is False

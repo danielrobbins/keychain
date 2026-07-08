@@ -19,13 +19,14 @@ from pathlib import Path
 from keychain.state import KeychainState
 
 from .env import SshAgentRef
-from .util import KeychainError, Output, current_uid, get_tty, pid_alive, run
+from .util import KeychainError, Output, current_uid, get_tty, pid_alive, run, unlink_quiet
 
 
 @dataclass(frozen=True)
 class SshAddPlan:
-    cmd: list[str]
+    cmd: list[str] | list[list[str]]
     env: dict[str, str]
+
 
 # ---------------------------------------------------------------------------
 # Regex patterns
@@ -225,6 +226,36 @@ def ssh_fingerprint(filename: str, out: Output) -> str | None:
     return fps[0] if fps else None
 
 
+def pkcs11_provider_fingerprints(provider: str, out: Output) -> list[str] | None:
+    """Return SSH fingerprints exposed by a PKCS#11 provider, or None on failure."""
+    try:
+        r = run(["ssh-keygen", "-D", provider], c_locale=False)
+    except (FileNotFoundError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+
+    public_keys = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    if not public_keys:
+        return []
+
+    with tempfile.TemporaryDirectory(prefix="keychain-pkcs11-") as td:
+        fps: list[str] = []
+        for i, public_key in enumerate(public_keys):
+            public_key_path = Path(td) / f"provider-{i}.pub"
+            public_key_path.write_text(f"{public_key}\n", encoding="utf-8")
+            fp = ssh_fingerprint(str(public_key_path), out)
+            if fp:
+                fps.append(fp)
+    return fps
+
+
+def _normalize_ssh_add_commands(cmd: list[str] | list[list[str]]) -> list[list[str]]:
+    if cmd and isinstance(cmd[0], str):
+        return [cmd]  # type: ignore[list-item]
+    return cmd  # type: ignore[return-value]
+
+
 # ---------------------------------------------------------------------------
 # Process scan (free function: heavily test-patched and platform-delegated)
 # ---------------------------------------------------------------------------
@@ -301,6 +332,18 @@ class SshAgent:
                     self.out.info(f"Known ssh key: {self.out.id(k)}")
             else:
                 missing.append(k)
+        return missing
+
+    def list_missing_pkcs11(self, providers: list[str], *, announce_known: bool = True) -> list[str]:
+        have_set = set(self.list_loaded()[0])
+        missing: list[str] = []
+        for provider in filter(None, providers):
+            fps = pkcs11_provider_fingerprints(provider, self.out)
+            if fps and all(fp in have_set for fp in fps):
+                if announce_known:
+                    self.out.info(f"Known PKCS11 provider: {self.out.id(provider)}")
+            else:
+                missing.append(provider)
         return missing
 
     # ---- env validation ----------------------------------------------
@@ -448,6 +491,10 @@ class SshAgent:
             ssh_agent_socket = a.get_value("ssh_agent_socket")
             if ssh_agent_socket:
                 cmd += ["-a", ssh_agent_socket]
+            else:
+                ssh_agent_socket = str(paths.ssh_agent_socket_path)
+                unlink_quiet(ssh_agent_socket)
+                cmd += ["-a", ssh_agent_socket]
             # User-supplied extra flags (issue #21).
             # SECURITY: KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only
             # when --allow-env / -E is set. Direct env var access here is
@@ -460,7 +507,7 @@ class SshAgent:
                 spawned = None
         if spawned:
             paths.write(spawned, self.out)
-            self.env = self.keychain_state.pidfile_env
+            self.env = spawned
         return False
 
     def stop(self, which: str) -> None:
@@ -536,16 +583,26 @@ class SshAgent:
             else:
                 raise KeychainError(f"keychain was unable to remove ssh-agent key {k}. output: {r.stderr}")
 
-    def announce_load(self, missing: list[str]) -> None:
-        if not missing:
+    def announce_load(self, missing: list[str], pkcs11: list[str] | None = None) -> None:
+        pkcs11 = list(pkcs11 or [])
+        if not missing and not pkcs11:
             return
-        noun = "ssh key" if len(missing) == 1 else "ssh keys"
-        self.out.info(f"Need to add {self.out.value(len(missing))} {noun}:")
-        for key in missing:
-            self.out.line(f"   - {self.out.value(key)}")
+        if missing:
+            noun = "ssh key" if len(missing) == 1 else "ssh keys"
+            self.out.info(f"Need to add {self.out.value(len(missing))} {noun}:")
+            for key in missing:
+                self.out.line(f"   - {self.out.value(key)}")
+        if pkcs11:
+            noun = "PKCS11 provider" if len(pkcs11) == 1 else "PKCS11 providers"
+            self.out.info(f"Need to add {self.out.value(len(pkcs11))} {noun}:")
+            for provider in pkcs11:
+                self.out.line(f"   - {self.out.value(provider)}")
 
-    def prepare_load(self, missing: list[str], *, announce: bool = True) -> SshAddPlan | None:
-        if not missing:
+    def prepare_load(
+        self, missing: list[str], pkcs11: list[str] | None = None, *, announce: bool = True
+    ) -> SshAddPlan | None:
+        pkcs11 = list(pkcs11 or [])
+        if not missing and not pkcs11:
             return SshAddPlan([], {})
         a = self.keychain_state.args
         out = self.out
@@ -557,19 +614,24 @@ class SshAgent:
             out.warn("Agent disappeared; refusing to load keys")
             return None
         if announce:
-            self.announce_load(missing)
+            self.announce_load(missing, pkcs11)
         # ssh-add inherits stdio for passphrase prompts, so we cannot use util.run().
         run_env = self.env.overlay()
         if bool(a.get_value("no_gui")) or not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
             run_env.pop("DISPLAY", None)
             run_env.pop("SSH_ASKPASS", None)
-        cmd = ["ssh-add"]
+        base_cmd = ["ssh-add"]
         timeout = a.get_value("timeout")
         if timeout is not None:
-            cmd += ["-t", str(timeout * 60)]
+            base_cmd += ["-t", str(timeout * 60)]
         if bool(a.get_value("confirm")):
-            cmd.append("-c")
-        cmd.extend(missing)
+            base_cmd.append("-c")
+        commands: list[list[str]] = []
+        if missing:
+            commands.append([*base_cmd, *missing])
+        for provider in pkcs11:
+            commands.append([*base_cmd, "-s", provider])
+        cmd: list[str] | list[list[str]] = commands[0] if len(commands) == 1 else commands
         return SshAddPlan(cmd, run_env)
 
     def load(self, missing: list[str]) -> bool:
@@ -578,14 +640,16 @@ class SshAgent:
             return False
         if not plan.cmd:
             return True
-        try:
-            rc = subprocess.run(plan.cmd, env=plan.env, check=False).returncode
-        except (FileNotFoundError, OSError):
-            self.out.warn("ssh-add not found")
-            return False
-        if rc != 0:
-            self.out.warn(f"ssh-add failed (return code: {rc})")
-        return rc == 0
+        for cmd in _normalize_ssh_add_commands(plan.cmd):
+            try:
+                rc = subprocess.run(cmd, env=plan.env, check=False).returncode
+            except (FileNotFoundError, OSError):
+                self.out.warn("ssh-add not found")
+                return False
+            if rc != 0:
+                self.out.warn(f"ssh-add failed (return code: {rc})")
+                return False
+        return True
 
     def passthrough(self, arg: str) -> int:
         """Run ``ssh-add <arg>`` inheriting stdio (legacy theme `list` fallback)."""

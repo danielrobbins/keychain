@@ -152,8 +152,8 @@ keychain --allow-env ...
 keychain -E ...
 ```
 
-This gate allows `KEYCHAIN_CONFIG`, `KEYCHAIN_THEME`,
-`KEYCHAIN_SSH_AGENT_ARGS`, and `KEYCHAIN_GPG_AGENT_ARGS` to affect the run.
+This gate allows `KEYCHAIN_CONFIG`, `KEYCHAIN_SSH_AGENT_ARGS`, and
+`KEYCHAIN_GPG_AGENT_ARGS` to affect the run.
 For normal use, prefer `~/.keychainrc`.
 
 ## Platform Notes

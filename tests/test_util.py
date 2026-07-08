@@ -68,21 +68,21 @@ class TestOutputTheming:
         monkeypatch.setattr(os, "isatty", lambda fd: True)
         monkeypatch.delenv("KEYCHAIN_THEME", raising=False)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=True)
-        # Modern (the new default) uses 256-colour escapes: \033[38;5;NNNm
+        # Modern (the new default) uses 256-color escapes: \033[38;5;NNNm
         assert "38;5;" in out.c("GREEN")
         assert out.theme == "modern"
 
-    def test_modern_theme_uses_256_colour_palette(self, monkeypatch):
+    def test_modern_theme_uses_256_color_palette(self, monkeypatch):
         monkeypatch.setattr(os, "isatty", lambda fd: True)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")
-        # Modern palette uses 256-colour escapes: \033[38;5;NNNm
+        # Modern palette uses 256-color escapes: \033[38;5;NNNm
         assert "38;5;" in out.c("GREEN")
         assert out.theme == "modern"
 
-    def test_legacy_theme_uses_8_colour_palette(self, monkeypatch):
+    def test_legacy_theme_uses_8_color_palette(self, monkeypatch):
         monkeypatch.setattr(os, "isatty", lambda fd: True)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="legacy")
-        # Legacy palette uses bold 8-colour green: \033[32;01m
+        # Legacy palette uses bold 8-color green: \033[32;01m
         assert "32;01" in out.c("GREEN")
         assert out.theme == "legacy"
 
@@ -97,12 +97,12 @@ class TestOutputTheming:
         # Falls back to the modern (default) palette without raising.
         assert "38;5;" in out.c("GREEN")
 
-    def test_json_forces_quiet_and_no_colour(self, monkeypatch):
+    def test_json_forces_quiet_and_no_color(self, monkeypatch):
         monkeypatch.setattr(os, "isatty", lambda fd: True)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern", json=True)
         assert out.json is True
         assert out.quiet is True
-        # Colour is suppressed so JSON consumers never see ANSI escapes.
+        # color is suppressed so JSON consumers never see ANSI escapes.
         assert out.c("GREEN") == ""
 
 
