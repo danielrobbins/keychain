@@ -487,7 +487,21 @@ class ActivationCoordinator:
             os.write(fd, b"cancel\n")
         finally:
             os.close(fd)
-        return waiter.wait_for_message(timeout) or {"status": "timeout"}
+        if message := waiter.wait_for_message(timeout):
+            return message
+
+        with self.state_lock():
+            state = self.load_state()
+            activation = state.activation
+            if self._activation_owner_is_dead(activation):
+                return self._recover_dead_activation(state)
+            if not activation.in_progress:
+                status = activation.status or "inactive"
+                if status == "success":
+                    status = "inactive"
+                return {"status": status, "generation": state.generation}
+
+        return {"status": "timeout"}
 
     def _activation_owner_is_dead(self, activation: ActivationInfo) -> bool:
         if not activation.owner_pid:
