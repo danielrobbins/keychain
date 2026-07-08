@@ -204,6 +204,23 @@ class TestWaiters:
         finally:
             endpoint.cleanup()
 
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO support required")
+    def test_fifo_endpoint_receives_raw_writer_message(self, tmp_path):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
+        endpoint = coord.create_waiter()
+        assert endpoint is not None
+        try:
+            fd = os.open(endpoint.fifo_path, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+            try:
+                os.write(fd, b'{"status": "canceled", "generation": 4}\n')
+            finally:
+                os.close(fd)
+
+            assert endpoint.wait_for_message(timeout=1.0) == {"status": "canceled", "generation": 4}
+        finally:
+            endpoint.cleanup()
+
     def test_finish_activation_clears_waiters_and_advances_generation(self, tmp_path):
         paths = KeychainPaths(keydir=tmp_path, host="box")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
@@ -276,6 +293,46 @@ class TestWaiters:
             thread.join(timeout=1.0)
 
             assert msg["status"] == "canceled"
+        finally:
+            waiter.cleanup()
+            cancel.cleanup()
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO support required")
+    def test_request_takeover_reconciles_state_when_notification_is_missed(self, tmp_path, monkeypatch):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
+        waiter = coord.create_waiter()
+        cancel = coord.create_cancel_endpoint()
+        assert waiter is not None
+        assert cancel is not None
+        try:
+            state = CoordinationState(
+                generation=1,
+                activation=ActivationInfo(
+                    in_progress=True,
+                    owner_pid=os.getpid(),
+                    owner_host=socket.gethostname(),
+                    cancel_endpoint=str(cancel.fifo_path),
+                ),
+            )
+            coord.register_waiter(state, waiter, ["id_ed25519"])
+            coord.save_state(state)
+
+            def miss_notification(self, timeout=None):
+                with coord.state_lock():
+                    completed = coord.load_state()
+                    completed.waiters = []
+                    completed.activation = ActivationInfo(in_progress=False, status="canceled")
+                    completed.generation += 1
+                    coord.save_state(completed)
+                return {}
+
+            monkeypatch.setattr(WaiterEndpoint, "wait_for_message", miss_notification)
+
+            msg = coord.request_takeover(waiter, timeout=1.0)
+
+            assert msg["status"] == "canceled"
+            assert msg["generation"] == 2
         finally:
             waiter.cleanup()
             cancel.cleanup()
