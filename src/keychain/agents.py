@@ -816,6 +816,7 @@ class GpgAgent:
         with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
             plain = Path(td) / "plain"
             cipher = Path(td) / "cipher.gpg"
+            decrypted = Path(td) / "decrypted"
             plain.write_text("keychain\n", encoding="utf-8")
             for k in filter(None, gpg_keys):
                 out.info(f"Adding gpg encryption key: {k}")
@@ -845,7 +846,7 @@ class GpgAgent:
                             "--use-agent",
                             "--decrypt",
                             "--output",
-                            os.devnull,
+                            str(decrypted),
                             str(cipher),
                         ],
                         env=run_env,
