@@ -94,6 +94,13 @@ class TestActivationPrompt:
         assert "wait for another terminal" not in err
         assert "Keys need initialization" not in err
 
+    def test_inactive_prompt_remains_visible_under_quiet(self, tmp_path, capsys):
+        coord = ActivationCoordinator(KeychainPaths(keydir=tmp_path, host="box"), False, 1, _out())
+
+        coord._prompt(activation_active=False)
+
+        assert "Press Enter to initialize keys" in capsys.readouterr().err
+
     def test_active_prompt_offers_takeover_without_old_prose(self, tmp_path, capsys):
         coord = ActivationCoordinator(KeychainPaths(keydir=tmp_path, host="box"), False, 1, _visible_out())
 

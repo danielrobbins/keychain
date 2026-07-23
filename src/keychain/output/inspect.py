@@ -59,43 +59,84 @@ def render_inspect(state: KeychainState, out: Output) -> None:
 
     sections: list[tuple[str, list[tuple]]] = []
 
-    platform_rows: list[tuple] = [
-        ("hostname", state.hostname, f"- via {state.hostname_source}"),
-        ("platform", state.platform.name, ""),
-        ("supported", state.platform.supported, "" if state.platform.supported else state.platform.reason),
-    ]
-    sections.append(("Platform", platform_rows))
-
-    ssh_rows: list[tuple] = [
-        ("ssh impl", state.ssh_implementation, ""),
-        ("ssh version", state.ssh_version or "(unknown)", ""),
-        ("ssh path", state.ssh_path or "(not found)", ""),
-    ]
-    sections.append(("SSH", ssh_rows))
+    runtime = state.runtime_info
     primary_hint = ""
     if state.gpg_main_socket and not state.gpg_primary_socket_is_ours:
         primary_hint = "socket is outside our gpg homedir; keychain will NOT adopt this agent"
-    gpg_rows: list[tuple] = [
+    runtime_rows: list[tuple] = [
+        ("hostname", state.hostname, f"- via {state.hostname_source}"),
+        ("platform", f"{state.platform.name} / {runtime['machine']}", ""),
+        ("supported", state.platform.supported, "" if state.platform.supported else state.platform.reason),
+        ("keychain", runtime["keychain_version"], ""),
+        ("keychain path", runtime["keychain_executable"], ""),
+        ("python", runtime["python_version"], ""),
+        ("python path", runtime["python_executable"], ""),
+        ("ssh impl", state.ssh_implementation, ""),
+        ("ssh version", state.ssh_version or "(unknown)", ""),
+        ("ssh path", state.ssh_path or "(not found)", ""),
         ("gpg version", state.gpg_version or "(unknown)", ""),
         ("gpg path", state.gpg_path or "(not found)", ""),
         ("gpg ssh support", state.gpg_has_ssh_support, ""),
         ("gpg ssh socket", state.gpg_ssh_socket or "(none)", ""),
         ("gpg main socket", state.gpg_main_socket or "(none)", primary_hint),
     ]
-    sections.append(("GPG", gpg_rows))
+    sections.append(("Runtime", runtime_rows))
 
-    keyd_rows: list[tuple] = [
+    diagnostics = state.config_diagnostics
+    if diagnostics:
+        config = diagnostics
+        keychainrc = config["keychainrc"]
+        environment = config["environment"]
+        status = keychainrc["status"]
+        keychain_env = [
+            name for name, item in environment.items() if name.startswith("KEYCHAIN_") and item["set"]
+        ]
+        keychain_env_hint = (
+            f"({len(keychain_env)} set{'' if config['allow_env'] else ', ignored'})" if keychain_env else ""
+        )
+
+        def env_value(name: str) -> str:
+            item = environment[name]
+            return item.get("value", "set") if item["set"] else "unset"
+
+        def set_vars(*names: str) -> str:
+            return ", ".join(name for name in names if environment[name]["set"]) or "(none)"
+
+        config_rows: list[tuple] = [
+            ("keychainrc", keychainrc["path"] or "(none)", ""),
+            ("status", status, "", "warn" if status not in ("absent", "loaded") else ""),
+            (
+                "KEYCHAIN_* env",
+                "enabled" if config["allow_env"] else "disabled",
+                keychain_env_hint,
+            ),
+            ("shell", env_value("SHELL"), ""),
+            ("terminal", env_value("TERM"), ""),
+            ("display env", set_vars("DISPLAY", "WAYLAND_DISPLAY"), ""),
+            ("askpass env", set_vars("SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"), ""),
+            ("agent env", set_vars("SSH_AUTH_SOCK", "SSH_AGENT_PID"), ""),
+            ("gpg env", set_vars("GPG_TTY", "GNUPGHOME"), ""),
+        ]
+        config_rows.extend(
+            (
+                name,
+                str(entry["value"]).lower() if isinstance(entry["value"], bool) else entry["value"],
+                f"({entry['source'].replace('_', ' ')})",
+            )
+            for name, entry in config["effective"].items()
+            if entry["source"] != "default"
+        )
+        sections.append(("Configuration", config_rows))
+
+    state_rows: list[tuple] = [
         ("keydir path", str(state.paths.keydir), ""),
         ("keydir exists", state.keydir_exists, ""),
     ]
     if state.keydir_exists:
-        keyd_rows.append(("keydir writable", state.keydir_writable, ""))
-    sections.append(("Keychain Directory", keyd_rows))
-
-    perms_rows: list[tuple] = []
+        state_rows.append(("keydir writable", state.keydir_writable, ""))
     for check in state.security_audit:
-        perms_rows.append((check.label.replace("_", " "), check.value, check.hint, check.severity))
-    sections.append(("Permissions", perms_rows))
+        state_rows.append((check.label.replace("_", " "), check.summary, check.message, check.severity))
+    sections.append(("Keychain State", state_rows))
 
     pidf_rows: list[tuple] = [
         ("pidfile path", str(state.pidfile_path), ""),
@@ -117,14 +158,18 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         if state.gpg_foreign_agents_present:
             gpg_hint = "at least one is foreign (e.g. package-manager with --homedir); these are ignored by keychain"
         pidf_rows.append(("gpg-agent pids", _fmt_pids(state.gpg_agent_pids), gpg_hint))
-    sections.append(("Pidfile and Processes", pidf_rows))
+    sections.append(("Agent State", pidf_rows))
 
     term_w = shutil.get_terminal_size((80, 24)).columns
     title_style = out.style("heading")
     panels = [render_panel(title, _format_kv_rows(rows, out), title_style=title_style) for title, rows in sections]
-    out.line()
-    for line in compose_columns(panels, max(term_w - 2, 40)).splitlines():
-        out.line(" " + line)
+    panel_rows = (panels[:2], panels[2:])
+    layout = "\n\n".join(
+        compose_columns(row, max(term_w - 2, 40)) for row in panel_rows if row
+    )
+    out.result()
+    for line in layout.splitlines():
+        out.result(" " + line)
 
     out.heading("Loaded SSH keys (best available agent)")
     fps = state.loaded_ssh_fingerprints
@@ -137,12 +182,12 @@ def render_inspect(state: KeychainState, out: Output) -> None:
             header_style=header_style,
         )
         for line in table.splitlines():
-            out.line(line)
+            out.result(line)
     else:
         if state.has_reachable_agent:
-            out.line(f"   {out.dim('(none loaded)')}")
+            out.result(f"   {out.dim('(none loaded)')}")
         else:
-            out.line(f"   {out.dim('(no agent reachable)')}")
+            out.result(f"   {out.dim('(no agent reachable)')}")
 
     if state.cmdline_keys or state.confallhosts:
         cli_repr = " ".join(state.cmdline_keys) or "(--confallhosts)"
@@ -156,91 +201,135 @@ def render_inspect(state: KeychainState, out: Output) -> None:
             ],
             out,
         )
-        out.line()
+        out.result()
         for line in render_panel(f"Resolved keys ({cli_repr})", body, title_style=title_style).splitlines():
-            out.line(" " + line)
+            out.result(" " + line)
 
-    out.line()
+    out.result()
     seen: set[tuple[str, str]] = set()
     for check in state.security_audit:
-        if not check.hint or (check.severity, check.hint) in seen:
+        if not check.message or (check.severity, check.message) in seen:
             continue
-        seen.add((check.severity, check.hint))
+        seen.add((check.severity, check.message))
         if check.severity == "warn":
-            out.warn(check.hint)
+            out.warn(check.message)
         elif check.severity == "err":
-            out.error(check.hint)
-    out.line()
+            out.error(check.message)
+    out.result()
 
 
 def _fmt_pids(pids: Any) -> str:
     return ", ".join(str(p) for p in pids) if pids else "(none)"
 
 
+def _agent_reference(
+    socket_path: str,
+    pid: str,
+    socket_valid: bool,
+    socket_reason: str,
+    socket_severity: str,
+    pid_alive: bool,
+) -> dict[str, Any]:
+    return {
+        "socket": {
+            "path": socket_path or None,
+            "valid": socket_valid,
+            "reason": socket_reason or None,
+            "severity": socket_severity or None,
+        },
+        "process": {"pid": pid or None, "alive": pid_alive},
+    }
+
+
 def render_inspect_json(state: KeychainState) -> None:
     """JSON form of :func:`render_inspect`. Prints one object on stdout."""
-    payload: dict[str, Any] = {
-        "platform": {
-            "name": state.platform.name,
-            "supported": state.platform.supported,
-            "reason": state.platform.reason if not state.platform.supported else "",
-            "hostname": state.hostname,
-            "hostname_source": state.hostname_source,
-        },
-        "ssh": {
-            "openssh": state.openssh,
-            "implementation": state.ssh_implementation,
-            "version": state.ssh_version,
-            "path": state.ssh_path,
-        },
-        "gpg": {
-            "version": state.gpg_version,
-            "path": state.gpg_path,
-            "ssh_support": state.gpg_has_ssh_support,
-            "ssh_socket": state.gpg_ssh_socket or "",
-            "main_socket": state.gpg_main_socket or "",
-            "primary_socket_is_ours": state.gpg_primary_socket_is_ours,
-        },
-        "pidfile": {
-            "path": str(state.pidfile_path),
-            "exists": state.pidfile_exists,
-            "ssh_auth_sock": state.pidfile_socket or "",
-            "ssh_agent_pid": state.pidfile_pid or "",
-            "socket_valid": state.pidfile_socket_valid,
-            "socket_reason": state.pidfile_socket_validation.reason,
-            "socket_severity": state.pidfile_socket_validation.severity,
-            "pid_alive": state.pidfile_pid_alive,
-        },
-        "inherited": {
-            "ssh_auth_sock": state.inherited_socket or "",
-            "ssh_agent_pid": state.inherited_pid or "",
-            "socket_valid": state.inherited_socket_valid,
-            "socket_reason": state.inherited_socket_validation.reason,
-            "socket_severity": state.inherited_socket_validation.severity,
-            "pid_alive": state.inherited_pid_alive,
-        },
-        "loaded_ssh_fingerprints": list(state.loaded_ssh_fingerprints),
-        "permissions": {
-            "keydir_path": str(state.paths.keydir),
-            "keydir_exists": state.keydir_exists,
-            "keydir_writable": state.keydir_writable if state.keydir_exists else False,
-            "keydir_lax_perms": state.keydir_lax_perms if state.keydir_exists else False,
-            "audit": [
-                {"label": check.label, "value": check.value, "hint": check.hint} for check in state.security_audit
-            ],
-        },
-    }
-    if state.process_listing_supported:
-        payload["processes"] = {
-            "ssh_agent_pids": list(state.ssh_agent_pids),
-            "gpg_agent_pids": list(state.gpg_agent_pids),
-            "gpg_foreign_agents_present": state.gpg_foreign_agents_present,
-        }
+    runtime = state.runtime_info
+    resolved = None
     if state.cmdline_keys or state.confallhosts:
-        payload["resolved_keys"] = {
+        resolved = {
             "ssh": list(state.ssh_keys),
             "gpg": list(state.gpg_keys),
             "pkcs11": list(state.pkcs11_keys),
             "missing": list(state.missing_keys),
         }
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "runtime": {
+            "keychain": {"version": runtime["keychain_version"], "path": runtime["keychain_executable"]},
+            "python": {"version": runtime["python_version"], "path": runtime["python_executable"]},
+            "platform": {
+                "name": state.platform.name,
+                "description": runtime["system"],
+                "machine": runtime["machine"],
+                "supported": state.platform.supported,
+                "reason": state.platform.reason or None,
+                "hostname": state.hostname,
+                "hostname_source": state.hostname_source,
+            },
+            "ssh": {
+                "implementation": state.ssh_implementation,
+                "version": state.ssh_version or None,
+                "path": state.ssh_path or None,
+            },
+            "gpg": {
+                "version": state.gpg_version or None,
+                "path": state.gpg_path or None,
+                "ssh_support": state.gpg_has_ssh_support,
+                "ssh_socket": state.gpg_ssh_socket or None,
+                "main_socket": state.gpg_main_socket or None,
+                "primary_socket_is_ours": state.gpg_primary_socket_is_ours,
+            },
+        },
+        "configuration": state.config_diagnostics,
+        "keychain_state": {
+            "current_user": state.user,
+            "keydir": {
+                "path": str(state.paths.keydir),
+                "exists": state.keydir_exists,
+                "writable": state.keydir_writable,
+            },
+            "security": {
+                check.label: {
+                    "path": str(check.path),
+                    "owner": check.owner or None,
+                    "mode": check.mode,
+                    "status": check.status,
+                    "message": check.message or None,
+                }
+                for check in state.security_audit
+            },
+        },
+        "agent_state": {
+            "pidfile": {
+                "path": str(state.pidfile_path),
+                "exists": state.pidfile_exists,
+                **_agent_reference(
+                    state.pidfile_socket,
+                    state.pidfile_pid,
+                    state.pidfile_socket_valid,
+                    state.pidfile_socket_validation.reason,
+                    state.pidfile_socket_validation.severity,
+                    state.pidfile_pid_alive,
+                ),
+            },
+            "inherited": _agent_reference(
+                state.inherited_socket,
+                state.inherited_pid,
+                state.inherited_socket_valid,
+                state.inherited_socket_validation.reason,
+                state.inherited_socket_validation.severity,
+                state.inherited_pid_alive,
+            ),
+            "processes": {
+                "supported": state.process_listing_supported,
+                "ssh_agent_pids": list(state.ssh_agent_pids),
+                "gpg_agent_pids": list(state.gpg_agent_pids),
+                "gpg_foreign_agents_present": state.gpg_foreign_agents_present,
+            },
+        },
+        "keys": {
+            "loaded_ssh_fingerprints": list(state.loaded_ssh_fingerprints),
+            "resolved": resolved,
+        },
+    }
     print(json.dumps(payload, default=str))

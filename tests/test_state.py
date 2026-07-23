@@ -2,6 +2,7 @@
 """Tests for :mod:`keychain.state`."""
 
 import io
+import json
 import sys
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from keychain.output import inspect as inspect_view
 from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.runtime import platform
+from keychain.runtime.config import RuntimeConfig
 
 
 @contextmanager
@@ -138,10 +140,6 @@ def test_keydir_introspection(paths):
     st = state.KeychainState(paths=paths)
     assert st.keydir_exists is True
     assert st.keydir_writable is True
-    # On POSIX, mkdir(mode=0o700) yields tight perms; Windows ignores
-    # POSIX bits (everything looks lax) so this assertion is POSIX-only.
-    if sys.platform != "win32":
-        assert st.keydir_lax_perms is False
 
 
 def test_resolved_keys_classifies_real_and_missing(tmp_path, paths):
@@ -175,7 +173,7 @@ def test_render_inspect_emits_all_sections(paths, out):
     text = buf.getvalue()
     # Section headings are now bare titles after the bar glyph (see
     # docs/output-design.md), no trailing colons or parens.
-    for header in ("Platform", "Pidfile", "Loaded SSH keys", "Permissions"):
+    for header in ("Runtime", "Agent State", "Loaded SSH keys", "Keychain State"):
         assert header in text
 
 
@@ -209,40 +207,93 @@ def test_render_inspect_includes_socket_validation_reason(paths, out):
 
 
 def test_render_inspect_json_emits_valid_object(paths, capsys):
-    import json
-
-    st = state.KeychainState(paths=paths)
+    st = state.KeychainState(paths=paths, env={})
     inspect_view.render_inspect_json(st)
     payload = json.loads(capsys.readouterr().out)
-    # Spot-check the schema: a few sections must always be present.
-    for key in ("platform", "ssh", "gpg", "pidfile", "inherited", "loaded_ssh_fingerprints", "permissions"):
-        assert key in payload
-    assert isinstance(payload["loaded_ssh_fingerprints"], list)
-    assert payload["pidfile"]["exists"] is False
-    assert payload["pidfile"]["socket_reason"] == "empty"
-    assert payload["pidfile"]["socket_severity"] == ""
-    assert "socket_reason" in payload["inherited"]
-    assert "socket_severity" in payload["inherited"]
-    assert "implementation" in payload["ssh"]
-    assert "version" in payload["ssh"]
-    assert "path" in payload["ssh"]
-    assert "version" in payload["gpg"]
-    assert "path" in payload["gpg"]
-    # Permissions section has both the keydir facts and the audit rows.
-    assert "keydir_path" in payload["permissions"]
-    assert "audit" in payload["permissions"]
+    assert set(payload) == {
+        "schema_version",
+        "runtime",
+        "configuration",
+        "keychain_state",
+        "agent_state",
+        "keys",
+    }
+    assert payload["schema_version"] == 1
+    assert set(payload["runtime"]) == {"keychain", "python", "platform", "ssh", "gpg"}
+    assert payload["runtime"]["keychain"]["version"]
+    assert payload["runtime"]["platform"]["hostname"] == "testhost"
+    assert payload["runtime"]["ssh"].keys() == {"implementation", "version", "path"}
+    assert payload["runtime"]["gpg"].keys() == {
+        "version",
+        "path",
+        "ssh_support",
+        "ssh_socket",
+        "main_socket",
+        "primary_socket_is_ours",
+    }
+    assert payload["configuration"] == {}
+    assert payload["keychain_state"]["keydir"]["path"] == str(paths.keydir)
+    keydir_security = payload["keychain_state"]["security"]["keydir"]
+    assert set(keydir_security) == {"path", "owner", "mode", "status", "message"}
+    assert keydir_security["path"] == str(paths.keydir)
+    assert keydir_security["status"] in {"ok", "warning", "error"}
+    pidfile = payload["agent_state"]["pidfile"]
+    assert pidfile["exists"] is False
+    assert pidfile["socket"] == {
+        "path": None,
+        "valid": False,
+        "reason": "empty",
+        "severity": None,
+    }
+    assert pidfile["process"] == {"pid": None, "alive": False}
+    assert payload["agent_state"]["inherited"]["socket"]["reason"] == "empty"
+    assert "supported" in payload["agent_state"]["processes"]
+    assert isinstance(payload["keys"]["loaded_ssh_fingerprints"], list)
+    assert payload["keys"]["resolved"] is None
+
+
+def test_render_inspect_includes_config_under_quiet(tmp_path, paths):
+    (tmp_path / ".keychainrc").write_text("[output]\nquiet = true\n")
+    args = RuntimeConfig.resolve(["inspect"])
+    args.apply_keychainrc({"HOME": str(tmp_path), "TERM": "xterm-256color"})
+    st = state.KeychainState(paths=paths, env=args.env, args=args)
+    quiet = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+
+    with _capture_stderr() as buf:
+        inspect_view.render_inspect(st, quiet)
+
+    text = buf.getvalue()
+    for title in ("Runtime", "Configuration", "Keychain State", "Agent State"):
+        assert f"+-- {title} " in text
+    for old_title in ("Platform", "Environment", "SSH", "GPG", "Permissions"):
+        assert f"+-- {old_title} " not in text
+    assert "output.quiet" in text
+    assert "terminal" in text
+    assert "xterm-256color" in text
+
+
+def test_render_inspect_json_includes_runtime_config_and_environment(tmp_path, paths, capsys):
+    (tmp_path / ".keychainrc").write_text("[output]\nquiet = true\n")
+    args = RuntimeConfig.resolve(["inspect"])
+    args.apply_keychainrc({"HOME": str(tmp_path), "TERM": "xterm-256color"})
+    st = state.KeychainState(paths=paths, env=args.env, args=args)
+
+    inspect_view.render_inspect_json(st)
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["runtime"]["keychain"]["version"]
+    assert payload["configuration"]["keychainrc"]["settings"]["output.quiet"] is True
+    assert payload["configuration"]["effective"]["output.quiet"]["source"] == "keychainrc"
+    assert payload["configuration"]["environment"]["TERM"] == {"set": True, "value": "xterm-256color"}
 
 
 def test_render_inspect_json_includes_resolved_keys_when_args(tmp_path, paths, capsys):
-    import json
-
     real_key = tmp_path / "id_test"
     real_key.write_text("dummy")
     st = state.KeychainState(paths=paths, cmdline_keys=[str(real_key), "sshk:ghost"])
     inspect_view.render_inspect_json(st)
     payload = json.loads(capsys.readouterr().out)
-    assert "resolved_keys" in payload
-    assert "ghost" in payload["resolved_keys"]["missing"]
+    assert "ghost" in payload["keys"]["resolved"]["missing"]
 
 
 # ---------------------------------------------------------------------------
@@ -339,22 +390,21 @@ class TestGpgPrimaryClassification:
 
 
 class TestSecurityAudit:
-    def test_keydir_owner_and_perms_rows_present(self, paths):
+    def test_keydir_owner_and_mode_share_one_record(self, paths):
         with (
             patch("keychain.paths.get_owner", return_value="me"),
             patch("keychain.paths.os.stat") as st_mock,
         ):
             st_mock.return_value.st_mode = 0o40700  # dir, 0700
             ks = state.KeychainState(paths=paths, user="me")
-            audit = ks.security_audit
-            labels = [check.label for check in audit]
-            assert "keydir_owner" in labels
-            assert "keydir_perms" in labels
-            for check in audit:
-                if check.label == "keydir_owner":
-                    assert check.value == "me" and check.hint == "(you)" and check.severity == ""
-                if check.label == "keydir_perms":
-                    assert check.value == "0700" and check.hint == "" and check.severity == ""
+            record = next(check for check in ks.security_audit if check.label == "keydir")
+            assert record.path == paths.keydir
+            assert record.owner == "me"
+            assert record.mode == "0700"
+            assert record.summary == "me / 0700"
+            assert record.message == ""
+            assert record.severity == ""
+            assert record.status == "ok"
 
     def test_keydir_lax_perms_emits_hint(self, paths):
         with (
@@ -363,10 +413,11 @@ class TestSecurityAudit:
         ):
             st_mock.return_value.st_mode = 0o40777  # dir, 0777
             ks = state.KeychainState(paths=paths, user="me")
-            row = next(check for check in ks.security_audit if check.label == "keydir_perms")
-            assert row.value == "0777"
-            assert "lax permissions" in row.hint
+            row = next(check for check in ks.security_audit if check.label == "keydir")
+            assert row.mode == "0777"
+            assert "lax permissions" in row.message
             assert row.severity == "err"
+            assert row.status == "error"
 
     def test_foreign_keydir_owner_emits_hint(self, paths):
         with (
@@ -375,9 +426,10 @@ class TestSecurityAudit:
         ):
             st_mock.return_value.st_mode = 0o40700
             ks = state.KeychainState(paths=paths, user="me")
-            row = next(check for check in ks.security_audit if check.label == "keydir_owner")
-            assert row.value == "attacker"
-            assert "refusing to use" in row.hint
+            row = next(check for check in ks.security_audit if check.label == "keydir")
+            assert row.owner == "attacker"
+            assert row.mode == "0700"
+            assert "refusing to use" in row.message
             assert row.severity == "err"
 
     def test_foreign_gpg_socket_not_in_security_audit(self, paths, tmp_path):

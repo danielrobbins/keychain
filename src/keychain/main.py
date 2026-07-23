@@ -547,15 +547,28 @@ def main(argv: list[str] | None = None) -> None:
 
         sys.exit(docs.run_explain(argv))
 
-    no_color_env = bool(os.environ.get("NO_COLOR"))
     out = Output.build(
         quiet=bool(args.get_value("quiet")) or args.action == "env",
         debug=bool(args.get_value("debug")),
         eval_mode=bool(args.get_value("eval")),
-        color=not bool(args.get_value("no_color")) and not no_color_env,
-        theme=(args.get_value("theme") or "modern"),
+        color=not bool(args.get_value("nocolor")),
+        theme=args.get_value("theme"),
         json=bool(args.get_value("json")),
     )
+
+    if out.debug_on:
+        configuration = args.diagnostics()
+        overrides = ", ".join(
+            f"{key}={entry['value']!r} ({entry['source']})"
+            for key, entry in configuration["effective"].items()
+            if entry["source"] != "default"
+        )
+        if configuration["keychainrc"]["status"] == "loaded" or overrides:
+            rc = configuration["keychainrc"]
+            out.debug(
+                f"Configuration ({rc['status']}: {rc['path'] or '(none)'})"
+                + (f": {overrides}" if overrides else "")
+            )
 
     for warning in args.rc_warnings:
         out.warn(warning)

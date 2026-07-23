@@ -12,6 +12,53 @@ from keychain.util import KeychainError
 from tests.support import set_home
 
 
+def test_debug_reports_loaded_keychainrc_even_when_quiet(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".keychainrc").write_text("[output]\nquiet = true\n")
+    set_home(monkeypatch, home, patch_path_home=True)
+    monkeypatch.setattr(
+        main.platform,
+        "detect",
+        lambda: SimpleNamespace(supported=True, name="linux", reason=""),
+    )
+    monkeypatch.setattr(main.KeychainApp, "run", lambda _app: 0)
+
+    with pytest.raises(SystemExit) as exc:
+        main.main(["inspect", "--debug"])
+
+    assert exc.value.code == 0
+    assert (
+        f"Configuration (loaded: {home / '.keychainrc'}): output.quiet=True (keychainrc)"
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.parametrize(("argv", "no_color_env"), [(["inspect", "--nocolor"], False), (["inspect"], True)])
+def test_main_resolves_no_color_through_option_policy(monkeypatch, argv, no_color_env):
+    if no_color_env:
+        monkeypatch.setenv("NO_COLOR", "")
+    seen = {}
+    build = main.Output.build
+
+    def capture_output(**kwargs):
+        seen.update(kwargs)
+        return build(**kwargs)
+
+    monkeypatch.setattr(main.Output, "build", staticmethod(capture_output))
+    monkeypatch.setattr(
+        main.platform,
+        "detect",
+        lambda: SimpleNamespace(supported=True, name="linux", reason=""),
+    )
+    monkeypatch.setattr(main.KeychainApp, "run", lambda _app: 0)
+
+    with pytest.raises(SystemExit):
+        main.main(argv)
+
+    assert seen["color"] is False
+
+
 class TestKeychainErrorHandling:
     @pytest.mark.parametrize(
         ("error", "message"),

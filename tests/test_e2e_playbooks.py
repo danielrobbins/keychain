@@ -114,13 +114,14 @@ def test_basic_agent_lifecycle(playbook: PlaybookRunner):
     # 2. Inspect should reveal running agents
     out, err = playbook.run("inspect", "--json")
     state = from_json(out)
+    pidfile = state["agent_state"]["pidfile"]
 
-    assert state["pidfile"]["pid_alive"] is True
-    assert state["pidfile"]["socket_valid"] is True
+    assert pidfile["process"]["alive"] is True
+    assert pidfile["socket"]["valid"] is True
 
     # Export it to the environment dynamically so subsequent calls know it's there
-    playbook.monkeypatch.setenv("SSH_AUTH_SOCK", state["pidfile"]["ssh_auth_sock"])
-    playbook.monkeypatch.setenv("SSH_AGENT_PID", str(state["pidfile"]["ssh_agent_pid"]))
+    playbook.monkeypatch.setenv("SSH_AUTH_SOCK", pidfile["socket"]["path"])
+    playbook.monkeypatch.setenv("SSH_AGENT_PID", str(pidfile["process"]["pid"]))
 
     # 3. Stop the agent specifically for this host
     playbook.run("--quiet", "agent", "stop", "--mine")
@@ -128,7 +129,7 @@ def test_basic_agent_lifecycle(playbook: PlaybookRunner):
     # 4. Inspect should reveal NO running agents
     out_after, err_after = playbook.run("inspect", "--json")
     state_after = from_json(out_after)
-    assert state_after["pidfile"]["pid_alive"] is False
+    assert state_after["agent_state"]["pidfile"]["process"]["alive"] is False
 
 
 @LINUX_AGENT_ONLY
@@ -284,7 +285,7 @@ def test_inspect_command(playbook: PlaybookRunner):
     out, err = playbook.run("inspect", "--json", expect_exit=0)
     json_out = from_json(out)
     assert isinstance(json_out, dict), "inspect --json should return a parsed JSON dict in PlaybookRunner"
-    assert "pidfile" in json_out, "JSON output should contain 'pidfile'"
+    assert "pidfile" in json_out["agent_state"], "JSON output should contain pidfile state"
 
 
 def test_version_json_emits_expected_keys(playbook: PlaybookRunner):

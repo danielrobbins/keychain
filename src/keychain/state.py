@@ -16,8 +16,10 @@ Results are memoised in ``self._cache`` so the runtime path and the
 from __future__ import annotations
 
 import os
+import platform as py_platform
 import shutil
 import socket
+import sys
 from collections.abc import Mapping
 from functools import cached_property
 from typing import Any
@@ -31,7 +33,6 @@ from .runtime.platform import detect as detect_platform
 from .util import (
     KeychainError,
     current_user,
-    lax_perms,
     pid_alive,
     run,
 )
@@ -148,6 +149,23 @@ class KeychainState:
     @property
     def hostname(self) -> str:
         return self.paths.host
+
+    @cached_property
+    def runtime_info(self) -> dict[str, str]:
+        from . import __version__
+
+        return {
+            "keychain_version": __version__,
+            "keychain_executable": os.path.abspath(sys.argv[0]),
+            "python_version": sys.version.split()[0],
+            "python_executable": sys.executable,
+            "system": py_platform.platform(),
+            "machine": py_platform.machine(),
+        }
+
+    @property
+    def config_diagnostics(self) -> dict[str, Any]:
+        return self.args.diagnostics() if self.args is not None else {}
 
     # ---- agent façades (lazy; require out, which build() supplies) ----
 
@@ -381,10 +399,6 @@ class KeychainState:
     @property
     def keydir_writable(self) -> bool:
         return self.keydir_exists and os.access(str(self.paths.keydir), os.W_OK)
-
-    @property
-    def keydir_lax_perms(self) -> bool:
-        return self.keydir_exists and lax_perms(self.paths.keydir)
 
     # ---- security audit ----------------------------------------------
 

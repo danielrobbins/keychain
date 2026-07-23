@@ -14,10 +14,30 @@ from typing import Any
 from .actions import ROOT_ACTION, UNSET, Action, Option
 from .compat import COMPAT
 
-_AGENT_ARG_ENVS = {
-    "ssh_args": "KEYCHAIN_SSH_AGENT_ARGS",
-    "gpg_args": "KEYCHAIN_GPG_AGENT_ARGS",
-}
+_AGENT_ARG_VARS = ("ssh_args", "gpg_args")
+
+_DIAGNOSTIC_ENV_VALUES = (
+    "HOME",
+    "SHELL",
+    "HOSTNAME",
+    "TERM",
+    "SSH_ASKPASS",
+    "SSH_ASKPASS_REQUIRE",
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_TTY",
+    "GNUPGHOME",
+    "KEYCHAIN_CONFIG",
+    "KEYCHAIN_SSH_AGENT_ARGS",
+    "KEYCHAIN_GPG_AGENT_ARGS",
+)
+_DIAGNOSTIC_ENV_KEYS = _DIAGNOSTIC_ENV_VALUES + (
+    "NO_COLOR",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "SSH_TTY",
+    "SSH_CONNECTION",
+)
 
 
 def _config_security_error(path: Path, file_stat: os.stat_result) -> str:
@@ -77,6 +97,10 @@ class RuntimeConfig:
         # State stores for lazy lookup by Options
         self.environ: dict[str, str] = {}
         self.rc_data: dict[str, dict[str, str]] = {}
+        self.rc_path: Path | None = None
+        self.rc_status = "absent"
+        self._config_options: dict[str, Option] = {}
+        self._diagnostic_environ: dict[str, str] = {}
 
         self.positionals: list[str] = []
         self._parsed_positionals: dict[str, Any] = {}
@@ -88,6 +112,12 @@ class RuntimeConfig:
     def apply_keychainrc(self, environ_overrides: dict[str, str] | None = None) -> None:
         """Read .keychainrc and build the effective env mapping."""
         base_environ = environ_overrides if environ_overrides is not None else dict(os.environ)
+        self.rc_data.clear()
+        self.rc_warnings.clear()
+        self.rc_status = "absent"
+        self._diagnostic_environ = {
+            key: base_environ[key] for key in _DIAGNOSTIC_ENV_KEYS if key in base_environ
+        }
         self.environ = dict(base_environ)
 
         # SECURITY: KEYCHAIN_* env vars are gated by --allow-env / -E.
@@ -102,6 +132,7 @@ class RuntimeConfig:
             rc_path = Path(config_path)
         else:
             rc_path = Path(base_environ.get("HOME", "~")).expanduser() / ".keychainrc"
+        self.rc_path = rc_path
 
         if not allow_env:
             for key in list(self.environ):
@@ -111,23 +142,30 @@ class RuntimeConfig:
 
         # Validate sections layout using AST — keys stored lowercase for
         # case-insensitive matching against the parser output.
-        all_options_by_section: dict[str, set[str]] = defaultdict(set)
+        all_options_by_section: dict[str, dict[str, Option]] = defaultdict(dict)
 
         def _scan_sections(node: Action):
             for opt in node.options.values():
                 if opt.config_section:
-                    all_options_by_section[opt.config_section.lower()].add(opt.effective_config_key.lower())
+                    all_options_by_section[opt.config_section.lower()][opt.effective_config_key.lower()] = opt
             for child in node.sub_actions.values():
                 _scan_sections(child)
 
         _scan_sections(ROOT_ACTION)
+        self._config_options = {
+            f"{section}.{key}": opt
+            for section, options in all_options_by_section.items()
+            for key, opt in options.items()
+        }
 
         # Parse .keychainrc with case-insensitive key/section matching
         parser = _CaseInsensitiveConfigParser()
         if rc_path.is_file():
+            self.rc_status = "loaded"
             try:
                 with rc_path.open(encoding="utf-8") as rc_file:
                     if error := _config_security_error(rc_path, os.fstat(rc_file.fileno())):
+                        self.rc_status = "rejected_permissions"
                         self.parse_error = self.parse_error or error
                         return
                     parser.read_file(rc_file)
@@ -143,19 +181,50 @@ class RuntimeConfig:
                             continue
                         self.rc_data[section][key] = val
             except configparser.Error as e:
+                self.rc_status = "parse_error"
                 self.rc_warnings.append(f"Failed to parse {rc_path}: {e}")
             except OSError as e:
+                self.rc_status = "unreadable"
                 self.rc_warnings.append(f"Failed to read {rc_path}: {e}")
 
-        for varname, env_name in _AGENT_ARG_ENVS.items():
-            value = self._agent_arg_value(varname, env_name, base_environ, allow_env)
-            if value:
-                self.env[env_name] = str(value)
+        for varname in _AGENT_ARG_VARS:
+            opt = self.get_option(varname)
+            value = self.get_value(varname)
+            if opt and opt.env and value:
+                self.env[opt.env] = str(value)
 
-    def _agent_arg_value(self, varname: str, env_name: str, base_environ: dict[str, str], allow_env: bool) -> Any:
-        if allow_env and env_name in base_environ:
-            return base_environ[env_name]
-        return self.get_value(varname)
+    def diagnostics(self) -> dict[str, Any]:
+        """Return the safe, structured runtime context used by ``inspect``."""
+        allow_env = bool(self.get_value("allow_env"))
+        effective: dict[str, dict[str, Any]] = {}
+        for name, opt in sorted(self._config_options.items()):
+            value, source = opt.resolution(self.rc_data, self.environ)
+            if opt.config_invert_bool:
+                value = not bool(value)
+            effective[name] = {"value": value, "source": source}
+
+        variables: dict[str, dict[str, Any]] = {}
+        for name in _DIAGNOSTIC_ENV_KEYS:
+            present = name in self._diagnostic_environ
+            item: dict[str, Any] = {"set": present}
+            if present and name in _DIAGNOSTIC_ENV_VALUES:
+                item["value"] = self._diagnostic_environ[name]
+            if name.startswith("KEYCHAIN_"):
+                item["accepted"] = present and allow_env
+            variables[name] = item
+        return {
+            "keychainrc": {
+                "path": str(self.rc_path) if self.rc_path else None,
+                "status": self.rc_status,
+                "settings": {
+                    name: entry["value"] for name, entry in effective.items() if entry["source"] == "keychainrc"
+                },
+                "warnings": list(self.rc_warnings),
+            },
+            "allow_env": allow_env,
+            "effective": effective,
+            "environment": variables,
+        }
 
     def get_option(self, varname: str, action_node: Action | None = None) -> Option | None:
         """Return the authored option visible from an action context.

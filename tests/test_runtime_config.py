@@ -291,6 +291,7 @@ def test_apply_keychainrc_reports_security_failure(monkeypatch, tmp_path):
     args.apply_keychainrc({"HOME": str(tmp_path)})
 
     assert args.parse_error == "Unsafe configuration"
+    assert args.diagnostics()["keychainrc"]["status"] == "rejected_permissions"
     assert args.get_value("timeout") is None
 
 
@@ -353,6 +354,78 @@ def test_apply_keychainrc_coerces_bool_and_int_values(tmp_path, monkeypatch):
 
     assert args.get_value("quiet") is True
     assert args.get_value("timeout") == 15
+
+
+def test_diagnostics_report_normalized_config_and_only_relevant_environment(tmp_path):
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[output]\nquiet = true\ncolor = false\n")
+    args = RuntimeConfig.resolve(["inspect"])
+    args.apply_keychainrc(
+        {
+            "HOME": str(tmp_path),
+            "TERM": "xterm-256color",
+            "DISPLAY": ":0",
+            "SSH_CONNECTION": "private network details",
+            "KEYCHAIN_SSH_AGENT_ARGS": "-t 3600",
+            "AWS_SECRET_ACCESS_KEY": "must-not-leak",
+        }
+    )
+
+    diagnostics = args.diagnostics()
+    configuration = diagnostics
+    keychainrc = configuration["keychainrc"]
+    environment = diagnostics["environment"]
+
+    assert keychainrc == {
+        "path": str(rc),
+        "status": "loaded",
+        "settings": {"output.color": False, "output.quiet": True},
+        "warnings": [],
+    }
+    assert environment["TERM"] == {"set": True, "value": "xterm-256color"}
+    assert environment["DISPLAY"] == {"set": True}
+    assert environment["SSH_CONNECTION"] == {"set": True}
+    assert environment["KEYCHAIN_SSH_AGENT_ARGS"] == {
+        "set": True,
+        "value": "-t 3600",
+        "accepted": False,
+    }
+    assert configuration["effective"]["output.quiet"] == {"value": True, "source": "keychainrc"}
+    assert configuration["effective"]["output.color"] == {"value": False, "source": "keychainrc"}
+    assert configuration["effective"]["output.theme"]["source"] == "default"
+    assert "AWS_SECRET_ACCESS_KEY" not in environment
+
+
+def test_diagnostics_identify_command_line_and_accepted_environment_sources(tmp_path):
+    args = RuntimeConfig.resolve(["add", "--confirm", "-E"])
+    args.apply_keychainrc(
+        {
+            "HOME": str(tmp_path),
+            "NO_COLOR": "",
+            "KEYCHAIN_SSH_AGENT_ARGS": "-t 3600",
+        }
+    )
+
+    effective = args.diagnostics()["effective"]
+    assert args.get_value("nocolor") is True
+    assert effective["agent.confirm"] == {"value": True, "source": "command_line"}
+    assert effective["agent.env.ssh_args"] == {"value": "-t 3600", "source": "environment"}
+    assert effective["output.color"] == {"value": False, "source": "environment"}
+
+
+def test_diagnostics_distinguish_absent_invalid_and_accepted_env_config(tmp_path):
+    args = RuntimeConfig.resolve(["inspect"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
+    assert args.diagnostics()["keychainrc"]["status"] == "absent"
+
+    rc = tmp_path / "custom.conf"
+    rc.write_text("[broken")
+    args = RuntimeConfig.resolve(["inspect", "-E"])
+    args.apply_keychainrc({"HOME": str(tmp_path), "KEYCHAIN_CONFIG": str(rc)})
+    diagnostics = args.diagnostics()
+    assert diagnostics["keychainrc"]["status"] == "parse_error"
+    assert diagnostics["keychainrc"]["warnings"]
+    assert diagnostics["environment"]["KEYCHAIN_CONFIG"]["accepted"] is True
 
 
 def test_apply_keychainrc_inverted_bool_keys_use_positive_atoms(tmp_path, monkeypatch):

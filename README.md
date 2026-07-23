@@ -205,6 +205,9 @@ keychain inspect
 
 Shows:
 - Platform and host detection
+- Keychain and Python runtime details
+- Parsed preferences and their effective sources
+- Keychain-relevant environment state
 - SSH and GPG tool availability
 - Agent status and socket locations
 - Keychain directory and pidfile state
