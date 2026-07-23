@@ -466,13 +466,13 @@ class TestSshEnvcheckUnknownSource:
 
 
 class TestSshAgentStartupOutput:
-    def _agent_with_args(self, tmp_path, *extra_args):
+    def _agent_with_args(self, keydir, *extra_args):
         from keychain import state
         from keychain.paths import KeychainPaths
         from keychain.runtime.config import RuntimeConfig
 
         args = RuntimeConfig.resolve(["add", "--no-inherit", *extra_args])
-        paths = KeychainPaths(keydir=tmp_path, host="h")
+        paths = KeychainPaths(keydir=keydir, host="h")
         kstate = state.KeychainState(paths=paths, env={}, args=args)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
         return agents.SshAgent(kstate, out), paths
@@ -489,9 +489,9 @@ class TestSshAgentStartupOutput:
 
         monkeypatch.setattr(agents, "run", fake_run)
 
-    def test_stale_pidfile_socket_missing_is_spawn_context(self, tmp_path, monkeypatch, capsys):
+    def test_stale_pidfile_socket_missing_is_spawn_context(self, tmp_path, short_keydir, monkeypatch, capsys):
         """Verify common WSL-style stale pidfiles are folded into the spawn line instead of a standalone note."""
-        agent, paths = self._agent_with_args(tmp_path)
+        agent, paths = self._agent_with_args(short_keydir)
         paths.write(SshAgentRef(sock=str(tmp_path / "missing-agent.sock"), pid="999999"), _out())
         self._fake_spawn(monkeypatch)
 
@@ -501,9 +501,9 @@ class TestSshAgentStartupOutput:
         assert "Starting ssh-agent (previous pidfile stale: socket missing)..." in err
         assert "SSH_AUTH_SOCK in pidfile points" not in err
 
-    def test_suspicious_pidfile_socket_rejection_stays_visible(self, tmp_path, monkeypatch, capsys):
+    def test_suspicious_pidfile_socket_rejection_stays_visible(self, tmp_path, short_keydir, monkeypatch, capsys):
         """Verify non-stale-looking socket failures still warn because they may indicate bad state."""
-        agent, paths = self._agent_with_args(tmp_path)
+        agent, paths = self._agent_with_args(short_keydir)
         bad_sock = tmp_path / "not-a-socket"
         bad_sock.write_text("not a socket", encoding="utf-8")
         paths.write(SshAgentRef(sock=str(bad_sock), pid="999999"), _out())
@@ -517,13 +517,8 @@ class TestSshAgentStartupOutput:
         assert "Starting ssh-agent..." in err
         assert "previous pidfile stale" not in err
 
-    def test_spawned_agent_waits_for_socket_to_appear(self, tmp_path, monkeypatch):
-        """Verify default ssh-agent startup pins the socket under the keydir.
-
-        This avoids relying on ssh-agent's default /tmp/ssh-* temp directory,
-        which can disappear during early WSL startup.
-        """
-        agent, _paths = self._agent_with_args(tmp_path)
+    def test_spawned_agent_uses_returned_environment(self, short_keydir, monkeypatch):
+        agent, _paths = self._agent_with_args(short_keydir)
         self._fake_spawn(monkeypatch)
 
         agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
@@ -531,16 +526,42 @@ class TestSshAgentStartupOutput:
         assert agent.env.sock == "/tmp/keychain-test-agent.sock"
         assert agent.env.pid == "12345"
 
-    def test_confirm_and_no_gui_are_rejected(self, tmp_path):
+    def test_spawn_failure_reports_ssh_agent_error(self, short_keydir, monkeypatch):
+        agent, _paths = self._agent_with_args(short_keydir)
+        monkeypatch.setattr(
+            agents,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="unix_listener: path too long for Unix domain socket\n",
+            ),
+        )
+
+        with pytest.raises(agents.KeychainError, match="path too long for Unix domain socket"):
+            agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+    def test_unparseable_spawn_output_is_rejected(self, short_keydir, monkeypatch):
+        agent, _paths = self._agent_with_args(short_keydir)
+        monkeypatch.setattr(
+            agents,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="Agent pid 12345\n", stderr=""),
+        )
+
+        with pytest.raises(agents.KeychainError, match="did not return its socket information"):
+            agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+    def test_confirm_and_no_gui_are_rejected(self, short_keydir):
         """Confirmation must fail closed instead of silently loading an unconstrained key."""
-        agent, _paths = self._agent_with_args(tmp_path, "--confirm", "--no-gui")
+        agent, _paths = self._agent_with_args(short_keydir, "--confirm", "--no-gui")
 
         with pytest.raises(agents.KeychainError, match="requires graphical confirmation"):
             agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
 
-    def test_macos_confirm_configures_new_agent_with_native_askpass(self, tmp_path, monkeypatch):
+    def test_macos_confirm_configures_new_agent_with_native_askpass(self, short_keydir, monkeypatch):
         """A managed macOS agent must inherit the helper needed for later signing prompts."""
-        agent, paths = self._agent_with_args(tmp_path, "--confirm")
+        agent, paths = self._agent_with_args(short_keydir, "--confirm")
         monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
         captured_env = None
 
@@ -569,9 +590,9 @@ class TestSshAgentStartupOutput:
         assert 'SSH_ASKPASS_PROMPT-}" = "confirm"' in text
         assert 'buttons {"Deny", "Allow"}' in text
 
-    def test_macos_confirm_preserves_external_askpass(self, tmp_path, monkeypatch):
+    def test_macos_confirm_preserves_external_askpass(self, short_keydir, monkeypatch):
         """An explicitly configured helper takes precedence over Keychain's macOS helper."""
-        agent, paths = self._agent_with_args(tmp_path, "--confirm")
+        agent, paths = self._agent_with_args(short_keydir, "--confirm")
         monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
         agent.keychain_state.env["SSH_ASKPASS"] = "/custom/askpass"
         captured_env = None
@@ -608,18 +629,20 @@ class TestAgentArgsPassthrough:
         """Replace agents.run with a recorder; return the captured cmd list."""
         captured = []
 
-        class _R:
-            returncode = 0
-            stdout = ""
-
         def fake_run(cmd, *_a, **_k):
             captured.append(list(cmd))
-            return _R()
+            stdout = (
+                'SSH_AUTH_SOCK="/tmp/keychain-test-agent.sock"; export SSH_AUTH_SOCK\n'
+                "SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n"
+                if cmd[0] == "ssh-agent"
+                else ""
+            )
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
         monkeypatch.setattr(agents, "run", fake_run)
         return captured
 
-    def _build_ssh_agent(self, tmp_path):
+    def _build_ssh_agent(self, keydir):
         """Construct a SshAgent with parsed args for the spawn path."""
         from keychain import state
         from keychain.paths import KeychainPaths
@@ -629,20 +652,20 @@ class TestAgentArgsPassthrough:
         args = RuntimeConfig.resolve(["add", "--no-inherit", "--no-gui"])
 
         kstate = state.KeychainState(
-            paths=KeychainPaths(keydir=tmp_path, host="h"),
+            paths=KeychainPaths(keydir=keydir, host="h"),
             args=args,
         )
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         return agents.SshAgent(kstate, out)
 
-    def test_ssh_agent_args_appended(self, monkeypatch, tmp_path):
+    def test_ssh_agent_args_appended(self, monkeypatch, short_keydir):
         """Verify KEYCHAIN_SSH_AGENT_ARGS tokens are appended to ssh-agent because the environment variable is the supported override for extra spawn flags."""
         cap = self._capture_run(monkeypatch)
         monkeypatch.setenv("KEYCHAIN_SSH_AGENT_ARGS", "-O no-restrict-websafe -t 7200")
         # Force a "spawn new agent" path: empty pidfile, no inherited env.
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
         monkeypatch.delenv("SSH_AGENT_PID", raising=False)
-        self._build_ssh_agent(tmp_path).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        self._build_ssh_agent(short_keydir).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
         # ssh-agent invocation is the last captured run.
         cmd = cap[-1]
         assert cmd[0] == "ssh-agent"
@@ -672,12 +695,12 @@ class TestAgentArgsPassthrough:
         assert "--allow-preset-passphrase" in cmd
         assert "--debug-level=basic" in cmd
 
-    def test_no_args_when_env_unset(self, monkeypatch, tmp_path):
+    def test_no_args_when_env_unset(self, monkeypatch, short_keydir):
         """Verify no extra ssh-agent flags are added when the passthrough env var is unset because the default spawn command should stay minimal."""
         cap = self._capture_run(monkeypatch)
         monkeypatch.delenv("KEYCHAIN_SSH_AGENT_ARGS", raising=False)
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
         monkeypatch.delenv("SSH_AGENT_PID", raising=False)
-        self._build_ssh_agent(tmp_path).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        self._build_ssh_agent(short_keydir).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
         # Default invocation pins the socket under the keydir.
-        assert cap[-1] == ["ssh-agent", "-s", "-a", str(tmp_path / "h-agent.sock")]
+        assert cap[-1] == ["ssh-agent", "-s", "-a", str(short_keydir / "qqlAJmTx.s")]
