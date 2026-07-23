@@ -269,9 +269,7 @@ class TestKeychainPathsRenderEnv:
 
         assert f"SSH_AUTH_SOCK={shlex.quote(value)};" in kp.render_env(env, "sh")
         assert f"setenv SSH_AUTH_SOCK {shlex.quote(value)};" in kp.render_env(env, "csh")
-        assert "set -x -U SSH_AUTH_SOCK '/tmp/$(touch /tmp/keychain-pwn)/agent\\'quoted';" in kp.render_env(
-            env, "fish"
-        )
+        assert "set -x -U SSH_AUTH_SOCK '/tmp/$(touch /tmp/keychain-pwn)/agent\\'quoted';" in kp.render_env(env, "fish")
 
     @pytest.mark.skipif(os.name == "nt", reason="requires a Bourne shell")
     def test_sh_output_treats_hostile_socket_as_data(self, tmp_path):
@@ -314,8 +312,9 @@ class TestCheckRuntimePerms:
     def test_no_pidfiles_no_error(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="h")
         tmp_path.mkdir(exist_ok=True)
-        with patch("keychain.paths.get_owner", return_value="me"), patch(
-            "keychain.paths.lax_perms", return_value=False
+        with (
+            patch("keychain.paths.get_owner", return_value="me"),
+            patch("keychain.paths.lax_perms", return_value=False),
         ):
             kp.check_runtime_perms("me")
 
@@ -331,18 +330,22 @@ class TestCheckRuntimePerms:
     def test_foreign_owner_raises_keychain_error(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="h")
         kp.pidfile_path("sh").write_text("SSH_AUTH_SOCK=/tmp/foo\n")
-        with patch(
-            "keychain.paths.get_owner",
-            side_effect=lambda path: "attacker" if Path(path) == kp.pidfile_path("sh") else "me",
-        ), patch("keychain.paths.lax_perms", return_value=False):
+        with (
+            patch(
+                "keychain.paths.get_owner",
+                side_effect=lambda path: "attacker" if Path(path) == kp.pidfile_path("sh") else "me",
+            ),
+            patch("keychain.paths.lax_perms", return_value=False),
+        ):
             with pytest.raises(KeychainError, match="owned by attacker"):
                 kp.check_runtime_perms("me")
 
     def test_lax_perms_raise_keychain_error(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="h")
         kp.pidfile_path("sh").write_text("SSH_AUTH_SOCK=/tmp/foo\n")
-        with patch("keychain.paths.get_owner", return_value="me"), patch(
-            "keychain.paths.lax_perms", side_effect=lambda path: Path(path) == kp.pidfile_path("sh")
+        with (
+            patch("keychain.paths.get_owner", return_value="me"),
+            patch("keychain.paths.lax_perms", side_effect=lambda path: Path(path) == kp.pidfile_path("sh")),
         ):
             with pytest.raises(KeychainError, match="lax permissions"):
                 kp.check_runtime_perms("me")
@@ -350,10 +353,13 @@ class TestCheckRuntimePerms:
     def test_coordination_state_is_checked(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="h")
         kp.state_file.write_text("{}\n", encoding="utf-8")
-        with patch(
-            "keychain.paths.get_owner",
-            side_effect=lambda path: "attacker" if Path(path) == kp.state_file else "me",
-        ), patch("keychain.paths.lax_perms", return_value=False):
+        with (
+            patch(
+                "keychain.paths.get_owner",
+                side_effect=lambda path: "attacker" if Path(path) == kp.state_file else "me",
+            ),
+            patch("keychain.paths.lax_perms", return_value=False),
+        ):
             with pytest.raises(KeychainError, match="owned by attacker"):
                 kp.check_runtime_perms("me")
 

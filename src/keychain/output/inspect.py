@@ -88,9 +88,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         keychainrc = config["keychainrc"]
         environment = config["environment"]
         status = keychainrc["status"]
-        keychain_env = [
-            name for name, item in environment.items() if name.startswith("KEYCHAIN_") and item["set"]
-        ]
+        keychain_env = [name for name, item in environment.items() if name.startswith("KEYCHAIN_") and item["set"]]
         keychain_env_hint = (
             f"({len(keychain_env)} set{'' if config['allow_env'] else ', ignored'})" if keychain_env else ""
         )
@@ -164,9 +162,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
     title_style = out.style("heading")
     panels = [render_panel(title, _format_kv_rows(rows, out), title_style=title_style) for title, rows in sections]
     panel_rows = (panels[:2], panels[2:])
-    layout = "\n\n".join(
-        compose_columns(row, max(term_w - 2, 40)) for row in panel_rows if row
-    )
+    layout = "\n\n".join(compose_columns(row, max(term_w - 2, 40)) for row in panel_rows if row)
     out.result()
     for line in layout.splitlines():
         out.result(" " + line)

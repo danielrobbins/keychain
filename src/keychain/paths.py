@@ -243,9 +243,7 @@ class KeychainPaths:
     def ssh_agent_socket_path(self) -> Path:
         path = self._ssh_agent_socket_path()
         if os.name != "nt" and len(os.fsencode(path)) > _MAX_UNIX_SOCKET_PATH_BYTES:
-            raise KeychainError(
-                f"Keychain directory is too long for an ssh-agent socket: {self.keydir}"
-            )
+            raise KeychainError(f"Keychain directory is too long for an ssh-agent socket: {self.keydir}")
         return path
 
     def _ssh_agent_socket_path(self) -> Path:
@@ -303,8 +301,7 @@ class KeychainPaths:
     def security_audit(self, me: str, socket_path: str = "") -> list[SecurityCheck]:
         paths: list[tuple[str, Path, bool]] = [("keydir", self.keydir, True)]
         paths.extend(
-            ("pidfile" if fmt == "sh" else f"{fmt}_pidfile", self.pidfile_path(fmt), True)
-            for fmt in self.pid_formats
+            ("pidfile" if fmt == "sh" else f"{fmt}_pidfile", self.pidfile_path(fmt), True) for fmt in self.pid_formats
         )
         paths.extend(
             [

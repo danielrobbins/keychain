@@ -28,10 +28,7 @@ def test_debug_reports_loaded_keychainrc_even_when_quiet(tmp_path, monkeypatch, 
         main.main(["inspect", "--debug"])
 
     assert exc.value.code == 0
-    assert (
-        f"Configuration (loaded: {home / '.keychainrc'}): output.quiet=True (keychainrc)"
-        in capsys.readouterr().err
-    )
+    assert f"Configuration (loaded: {home / '.keychainrc'}): output.quiet=True (keychainrc)" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("argv", "no_color_env"), [(["inspect", "--nocolor"], False), (["inspect"], True)])
@@ -63,7 +60,10 @@ class TestKeychainErrorHandling:
     @pytest.mark.parametrize(
         ("error", "message"),
         [
-            (KeychainError('gpg timed out while resolving key "ABCD1234"'), 'gpg timed out while resolving key "ABCD1234"'),
+            (
+                KeychainError('gpg timed out while resolving key "ABCD1234"'),
+                'gpg timed out while resolving key "ABCD1234"',
+            ),
             (OSError(28, "No space left on device"), "No space left on device"),
             (subprocess.TimeoutExpired(["external-tool"], 3), "External command timed out after 3 seconds"),
         ],

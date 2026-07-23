@@ -70,7 +70,7 @@ You should see your key listed. Open a new terminal and run it again — still t
 
 ---
 
-## Why Keychain Exists
+## The Agent Problem Keychain Solves
 
 SSH is amazing, but entering your passphrase every time you open a terminal gets old fast. The standard `ssh-agent` helps, but it has limitations:
 
@@ -116,8 +116,8 @@ Keychain 3 ships as a **Python zipapp** — a single executable file with no thi
 
 ```bash
 # Download from https://github.com/danielrobbins/keychain/releases
-chmod +x keychain-3.0.0_beta3.pyz
-sudo cp keychain-3.0.0_beta3.pyz /usr/local/bin/keychain
+chmod +x keychain-3.0.0.pyz
+sudo cp keychain-3.0.0.pyz /usr/local/bin/keychain
 sudo chmod 755 /usr/local/bin/keychain
 
 # Verify installation
@@ -427,7 +427,7 @@ For background on the Keychain 3 rewrite decision, see [Why Keychain 3 Uses Pyth
 
 ### "Could not acquire lock" Errors
 
-**This should not happen in Keychain 3.** If you see this, you may be running an older version. Upgrade to 3.0.0_beta2 or newer for multi-terminal coordination.
+**This should not happen in Keychain 3.** If you see this, you may be running an older version. Upgrade to 3.0.0 or newer for multi-terminal coordination.
 
 ### Keys Not Persisting Across Reboots
 
