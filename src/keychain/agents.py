@@ -28,6 +28,42 @@ class SshAddPlan:
     env: dict[str, str]
 
 
+_MACOS_ASKPASS = """\
+#!/bin/sh
+[ "${SSH_ASKPASS_PROMPT-}" = "confirm" ] || exit 1
+exec /usr/bin/osascript - "$1" <<'APPLESCRIPT'
+on run argv
+    try
+        set answer to display dialog (item 1 of argv) with title "Keychain SSH Confirmation" buttons {"Deny", "Allow"} default button "Deny" cancel button "Deny"
+        if button returned of answer is "Allow" then return "yes"
+    on error number -128
+    end try
+    error number 1
+end run
+APPLESCRIPT
+"""
+
+
+def ensure_macos_askpass(path: Path) -> Path:
+    """Install Keychain's confirmation-only macOS askpass helper securely."""
+    try:
+        if path.read_text(encoding="utf-8") == _MACOS_ASKPASS and stat.S_IMODE(path.stat().st_mode) == 0o700:
+            return path
+    except OSError:
+        pass
+
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(_MACOS_ASKPASS)
+        os.chmod(tmp_name, 0o700)
+        Path(tmp_name).replace(path)
+    except Exception:
+        unlink_quiet(tmp_name)
+        raise
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
@@ -436,6 +472,9 @@ class SshAgent:
         self._allow_forwarded = bool(a.get_value("ssh_allow_forwarded"))
         paths = self.keychain_state.paths
 
+        if bool(a.get_value("confirm")) and bool(a.get_value("no_gui")):
+            raise KeychainError("--confirm requires graphical confirmation and cannot be combined with --no-gui")
+
         # 1. Quick path: trust an existing pidfile if it is both valid AND
         # already has keys loaded -- saves a full key reload on repeat invocations.
         if bool(a.get_value("quick")):
@@ -500,8 +539,15 @@ class SshAgent:
             # when --allow-env / -E is set. Direct env var access here is
             # safe because the gate is enforced at the config layer.
             cmd += shlex.split(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""))
+            spawn_env = dict(self.keychain_state.env)
+            if bool(a.get_value("confirm")) and self.keychain_state.platform.name == "darwin":
+                askpass = spawn_env.get("SSH_ASKPASS")
+                if not askpass:
+                    askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
+                    spawn_env["SSH_ASKPASS"] = askpass
+                spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
             try:
-                r = run(cmd)
+                r = run(cmd, env=spawn_env)
                 spawned = SshAgentRef.from_text(r.stdout) if r.returncode == 0 else None
             except (FileNotFoundError, OSError):
                 spawned = None
@@ -617,9 +663,14 @@ class SshAgent:
             self.announce_load(missing, pkcs11)
         # ssh-add inherits stdio for passphrase prompts, so we cannot use util.run().
         run_env = self.env.overlay()
-        if bool(a.get_value("no_gui")) or not run_env.get("SSH_ASKPASS") or not run_env.get("DISPLAY"):
-            run_env.pop("DISPLAY", None)
-            run_env.pop("SSH_ASKPASS", None)
+        askpass_allowed = bool(
+            run_env.get("DISPLAY")
+            or run_env.get("WAYLAND_DISPLAY")
+            or run_env.get("SSH_ASKPASS_REQUIRE", "").lower() == "force"
+        )
+        if bool(a.get_value("no_gui")) or not askpass_allowed:
+            for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+                run_env.pop(key, None)
         base_cmd = ["ssh-add"]
         timeout = a.get_value("timeout")
         if timeout is not None:

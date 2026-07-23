@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import socket
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -148,6 +149,53 @@ class TestSshAgentLoadOutput:
         assert "Need to add 1 ssh key:" in err
         assert "ssh-add: Identities added" not in err
         assert "   - /home/user/.ssh/key1" in err
+
+    def test_prepare_load_keeps_force_askpass_without_display(self, monkeypatch):
+        """Verify SSH_ASKPASS_REQUIRE=force survives because OpenSSH allows askpass without DISPLAY in that mode."""
+        agent = self._agent(monkeypatch)
+        agent.keychain_state.args.get_value = lambda name: {"no_gui": False, "confirm": True, "timeout": None}.get(
+            name, False
+        )
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        monkeypatch.setenv("SSH_ASKPASS", "/tmp/askpass")
+        monkeypatch.setenv("SSH_ASKPASS_REQUIRE", "force")
+
+        plan = agent.prepare_load(["/home/user/.ssh/key1"], announce=False)
+
+        assert plan is not None
+        assert plan.env["SSH_ASKPASS"] == "/tmp/askpass"
+        assert plan.env["SSH_ASKPASS_REQUIRE"] == "force"
+
+    def test_prepare_load_keeps_wayland_askpass(self, monkeypatch):
+        """Verify WAYLAND_DISPLAY is treated like DISPLAY because OpenSSH accepts either as askpass-capable."""
+        agent = self._agent(monkeypatch)
+        agent.keychain_state.args.get_value = lambda name: {"no_gui": False, "confirm": True, "timeout": None}.get(
+            name, False
+        )
+        monkeypatch.delenv("DISPLAY", raising=False)
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("SSH_ASKPASS", "/tmp/askpass")
+
+        plan = agent.prepare_load(["/home/user/.ssh/key1"], announce=False)
+
+        assert plan is not None
+        assert plan.env["WAYLAND_DISPLAY"] == "wayland-0"
+        assert plan.env["SSH_ASKPASS"] == "/tmp/askpass"
+
+    def test_prepare_load_no_gui_blocks_askpass_force(self, monkeypatch):
+        """Verify --no-gui removes askpass forcing because otherwise OpenSSH may still launch the fallback askpass."""
+        agent = self._agent(monkeypatch)
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+        monkeypatch.setenv("SSH_ASKPASS", "/tmp/askpass")
+        monkeypatch.setenv("SSH_ASKPASS_REQUIRE", "force")
+
+        plan = agent.prepare_load(["/home/user/.ssh/key1"], announce=False)
+
+        assert plan is not None
+        for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+            assert key not in plan.env
 
     def test_prepare_load_can_skip_announcement(self, monkeypatch, capsys):
         """Verify wait-driven activation can show the key list once before invoking ssh-add."""
@@ -418,12 +466,12 @@ class TestSshEnvcheckUnknownSource:
 
 
 class TestSshAgentStartupOutput:
-    def _agent_with_args(self, tmp_path):
+    def _agent_with_args(self, tmp_path, *extra_args):
         from keychain import state
         from keychain.paths import KeychainPaths
         from keychain.runtime.config import RuntimeConfig
 
-        args = RuntimeConfig.resolve(["add", "--no-inherit", "--no-gui"])
+        args = RuntimeConfig.resolve(["add", "--no-inherit", *extra_args])
         paths = KeychainPaths(keydir=tmp_path, host="h")
         kstate = state.KeychainState(paths=paths, env={}, args=args)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
@@ -482,6 +530,70 @@ class TestSshAgentStartupOutput:
 
         assert agent.env.sock == "/tmp/keychain-test-agent.sock"
         assert agent.env.pid == "12345"
+
+    def test_confirm_and_no_gui_are_rejected(self, tmp_path):
+        """Confirmation must fail closed instead of silently loading an unconstrained key."""
+        agent, _paths = self._agent_with_args(tmp_path, "--confirm", "--no-gui")
+
+        with pytest.raises(agents.KeychainError, match="requires graphical confirmation"):
+            agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+    def test_macos_confirm_configures_new_agent_with_native_askpass(self, tmp_path, monkeypatch):
+        """A managed macOS agent must inherit the helper needed for later signing prompts."""
+        agent, paths = self._agent_with_args(tmp_path, "--confirm")
+        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        captured_env = None
+
+        def fake_run(cmd, *_args, **kwargs):
+            nonlocal captured_env
+            assert cmd[0] == "ssh-agent"
+            captured_env = kwargs["env"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout='SSH_AUTH_SOCK="/tmp/keychain-test-agent.sock"; export SSH_AUTH_SOCK\n'
+                "SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(agents, "run", fake_run)
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        helper = paths.keydir / "ssh-askpass-macos"
+        assert captured_env is not None
+        assert captured_env["SSH_ASKPASS"] == str(helper)
+        assert captured_env["SSH_ASKPASS_REQUIRE"] == "force"
+        if os.name != "nt":
+            assert stat.S_IMODE(helper.stat().st_mode) == 0o700
+        text = helper.read_text(encoding="utf-8")
+        assert 'SSH_ASKPASS_PROMPT-}" = "confirm"' in text
+        assert 'buttons {"Deny", "Allow"}' in text
+
+    def test_macos_confirm_preserves_external_askpass(self, tmp_path, monkeypatch):
+        """An explicitly configured helper takes precedence over Keychain's macOS helper."""
+        agent, paths = self._agent_with_args(tmp_path, "--confirm")
+        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        agent.keychain_state.env["SSH_ASKPASS"] = "/custom/askpass"
+        captured_env = None
+
+        def fake_run(cmd, *_args, **kwargs):
+            nonlocal captured_env
+            captured_env = kwargs["env"]
+            return SimpleNamespace(
+                returncode=0,
+                stdout='SSH_AUTH_SOCK="/tmp/keychain-test-agent.sock"; export SSH_AUTH_SOCK\n'
+                "SSH_AGENT_PID=12345; export SSH_AGENT_PID;\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(agents, "run", fake_run)
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        assert captured_env is not None
+        assert captured_env["SSH_ASKPASS"] == "/custom/askpass"
+        assert captured_env["SSH_ASKPASS_REQUIRE"] == "force"
+        assert not (paths.keydir / "ssh-askpass-macos").exists()
 
 
 # ---------------------------------------------------------------------------
