@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import tempfile
 from collections.abc import Mapping
@@ -19,6 +21,10 @@ from .util import (
     lax_perms,
     unlink_quiet,
 )
+
+# macOS has the smallest common sockaddr_un.sun_path limit: 104 bytes,
+# including the terminating null byte.
+_MAX_UNIX_SOCKET_PATH_BYTES = 103
 
 
 @dataclass(frozen=True)
@@ -200,7 +206,14 @@ class KeychainPaths:
 
     @property
     def ssh_agent_socket_path(self) -> Path:
-        return self.keydir / f"{self.host}-agent.sock"
+        host_digest = hashlib.sha256(os.fsencode(self.host)).digest()[:6]
+        socket_name = base64.urlsafe_b64encode(host_digest).decode()
+        path = self.keydir / f"{socket_name}.s"
+        if os.name != "nt" and len(os.fsencode(path)) > _MAX_UNIX_SOCKET_PATH_BYTES:
+            raise KeychainError(
+                f"Keychain directory is too long for an ssh-agent socket: {self.keydir}"
+            )
+        return path
 
     def render_env(
         self, env: SshAgentRef | Mapping[str, str], shell: str = "env", shell_env: Mapping[str, str] | None = None

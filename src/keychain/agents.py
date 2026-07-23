@@ -548,9 +548,16 @@ class SshAgent:
                 spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
             try:
                 r = run(cmd, env=spawn_env)
-                spawned = SshAgentRef.from_text(r.stdout) if r.returncode == 0 else None
-            except (FileNotFoundError, OSError):
-                spawned = None
+            except (FileNotFoundError, OSError) as exc:
+                raise KeychainError(f"Unable to start ssh-agent: {exc}") from exc
+            if r.returncode != 0:
+                detail = (r.stderr or r.stdout).strip()
+                if detail:
+                    raise KeychainError(f"ssh-agent failed to start: {detail}")
+                raise KeychainError(f"ssh-agent failed to start with exit status {r.returncode}")
+            spawned = SshAgentRef.from_text(r.stdout)
+            if not spawned:
+                raise KeychainError("ssh-agent started but did not return its socket information")
         if spawned:
             paths.write(spawned, self.out)
             self.env = spawned

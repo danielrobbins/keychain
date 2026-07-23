@@ -31,10 +31,10 @@ class TestEnvFileWritten:
         # systemd EnvironmentFile= and docker --env-file accept it as-is.
         assert content == "SSH_AUTH_SOCK=/tmp/agent.sock\nSSH_AGENT_PID=4242\n"
 
-    def test_clear_removes_envfile(self, tmp_path):
+    def test_clear_removes_envfile(self, short_keydir):
         from keychain.util import Output
 
-        p = KeychainPaths(keydir=tmp_path, host="myhost")
+        p = KeychainPaths(keydir=short_keydir, host="myhost")
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         p.write(SshAgentRef("/x"), out)
         assert p.pidfile_path("envfile").is_file()

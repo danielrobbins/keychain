@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Tests for keychain.paths: KeychainPaths construction, parse, write."""
 
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -58,7 +59,7 @@ class TestKeychainPathsProperties:
         assert kp.pidfile_path("sh").name == "box-sh"
         assert kp.pidfile_path("csh").name == "box-csh"
         assert kp.pidfile_path("fish").name == "box-fish"
-        assert kp.ssh_agent_socket_path.name == "box-agent.sock"
+        assert kp.ssh_agent_socket_path.name == "JvhWfyVp.s"
         assert kp.lockf.name == "box-lockf"
         assert kp.state_file.name == "box.state.json"
         assert kp.state_lockf.name == "box.state.lock"
@@ -68,6 +69,20 @@ class TestKeychainPathsProperties:
     def test_pidfile_for_fish(self):
         kp = KeychainPaths(keydir=Path("/tmp/.keychain"), host="box")
         assert kp.pidfile_path("fish") == kp.pidfile_path("fish")
+
+    def test_socket_name_is_bounded_stable_host_hash(self):
+        host = "iad20-gt1023-4ef95436-3063-42d9-a2d7-2851f55c9919-4E95ECC65C1E.local"
+        kp = KeychainPaths(keydir=Path("/tmp/kc-ssh-5rkj146h/home/.keychain"), host=host)
+
+        assert kp.ssh_agent_socket_path.name == "eB_JExAO.s"
+        assert len(os.fsencode(kp.ssh_agent_socket_path)) <= 103
+
+    @pytest.mark.skipif(os.name == "nt", reason="Unix socket path limits do not apply on Windows")
+    def test_socket_path_rejects_keydir_that_cannot_fit_bounded_name(self):
+        kp = KeychainPaths(keydir=Path("/tmp") / ("x" * 90), host="host")
+
+        with pytest.raises(KeychainError, match="directory is too long"):
+            _ = kp.ssh_agent_socket_path
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +160,8 @@ class TestKeychainPathsWriteRead:
         assert "set -x -U SSH_AUTH_SOCK" in fish
         assert "set -x -U SSH_AGENT_PID" in fish
 
-    def test_clear_removes_pidfiles(self, tmp_path):
-        kp = KeychainPaths(keydir=tmp_path, host="box")
+    def test_clear_removes_pidfiles(self, short_keydir):
+        kp = KeychainPaths(keydir=short_keydir, host="box")
         kp.write(SshAgentRef.from_text(AGENT_SH_OUTPUT), _out())
         kp.ssh_agent_socket_path.write_text("stale", encoding="utf-8")
         kp.clear()
