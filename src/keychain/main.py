@@ -581,8 +581,11 @@ def main(argv: list[str] | None = None) -> None:
         out.line()
         _emit_eval_failure(bool(args.get_value("eval")))
         sys.exit(130)
-    except KeychainError as e:
-        msg = str(e)
+    except (KeychainError, OSError, subprocess.TimeoutExpired) as e:
+        if isinstance(e, subprocess.TimeoutExpired):
+            msg = f"External command timed out after {e.timeout} seconds"
+        else:
+            msg = str(e) or "Operating system operation failed"
         if msg:
             out.error(msg)
         out.line()

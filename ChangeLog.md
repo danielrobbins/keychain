@@ -57,6 +57,8 @@ betas. Highlights include:
 
 Changes since `3.0.0_beta3`:
 
+- Converted command timeouts, malformed agent arguments, and operating-system
+  failures into concise user errors instead of Python tracebacks (#224).
 - Added native macOS support for OpenSSH's per-use confirmation flow.
 - Made `--confirm --no-gui` fail explicitly rather than creating a key that
   cannot satisfy its confirmation constraint.

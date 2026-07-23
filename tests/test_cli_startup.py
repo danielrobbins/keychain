@@ -1,13 +1,45 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """CLI startup behavior tests."""
 
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from keychain import main
+from keychain.util import KeychainError
 from tests.support import set_home
+
+
+class TestKeychainErrorHandling:
+    @pytest.mark.parametrize(
+        ("error", "message"),
+        [
+            (KeychainError('gpg timed out while resolving key "ABCD1234"'), 'gpg timed out while resolving key "ABCD1234"'),
+            (OSError(28, "No space left on device"), "No space left on device"),
+            (subprocess.TimeoutExpired(["external-tool"], 3), "External command timed out after 3 seconds"),
+        ],
+    )
+    def test_main_exits_1_without_traceback(self, monkeypatch, capsys, error, message):
+        monkeypatch.setattr(
+            main.platform,
+            "detect",
+            lambda: SimpleNamespace(supported=True, name="linux", reason=""),
+        )
+
+        def fail(_app):
+            raise error
+
+        monkeypatch.setattr(main.KeychainApp, "run", fail)
+
+        with pytest.raises(SystemExit) as exc:
+            main.main([])
+
+        captured = capsys.readouterr()
+        assert exc.value.code == 1
+        assert message in captured.err
+        assert "Traceback" not in captured.err
 
 
 class TestKeyboardInterruptHandling:
