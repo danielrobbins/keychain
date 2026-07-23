@@ -78,17 +78,17 @@
       "while": "^(?!==\\s+@)(?!\\s*$)",
       "name": "comment.block.documentation.keychain-doc",
       "patterns": [
-        { "include": "#double-backtick" },
+        { "include": "#single-backtick" },
         { "include": "#asterisk-emphasis" }
       ]
     },
-    "double-backtick": {
+    "single-backtick": {
       "name": "entity.name.type.instance.pod.perl",
-      "begin": "(``)(?=\\S)",
+      "begin": "(?<!`)(`)(?=\\S)",
       "beginCaptures": {
         "1": { "name": "markup.raw.pod.perl" }
       },
-      "end": "(?<=\\S)(``)",
+      "end": "(?<=\\S)(`)(?!`)",
       "endCaptures": {
         "1": { "name": "markup.raw.pod.perl" }
       },
