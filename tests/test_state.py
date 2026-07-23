@@ -341,47 +341,44 @@ class TestGpgPrimaryClassification:
 class TestSecurityAudit:
     def test_keydir_owner_and_perms_rows_present(self, paths):
         with (
-            patch("keychain.state.current_user", return_value="me"),
-            patch("keychain.output.inspect.get_owner", return_value="me"),
-            patch("keychain.output.inspect.os.stat") as st_mock,
+            patch("keychain.paths.get_owner", return_value="me"),
+            patch("keychain.paths.os.stat") as st_mock,
         ):
             st_mock.return_value.st_mode = 0o40700  # dir, 0700
-            ks = state.KeychainState(paths=paths)
+            ks = state.KeychainState(paths=paths, user="me")
             audit = ks.security_audit
-            labels = [r[0] for r in audit]
+            labels = [check.label for check in audit]
             assert "keydir_owner" in labels
             assert "keydir_perms" in labels
-            for label, value, hint, sev in audit:
-                if label == "keydir_owner":
-                    assert value == "me" and hint == "(you)" and sev == ""
-                if label == "keydir_perms":
-                    assert value == "0700" and hint == "" and sev == ""
+            for check in audit:
+                if check.label == "keydir_owner":
+                    assert check.value == "me" and check.hint == "(you)" and check.severity == ""
+                if check.label == "keydir_perms":
+                    assert check.value == "0700" and check.hint == "" and check.severity == ""
 
     def test_keydir_lax_perms_emits_hint(self, paths):
         with (
-            patch("keychain.state.current_user", return_value="me"),
-            patch("keychain.output.inspect.get_owner", return_value="me"),
-            patch("keychain.output.inspect.os.stat") as st_mock,
+            patch("keychain.paths.get_owner", return_value="me"),
+            patch("keychain.paths.os.stat") as st_mock,
         ):
             st_mock.return_value.st_mode = 0o40777  # dir, 0777
-            ks = state.KeychainState(paths=paths)
-            row = next(r for r in ks.security_audit if r[0] == "keydir_perms")
-            assert row[1] == "0777"
-            assert "lax permissions" in row[2]
-            assert row[3] == "warn"
+            ks = state.KeychainState(paths=paths, user="me")
+            row = next(check for check in ks.security_audit if check.label == "keydir_perms")
+            assert row.value == "0777"
+            assert "lax permissions" in row.hint
+            assert row.severity == "err"
 
     def test_foreign_keydir_owner_emits_hint(self, paths):
         with (
-            patch("keychain.state.current_user", return_value="me"),
-            patch("keychain.output.inspect.get_owner", return_value="attacker"),
-            patch("keychain.output.inspect.os.stat") as st_mock,
+            patch("keychain.paths.get_owner", return_value="attacker"),
+            patch("keychain.paths.os.stat") as st_mock,
         ):
             st_mock.return_value.st_mode = 0o40700
-            ks = state.KeychainState(paths=paths)
-            row = next(r for r in ks.security_audit if r[0] == "keydir_owner")
-            assert row[1] == "attacker"
-            assert "refusing to use" in row[2]
-            assert row[3] == "warn"
+            ks = state.KeychainState(paths=paths, user="me")
+            row = next(check for check in ks.security_audit if check.label == "keydir_owner")
+            assert row.value == "attacker"
+            assert "refusing to use" in row.hint
+            assert row.severity == "err"
 
     def test_foreign_gpg_socket_not_in_security_audit(self, paths, tmp_path):
         # GPG socket ownership is surfaced in the GPG panel (main socket hint),
@@ -394,6 +391,6 @@ class TestSecurityAudit:
             patch.object(agents, "gpg_user_homedirs", return_value=[tmp_path / ".gnupg"]),
         ):
             ks = state.KeychainState(paths=paths)
-            labels = [r[0] for r in ks.security_audit]
+            labels = [check.label for check in ks.security_audit]
             assert "gpg primary socket" not in labels
             assert "foreign gpg-agents" not in labels

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import os
+import secrets
 import socket
 import stat
 import subprocess
@@ -17,6 +19,11 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Union, cast
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 try:
     import pwd as _pwd_impl  # POSIX
@@ -102,25 +109,14 @@ def run(
 # ---------------------------------------------------------------------------
 
 
-def _lock_content() -> str:
-    """Lock-file payload: ``hostname:pid``.
-
-    Including the hostname makes the lock NFS-safe: a reader on a different
-    host that finds a lock written here will see a hostname mismatch and
-    leave the lock alone rather than running ``os.kill`` against an
-    unrelated local process that happens to share the same PID.
-    """
-    return f"{socket.gethostname()}:{os.getpid()}"
-
-
 class LockFile:
-    """Atomic ``O_CREAT | O_EXCL`` PID lock. Use as a context manager.
+    """OS-backed advisory file lock. Use as a context manager.
 
     ``no_lock=True`` makes the manager a no-op (still safe to use). The acquired
     state is exposed via :attr:`acquired` and the lock is released on exit.
     """
 
-    __slots__ = ("path", "no_lock", "wait", "out", "acquired")
+    __slots__ = ("path", "no_lock", "wait", "out", "acquired", "_fd", "_token")
 
     def __init__(self, path: PathLike, no_lock: bool, wait: int, out: Output) -> None:
         self.path = Path(path)
@@ -128,29 +124,22 @@ class LockFile:
         self.wait = max(0, int(wait))
         self.out = out
         self.acquired = False
+        self._fd = -1
+        self._token = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(8)}"
 
     # ---- context manager ----------------------------------------------
     def __enter__(self) -> LockFile:
-        if self.no_lock:
-            self.acquired = True  # granted without writing a file
+        if self.try_acquire():
             return self
-        if self._acquire():
-            return self
+        if self.wait == 0:
+            raise KeychainError(f"could not acquire lock {self.path}")
         self.out.info(f"Waiting {self.wait} seconds for lock...")
         deadline = time.monotonic() + self.wait
         while time.monotonic() < deadline:
-            if self._acquire():
+            if self.try_acquire():
                 return self
             time.sleep(0.1)
-        # Final break-the-glass attempt: drop a stale lock and retry once.
-        # With wait=0, force-takeover is the default behavior (gap §3.6).
-        # With wait>0, only unlink if the lock is stale to avoid stomping
-        # on a valid lock held by another process that happened to create
-        # the file during the wait loop.
-        if self.wait == 0 or not self._lock_is_live():
-            with contextlib.suppress(OSError):
-                self.path.unlink()
-        if not self._acquire():
+        if not self.try_acquire():
             raise KeychainError(f"could not acquire lock {self.path}")
         return self
 
@@ -159,60 +148,61 @@ class LockFile:
         return False
 
     # ---- internals -----------------------------------------------------
-    def _acquire(self) -> bool:
+    def try_acquire(self) -> bool:
+        if self.no_lock:
+            self.acquired = True
+            return True
+        if self.acquired:
+            return True
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(self.path), flags, 0o600)
         try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            # Lock exists; honour it only if the owning process is still live.
-            if self._lock_is_live():
+            if not self._try_lock(fd):
+                os.close(fd)
                 return False
-            with contextlib.suppress(OSError):
-                self.path.unlink()
-            try:
-                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except OSError:
-                return False
-        try:
-            os.write(fd, _lock_content().encode())
-        finally:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
+            os.ftruncate(fd, 0)
+            os.write(fd, self._token.encode())
+        except Exception:
             os.close(fd)
+            raise
+        self._fd = fd
         self.acquired = True
         return True
 
-    def _lock_is_live(self) -> bool:
-        """Return True if the existing lock file belongs to a live process.
-
-        The lock file payload is ``hostname:pid``.  If the hostname differs
-        from ours (NFS-mounted home directory shared across hosts) we cannot
-        call ``os.kill`` against a remote PID, so we conservatively treat the
-        lock as live and leave it alone.  A legacy file containing only a
-        plain PID (no ``:``) is treated as originating on the local host.
-        """
+    @staticmethod
+    def _try_lock(fd: int) -> bool:
         try:
-            raw = self.path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return False
-        hostname, sep, pid_s = raw.partition(":")
-        if not sep:
-            # Legacy plain-PID format -- assume local host.
-            hostname, pid_s = socket.gethostname(), raw
-        try:
-            owner_pid = int(pid_s)
-        except ValueError:
-            return False
-        if not owner_pid:
-            return False
-        if hostname != socket.gethostname():
-            # Lock is held on a different host; cannot verify liveness.
-            return True
-        return pid_alive(owner_pid)
+            if sys.platform == "win32":
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                return False
+            raise
+        return True
 
     def release(self) -> None:
-        if self.acquired:
-            if not self.no_lock:
+        if not self.acquired:
+            return
+        if not self.no_lock:
+            try:
                 with contextlib.suppress(OSError):
-                    self.path.unlink()
-            self.acquired = False
+                    if sys.platform == "win32":
+                        os.lseek(self._fd, 0, os.SEEK_SET)
+                        msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(self._fd, fcntl.LOCK_UN)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.close(self._fd)
+                self._fd = -1
+        self.acquired = False
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +283,7 @@ def lax_perm_warning(keydir: PathLike) -> str:
 
     Single source of truth for both the runtime add-path warnings
     (:meth:`keychain.paths.KeychainPaths.ensure_keydir` /
-    :meth:`check_pidfile_perms`) and the ``inspect`` action's post-panel
+    :meth:`check_runtime_perms`) and the ``inspect`` action's post-panel
     audit warnings, so the wording can't drift between code paths.
     """
     return f"Keychain dir has lax permissions. Use chmod -R go-rwx '{keydir}' to fix."

@@ -202,14 +202,14 @@ class TestSshAgentLoadOutput:
         plan = self._agent(monkeypatch).prepare_load(["/home/user/.ssh/key1"], announce=False)
 
         assert plan is not None
-        assert plan.cmd == ["ssh-add", "/home/user/.ssh/key1"]
+        assert plan.commands == [["ssh-add", "/home/user/.ssh/key1"]]
         assert capsys.readouterr().err == ""
 
     def test_prepare_load_for_pkcs11_provider_uses_ssh_add_s(self, monkeypatch, capsys):
         plan = self._agent(monkeypatch).prepare_load([], ["/usr/lib/pkcs11/opensc-pkcs11.so"], announce=False)
 
         assert plan is not None
-        assert plan.cmd == ["ssh-add", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"]
+        assert plan.commands == [["ssh-add", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"]]
         assert capsys.readouterr().err == ""
 
     def test_prepare_load_combines_file_keys_and_pkcs11_provider(self, monkeypatch):
@@ -218,7 +218,7 @@ class TestSshAgentLoadOutput:
         )
 
         assert plan is not None
-        assert plan.cmd == [
+        assert plan.commands == [
             ["ssh-add", "/home/user/.ssh/key1"],
             ["ssh-add", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"],
         ]
@@ -241,6 +241,30 @@ class TestSshAgentLoadOutput:
 # ---------------------------------------------------------------------------
 # gpg-agent wipe output
 # ---------------------------------------------------------------------------
+
+
+class TestGpgAgentEnvironment:
+    def _agent(self, *, no_gui: bool):
+        env = {
+            "DISPLAY": ":0",
+            "WAYLAND_DISPLAY": "wayland-0",
+            "SSH_ASKPASS": "/tmp/askpass",
+            "SSH_ASKPASS_REQUIRE": "force",
+        }
+        state = SimpleNamespace(env=env, args=SimpleNamespace(get_value=lambda name: no_gui if name == "no_gui" else None))
+        return agents.GpgAgent(state, Output.silent())
+
+    def test_no_gui_removes_x11_wayland_and_askpass(self):
+        env = self._agent(no_gui=True)._gpg_env()
+
+        for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+            assert key not in env
+
+    def test_gui_mode_preserves_wayland_environment(self):
+        env = self._agent(no_gui=False)._gpg_env()
+
+        assert env["DISPLAY"] == ":0"
+        assert env["WAYLAND_DISPLAY"] == "wayland-0"
 
 
 class TestGpgAgentWipe:
@@ -308,6 +332,53 @@ class TestFindpids:
         """Verify unknown program names produce no matches because the process scan should not fabricate PIDs for missing executables."""
         result = findpids("no-such-program-zzz")
         assert result == []
+
+
+def test_findpids_matches_only_exact_agent_basename(monkeypatch):
+    class FakePlatform:
+        def process_list(self, pattern, uid):
+            assert pattern.search("ssh-agent")
+            assert pattern.search("/usr/bin/ssh-agent")
+            assert not pattern.search("ssh-agent-helper")
+            assert not pattern.search("not-ssh-agent")
+            return [123]
+
+    monkeypatch.setattr(platform, "detect", lambda: FakePlatform())
+
+    assert findpids("ssh") == [123]
+
+
+class TestSshAgentStop:
+    def _agent(self, pid: str, cleared: list[bool]):
+        state = SimpleNamespace(
+            find_active_agent_env=SshAgentRef(sock="/tmp/agent.sock", pid=pid),
+            pidfile_env=SshAgentRef(sock="/tmp/agent.sock", pid=pid),
+            user="tester",
+            paths=SimpleNamespace(clear=lambda: cleared.append(True)),
+        )
+        return agents.SshAgent(state, _out())
+
+    def test_pidfile_stop_rejects_unverified_pid(self, monkeypatch):
+        killed: list[int] = []
+        cleared: list[bool] = []
+        monkeypatch.setattr(agents, "findpids", lambda _prog: [123])
+        monkeypatch.setattr(os, "kill", lambda pid, _sig: killed.append(pid))
+
+        self._agent("999", cleared).stop("pidfile")
+
+        assert killed == []
+        assert cleared == [True]
+
+    def test_pidfile_stop_terminates_verified_agent(self, monkeypatch):
+        killed: list[int] = []
+        cleared: list[bool] = []
+        monkeypatch.setattr(agents, "findpids", lambda _prog: [123, 456])
+        monkeypatch.setattr(os, "kill", lambda pid, _sig: killed.append(pid))
+
+        self._agent("123", cleared).stop("pidfile")
+
+        assert killed == [123]
+        assert cleared == [True]
 
 
 # ---------------------------------------------------------------------------

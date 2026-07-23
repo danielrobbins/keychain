@@ -3,6 +3,10 @@
 
 from __future__ import annotations
 
+import stat
+from types import SimpleNamespace
+
+from keychain.runtime import config
 from keychain.runtime.config import RuntimeConfig
 
 
@@ -254,6 +258,40 @@ def test_apply_keychainrc_reads_config_only_pid_formats(tmp_path):
     args.apply_keychainrc({"HOME": str(tmp_path)})
 
     assert args.get_value("pid_formats") == "sh,fish,envfile"
+
+
+def test_config_security_rejects_foreign_owner(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.os, "getuid", lambda: 1000, raising=False)
+
+    error = config._config_security_error(
+        tmp_path / ".keychainrc",
+        SimpleNamespace(st_uid=1001, st_mode=stat.S_IFREG | 0o600),
+    )
+
+    assert "owned by uid 1001" in error
+
+
+def test_config_security_rejects_group_writable_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(config.os, "getuid", lambda: 1000, raising=False)
+
+    error = config._config_security_error(
+        tmp_path / ".keychainrc",
+        SimpleNamespace(st_uid=1000, st_mode=stat.S_IFREG | 0o620),
+    )
+
+    assert "writable by group or others" in error
+
+
+def test_apply_keychainrc_reports_security_failure(monkeypatch, tmp_path):
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[agent]\ntimeout = 15\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_config_security_error", lambda _path, _stat: "Unsafe configuration")
+
+    args = RuntimeConfig.resolve(["add"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
+
+    assert args.parse_error == "Unsafe configuration"
+    assert args.get_value("timeout") is None
 
 
 def test_apply_keychainrc_warns_on_unknown_section(tmp_path, monkeypatch):

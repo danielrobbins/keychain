@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
 import re
 import shlex
@@ -15,17 +14,24 @@ import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-
-from keychain.state import KeychainState
+from typing import TYPE_CHECKING
 
 from .env import SshAgentRef
 from .util import KeychainError, Output, current_uid, get_tty, pid_alive, run, unlink_quiet
 
+if TYPE_CHECKING:
+    from .state import KeychainState
+
 
 @dataclass(frozen=True)
 class SshAddPlan:
-    cmd: list[str] | list[list[str]]
+    commands: list[list[str]]
     env: dict[str, str]
+
+
+def _suppress_gui(env: dict[str, str]) -> None:
+    for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+        env.pop(key, None)
 
 
 _MACOS_ASKPASS = """\
@@ -286,12 +292,6 @@ def pkcs11_provider_fingerprints(provider: str, out: Output) -> list[str] | None
     return fps
 
 
-def _normalize_ssh_add_commands(cmd: list[str] | list[list[str]]) -> list[list[str]]:
-    if cmd and isinstance(cmd[0], str):
-        return [cmd]  # type: ignore[list-item]
-    return cmd  # type: ignore[return-value]
-
-
 # ---------------------------------------------------------------------------
 # Process scan (free function: heavily test-patched and platform-delegated)
 # ---------------------------------------------------------------------------
@@ -307,8 +307,7 @@ def findpids(prog: str) -> list[int]:
     """
     from .runtime import platform
 
-    # ``[a]gen`` avoids matching some test helper command lines verbatim.
-    pattern = re.compile(rf"{re.escape(prog)}-[a]gen", re.IGNORECASE)
+    pattern = re.compile(rf"(?:^|[/\\]){re.escape(prog)}-agent$", re.IGNORECASE)
     uid = os.getuid() if hasattr(os, "getuid") else None
     return platform.detect().process_list(pattern, uid)
 
@@ -573,40 +572,32 @@ class SshAgent:
         pids = findpids("ssh")
         if not pids:
             out.info("No ssh-agent(s) found running")
-        elif which == "all":
-            for p in pids:
-                with contextlib.suppress(OSError):
-                    os.kill(p, signal.SIGTERM)
-            out.info(f"All ssh-agents stopped: " f"{out.id(' '.join(map(str, pids)))}")
-        elif which == "mine":
-            for p in pids:
-                with contextlib.suppress(OSError):
-                    os.kill(p, signal.SIGTERM)
-            out.info(
-                f"All {out.id(self.keychain_state.user)}'s ssh-agents stopped: " f"{out.id(' '.join(map(str, pids)))}"
-            )
         else:
             our = self._our_pid()
-            if which == "pidfile" and our:
-                with contextlib.suppress(OSError):
-                    os.kill(our, signal.SIGTERM)
-                out.info(f"Keychain ssh-agent stopped: {out.id(our)}")
-            elif which == "others" and our:
-                killed: list[str] = []
-                for p in pids:
-                    if p == our:
-                        continue
-                    with contextlib.suppress(OSError):
-                        os.kill(p, signal.SIGTERM)
-                        killed.append(str(p))
-                out.info(f"Other ssh-agents stopped: " f"{out.id(' '.join(killed))}")
+            ours = our if our in pids else None
+            if which == "pidfile":
+                targets = [ours] if ours else []
             elif which == "others":
-                killed_pids: list[str] = []
-                for p in pids:
-                    with contextlib.suppress(OSError):
-                        os.kill(p, signal.SIGTERM)
-                        killed_pids.append(str(p))
-                out.info(f"Other ssh-agents stopped: " f"{out.id(' '.join(killed_pids))}")
+                targets = [p for p in pids if p != ours]
+            else:
+                targets = pids
+            killed: list[int] = []
+            for pid in targets:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+                killed.append(pid)
+
+            rendered = out.id(" ".join(map(str, killed)))
+            if which == "all":
+                out.info(f"All ssh-agents stopped: {rendered}")
+            elif which == "mine":
+                out.info(f"All {out.id(self.keychain_state.user)}'s ssh-agents stopped: {rendered}")
+            elif which == "pidfile" and killed:
+                out.info(f"Keychain ssh-agent stopped: {out.id(killed[0])}")
+            elif which == "others":
+                out.info(f"Other ssh-agents stopped: {rendered}")
             else:
                 out.info("No keychain ssh-agent found running")
         if which != "others":
@@ -676,8 +667,7 @@ class SshAgent:
             or run_env.get("SSH_ASKPASS_REQUIRE", "").lower() == "force"
         )
         if bool(a.get_value("no_gui")) or not askpass_allowed:
-            for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
-                run_env.pop(key, None)
+            _suppress_gui(run_env)
         base_cmd = ["ssh-add"]
         timeout = a.get_value("timeout")
         if timeout is not None:
@@ -689,16 +679,15 @@ class SshAgent:
             commands.append([*base_cmd, *missing])
         for provider in pkcs11:
             commands.append([*base_cmd, "-s", provider])
-        cmd: list[str] | list[list[str]] = commands[0] if len(commands) == 1 else commands
-        return SshAddPlan(cmd, run_env)
+        return SshAddPlan(commands, run_env)
 
     def load(self, missing: list[str]) -> bool:
         plan = self.prepare_load(missing)
         if plan is None:
             return False
-        if not plan.cmd:
+        if not plan.commands:
             return True
-        for cmd in _normalize_ssh_add_commands(plan.cmd):
+        for cmd in plan.commands:
             try:
                 rc = subprocess.run(cmd, env=plan.env, check=False).returncode
             except (FileNotFoundError, OSError):
@@ -729,8 +718,8 @@ class GpgAgent:
         env = dict(self.k.env)
         if tty and (gpg_tty := get_tty()):
             env["GPG_TTY"] = gpg_tty
-        if bool(self.k.args.get_value("no_gui")) or not self.k.env.get("DISPLAY"):
-            env.pop("DISPLAY", None)
+        if bool(self.k.args.get_value("no_gui")):
+            _suppress_gui(env)
         return env
 
     def _run_gpg(

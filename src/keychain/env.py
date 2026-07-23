@@ -24,6 +24,7 @@ subprocesses or to emit as shell eval output.
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -73,9 +74,13 @@ class SshAgentRef:
             if not line or line.startswith("echo "):
                 continue
             for part in line.split(";"):
-                key, sep, value = part.strip().partition("=")
+                try:
+                    words = shlex.split(part)
+                except ValueError:
+                    continue
+                key, sep, value = (words[0] if len(words) == 1 else "").partition("=")
                 if sep and key in _ENV_KEYS:
-                    values[key] = _strip_quotes(value.strip())
+                    values[key] = value
         return cls.from_env(values)
 
     @property
@@ -123,7 +128,3 @@ class SshAgentRef:
 
     def __bool__(self) -> bool:
         return bool(self.sock)
-
-
-def _strip_quotes(value: str) -> str:
-    return value.strip().strip('"').strip("'")

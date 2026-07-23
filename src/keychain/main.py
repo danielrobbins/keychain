@@ -18,11 +18,11 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Protocol
 
 from . import __version__, agents, keys, state
-from .coordination import ActivationCoordinator, ActivationOwner, WaiterEndpoint, WaitResult
+from .coordination import ActivationCoordinator, ActivationOwner, WaiterEndpoint
 from .env import SshAgentRef
 from .runtime import platform
 from .runtime.actions import NO_BANNER_ACTIONS, OUTPUT_ACTIONS, ROOT_ACTION
@@ -223,22 +223,22 @@ class KeychainApp:
             inspect_view.render_inspect_json(self.kstate)
         else:
             inspect_view.render_inspect(self.kstate, self.out)
-        return 1 if any(sev in ("warn", "err") for *_, sev in self.kstate.security_audit) else 0
+        return 1 if any(check.severity in ("warn", "err") for check in self.kstate.security_audit) else 0
 
     def _handle_agent_stop_action(self) -> int:
-        self._verify_keydir()
+        self._ensure_keydir()
         target = self.args.get_value("target") or "pidfile"
         self.kstate.ssh.stop(target)
         self.out.line()
         return 0
 
     def _handle_agent_start_action(self) -> int:
-        self._verify_keydir()
+        self._ensure_keydir()
         ssh_spawn_gpg, ssh_allow_gpg = self._agent_settings()
         return self._do_add([], [], [], [], [], [], ssh_spawn_gpg, ssh_allow_gpg)
 
     def _handle_wipe_action(self) -> int:
-        self._verify_keydir()
+        self._ensure_keydir()
         only_ssh = bool(self.args.get_value("wipe_ssh")) and not bool(self.args.get_value("wipe_gpg"))
         only_gpg = bool(self.args.get_value("wipe_gpg")) and not bool(self.args.get_value("wipe_ssh"))
         if not only_gpg:
@@ -249,7 +249,7 @@ class KeychainApp:
         return 0
 
     def _handle_forget_action(self) -> int:
-        self._verify_keydir()
+        self._ensure_keydir()
         keys_arg = self.args.get_value("keys") or []
         conf_arg = bool(self.args.get_value("confallhosts"))
         if not keys_arg and not conf_arg:
@@ -264,7 +264,7 @@ class KeychainApp:
         return 0
 
     def _handle_add_action(self) -> int:
-        self._verify_keydir()
+        self._ensure_keydir()
         resolved = self._resolve_requested_keys()
         requested_keys = list(self.args.get_value("keys") or [])
         if (
@@ -291,8 +291,8 @@ class KeychainApp:
 
     # ---- Shared helpers -----------------------------------------------
 
-    def _verify_keydir(self) -> None:
-        self.kstate.paths.verify_keydir(self.kstate.user, self.out)
+    def _ensure_keydir(self) -> None:
+        self.kstate.paths.ensure_keydir()
 
     def _agent_settings(self) -> tuple[bool, bool]:
         ssh_spawn_gpg = bool(self.args.get_value("ssh_spawn_gpg"))
@@ -373,7 +373,7 @@ class KeychainApp:
             while True:
                 if quiet_handoff_wait:
                     quiet_handoff_wait = False
-                    wait_result = WaitResult("notified", waiter.wait_for_message())
+                    wait_result = coord.wait_for_handoff(waiter)
                 else:
                     state_snapshot = coord.load_state()
                     wait_result = coord.wait_for_activation_signal(
@@ -410,6 +410,10 @@ class KeychainApp:
                     continue
 
                 if wait_result.action == "wait":
+                    continue
+
+                if wait_result.action == "handoff":
+                    quiet_handoff_wait = True
                     continue
 
                 if wait_result.action == "takeover":
@@ -495,9 +499,7 @@ class KeychainApp:
             if gpg_s_keys
             else [],
             gpg_e=list(gpg_e_keys),
-            gpg_a=self.kstate.gpg.list_missing(gpg_a_keys, mode="--sign", announce_known=announce_known)
-            if gpg_a_keys
-            else [],
+            gpg_a=list(gpg_a_keys),
             pkcs11=self.kstate.ssh.list_missing_pkcs11(pkcs11_keys, announce_known=announce_known)
             if pkcs11_keys
             else [],
@@ -551,33 +553,31 @@ class KeychainApp:
                 self.out.info("Another terminal is initializing keys; waiting for completion.")
                 return "busy"
 
-            for sig in (getattr(signal, "SIGHUP", None), signal.SIGINT, signal.SIGTERM):
-                _safe_signal(sig, lambda *_: _signal_exit(activation))
-
             status = "failed"
-            try:
-                self._wipe_before_activation(missing, wipe_pending)
-                if missing.ssh or missing.pkcs11:
-                    plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
-                    if plan is None:
-                        raise KeychainError("Unable to add keys")
-                    owner = ActivationOwner(coord, waiter, missing.labels(), self.out)
-                    status = owner.run_ssh_add(plan.cmd, plan.env)
-                    if status == "canceled":
-                        self.out.note("Another terminal took over key initialization; waiting for completion.")
-                        return "canceled"
-                    if status != "success":
-                        raise KeychainError("Unable to add keys")
-                else:
-                    with coord.state_lock():
-                        state_snapshot = coord.load_state()
-                        coord.begin_activation(state_snapshot, waiter, missing.labels())
-                        coord.save_state(state_snapshot)
+            with _activation_signals():
+                try:
+                    self._wipe_before_activation(missing, wipe_pending)
+                    if missing.ssh or missing.pkcs11:
+                        plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
+                        if plan is None:
+                            raise KeychainError("Unable to add keys")
+                        owner = ActivationOwner(coord, waiter, missing.labels(), self.out)
+                        status = owner.run_ssh_add(plan.commands, plan.env)
+                        if status == "canceled":
+                            self.out.note("Another terminal took over key initialization; waiting for completion.")
+                            return "canceled"
+                        if status != "success":
+                            raise KeychainError("Unable to add keys")
+                    else:
+                        with coord.state_lock():
+                            state_snapshot = coord.load_state()
+                            coord.begin_activation(state_snapshot, waiter, missing.labels())
+                            coord.save_state(state_snapshot)
 
-                self._load_gpg_missing_keys(missing)
-                status = "success"
-            finally:
-                coord.finish_activation(status)
+                    self._load_gpg_missing_keys(missing)
+                    status = "success"
+                finally:
+                    coord.finish_activation(status)
             return "success"
 
     def _wipe_before_activation(self, missing: _MissingKeys, wipe_pending: bool) -> None:
@@ -666,21 +666,26 @@ def main(argv: list[str] | None = None) -> None:
 
 def _safe_signal(sig, handler):
     if sig is None:
-        return
+        return None
     try:
-        signal.signal(sig, handler)
+        return signal.signal(sig, handler)
     except (ValueError, OSError, AttributeError):
         # SIGHUP doesn't exist on Windows; non-main threads can't install.
-        pass
+        return None
 
 
-class _ReleasableLock(Protocol):
-    def release(self) -> None: ...
-
-
-def _signal_exit(lock: _ReleasableLock) -> None:
-    lock.release()
-    sys.exit(1)
+@contextmanager
+def _activation_signals():
+    previous = []
+    for sig in (getattr(signal, "SIGHUP", None), signal.SIGINT, signal.SIGTERM):
+        handler = _safe_signal(sig, lambda *_: sys.exit(1))
+        if sig is not None and handler is not None:
+            previous.append((sig, handler))
+    try:
+        yield
+    finally:
+        for sig, handler in previous:
+            _safe_signal(sig, handler)
 
 
 def _systemd_set_env(agent_env: SshAgentRef, out: Output) -> None:

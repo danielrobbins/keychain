@@ -24,14 +24,13 @@ from typing import Any
 
 from . import agents, keys
 from .env import SshAgentRef
-from .paths import KeychainPaths
+from .paths import KeychainPaths, SecurityCheck
 from .runtime.platform import Platform
 from .runtime.platform import detect as detect_platform
 from .util import (
     KeychainError,
     Output,
     current_user,
-    lax_perm_warning,
     lax_perms,
     pid_alive,
     run,
@@ -141,8 +140,7 @@ class KeychainState:
             args=args,
         )
         k.out = out
-        if out is not None:
-            paths.check_pidfile_perms(me, out)
+        paths.check_runtime_perms(me)
         return k
 
     # ---- hostname (resolved by ``build``; reflected back for inspect) -
@@ -391,41 +389,9 @@ class KeychainState:
     # ---- security audit ----------------------------------------------
 
     @property
-    def security_audit(self) -> list[tuple[str, str, str, str]]:
-        """File ownership and permission rows for the Permissions section.
-
-        Each tuple is ``(label, value, hint, severity)`` where *severity* is
-        ``""`` (info/neutral), ``"warn"`` or ``"err"``. An empty *hint* always
-        means the check passed. Rows are derived purely from already-collected
-        :class:`KeychainState` data -- no additional probes are run.
-
-        GPG socket / foreign-agent checks are intentionally *absent* here:
-        those facts are already surfaced in the GPG panel (``main socket``
-        hint) and the Processes panel (``gpg-agent pids`` hint).
-        """
-        from .output.inspect import _mode_row, _owner_row
-
-        me = current_user()
-        o_rows: list[tuple[str, str, str, str]] = []
-        m_rows: list[tuple[str, str, str, str]] = []
-
-        # Keydir owner + perms
-        if self.keydir_exists:
-            o_rows.append(_owner_row("keydir_owner", self.paths.keydir, me))
-            m_rows.append(_mode_row("keydir_perms", self.paths.keydir, lax_perm_warning(self.paths.keydir)))
-
-        # Pidfile owner + perms (sh format only -- the three pidfiles share perms)
-        if self.pidfile_exists:
-            sh_path = self.paths.pidfile_path("sh")
-            o_rows.append(_owner_row("pidfile_owner", sh_path, me))
-            m_rows.append(_mode_row("pidfile_perms", sh_path, lax_perm_warning(self.paths.keydir)))
-
-        # ssh-agent socket from the pidfile (the agent we'd actually adopt)
-        sock = self.pidfile_socket
-        if sock and self.pidfile_socket_valid:
-            o_rows.append(_owner_row("ssh_socket_owner", sock, me))
-
-        return o_rows + m_rows
+    def security_audit(self) -> list[SecurityCheck]:
+        socket_path = self.pidfile_socket if self.pidfile_socket_valid else ""
+        return self.paths.security_audit(self.user, socket_path)
 
     # ---- key resolution (reflects user's --extended / cmdline) -------
 

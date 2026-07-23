@@ -17,17 +17,16 @@ import json
 import os
 import secrets
 import select
-import socket
 import subprocess
 import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from .paths import KeychainPaths
-from .util import LockFile, Output, current_uid, get_tty, pid_alive, unlink_quiet
+from .util import LockFile, Output, get_tty, unlink_quiet
 
 
 def _json_load(path: Path) -> dict[str, Any]:
@@ -59,13 +58,6 @@ def _nonblock_flag() -> int:
 @dataclass
 class ActivationInfo:
     in_progress: bool = False
-    owner_pid: int | None = None
-    owner_tty: str = ""
-    owner_host: str = ""
-    owner_uid: int | None = None
-    started_at: float | None = None
-    heartbeat_at: float | None = None
-    ssh_add_pid: int | None = None
     cancel_endpoint: str = ""
     status: str = ""
     requested_keys: list[str] = field(default_factory=list)
@@ -76,13 +68,6 @@ class ActivationInfo:
             return cls()
         return cls(
             in_progress=bool(data.get("in_progress")),
-            owner_pid=_maybe_int(data.get("owner_pid")),
-            owner_tty=str(data.get("owner_tty") or ""),
-            owner_host=str(data.get("owner_host") or ""),
-            owner_uid=_maybe_int(data.get("owner_uid")),
-            started_at=_maybe_float(data.get("started_at")),
-            heartbeat_at=_maybe_float(data.get("heartbeat_at")),
-            ssh_add_pid=_maybe_int(data.get("ssh_add_pid")),
             cancel_endpoint=str(data.get("cancel_endpoint") or ""),
             status=str(data.get("status") or ""),
             requested_keys=[str(item) for item in data.get("requested_keys", []) if item],
@@ -91,13 +76,6 @@ class ActivationInfo:
     def to_dict(self) -> dict[str, Any]:
         return {
             "in_progress": self.in_progress,
-            "owner_pid": self.owner_pid,
-            "owner_tty": self.owner_tty,
-            "owner_host": self.owner_host,
-            "owner_uid": self.owner_uid,
-            "started_at": self.started_at,
-            "heartbeat_at": self.heartbeat_at,
-            "ssh_add_pid": self.ssh_add_pid,
             "cancel_endpoint": self.cancel_endpoint,
             "status": self.status,
             "requested_keys": list(self.requested_keys),
@@ -248,79 +226,15 @@ class WaitResult:
     message: dict[str, Any] = field(default_factory=dict)
 
 
-class ActivationLock:
-    """A non-blocking hostname:pid lock for the activation owner.
-
-    Unlike ``LockFile(..., wait=0)``, this never force-takes a live local
-    lock. That keeps accidental double-prompts out of the normal path.
-    """
-
-    __slots__ = ("path", "no_lock", "out", "acquired", "_token")
+class ActivationLock(LockFile):
+    """A non-raising, non-blocking lock for the activation owner."""
 
     def __init__(self, path: Path, no_lock: bool, out: Output) -> None:
-        self.path = path
-        self.no_lock = no_lock
-        self.out = out
-        self.acquired = False
-        self._token = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(8)}"
+        super().__init__(path, no_lock, 0, out)
 
     def __enter__(self) -> ActivationLock:
         self.try_acquire()
         return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.release()
-        return False
-
-    def try_acquire(self) -> bool:
-        if self.no_lock:
-            self.acquired = True
-            return True
-        try:
-            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            if self._lock_is_live():
-                return False
-            with contextlib.suppress(OSError):
-                self.path.unlink()
-            try:
-                fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            except OSError:
-                return False
-        try:
-            os.write(fd, self._token.encode("utf-8"))
-        finally:
-            os.close(fd)
-        self.acquired = True
-        return True
-
-    def _lock_is_live(self) -> bool:
-        try:
-            raw = self.path.read_text(encoding="utf-8").strip()
-        except OSError:
-            return False
-        hostname, sep, rest = raw.partition(":")
-        if not sep:
-            hostname, rest = socket.gethostname(), raw
-        pid_s = rest.split(":", 1)[0]
-        try:
-            owner_pid = int(pid_s)
-        except ValueError:
-            return False
-        if not owner_pid:
-            return False
-        if hostname != socket.gethostname():
-            return True
-        return pid_alive(owner_pid)
-
-    def release(self) -> None:
-        if not self.acquired:
-            return
-        if not self.no_lock:
-            with contextlib.suppress(OSError):
-                if self.path.read_text(encoding="utf-8").strip() == self._token:
-                    self.path.unlink()
-        self.acquired = False
 
 
 class ActivationCoordinator:
@@ -421,34 +335,12 @@ class ActivationCoordinator:
     ) -> None:
         if waiter is not None:
             self.unregister_waiter(state, waiter)
-        now = time.time()
         state.activation = ActivationInfo(
             in_progress=True,
-            owner_pid=os.getpid(),
-            owner_tty=get_tty(),
-            owner_host=socket.gethostname(),
-            owner_uid=current_uid(),
-            started_at=now,
-            heartbeat_at=now,
             cancel_endpoint=cancel_endpoint,
             status="loading",
             requested_keys=list(requested_keys),
         )
-
-    def mark_ssh_add_started(self, child_pid: int) -> None:
-        with self.state_lock():
-            state = self.load_state()
-            state.activation.ssh_add_pid = child_pid
-            state.activation.heartbeat_at = time.time()
-            state.activation.status = "loading"
-            self.save_state(state)
-
-    def heartbeat(self) -> None:
-        with self.state_lock():
-            state = self.load_state()
-            if state.activation.in_progress and state.activation.owner_pid == os.getpid():
-                state.activation.heartbeat_at = time.time()
-                self.save_state(state)
 
     def finish_activation(self, status: str) -> list[WaiterInfo]:
         with self.state_lock():
@@ -462,13 +354,13 @@ class ActivationCoordinator:
         return waiters
 
     def request_takeover(self, waiter: WaiterEndpoint, timeout: float = 5.0) -> dict[str, Any]:
+        if reconciled := self.reconcile_activation():
+            return reconciled
         with self.state_lock():
             state = self.load_state()
             activation = state.activation
             if not activation.in_progress:
                 return {"status": "inactive"}
-            if self._activation_owner_is_dead(activation):
-                return self._recover_dead_activation(state)
             cancel_path = activation.cancel_endpoint
 
         if not cancel_path:
@@ -477,10 +369,8 @@ class ActivationCoordinator:
         try:
             fd = os.open(cancel_path, os.O_WRONLY | _nonblock_flag())
         except OSError:
-            with self.state_lock():
-                state = self.load_state()
-                if self._activation_owner_is_dead(state.activation):
-                    return self._recover_dead_activation(state)
+            if reconciled := self.reconcile_activation():
+                return reconciled
             return {"status": "unavailable"}
 
         try:
@@ -490,11 +380,11 @@ class ActivationCoordinator:
         if message := waiter.wait_for_message(timeout):
             return message
 
+        if reconciled := self.reconcile_activation():
+            return reconciled
         with self.state_lock():
             state = self.load_state()
             activation = state.activation
-            if self._activation_owner_is_dead(activation):
-                return self._recover_dead_activation(state)
             if not activation.in_progress:
                 status = activation.status or "inactive"
                 if status == "success":
@@ -503,24 +393,24 @@ class ActivationCoordinator:
 
         return {"status": "timeout"}
 
-    def _activation_owner_is_dead(self, activation: ActivationInfo) -> bool:
-        if not activation.owner_pid:
-            return False
-        if activation.owner_host and activation.owner_host != socket.gethostname():
-            return False
-        uid = current_uid()
-        if uid is not None and activation.owner_uid is not None and activation.owner_uid != uid:
-            return False
-        return not pid_alive(activation.owner_pid)
-
-    def _recover_dead_activation(self, state: CoordinationState) -> dict[str, Any]:
-        waiters = list(state.waiters)
-        state.waiters = []
-        state.activation = ActivationInfo(in_progress=False, status="canceled")
-        state.generation += 1
-        self.save_state(state)
-        self.notify_waiters(waiters, status="canceled", generation=state.generation)
-        return {"status": "canceled", "generation": state.generation}
+    def reconcile_activation(self) -> dict[str, Any] | None:
+        with self.activation_lock() as activation_lock:
+            if not activation_lock.acquired:
+                return None
+            with self.state_lock():
+                state = self.load_state()
+                if not state.activation.in_progress:
+                    status = state.activation.status or "inactive"
+                    if status == "success":
+                        status = "inactive"
+                    return {"status": status, "generation": state.generation}
+                waiters = list(state.waiters)
+                state.waiters = []
+                state.activation = ActivationInfo(in_progress=False, status="canceled")
+                state.generation += 1
+                self.save_state(state)
+            self.notify_waiters(waiters, status="canceled", generation=state.generation)
+            return {"status": "canceled", "generation": state.generation}
 
     def notify_waiters(self, waiters: list[WaiterInfo], status: str, generation: int | None = None) -> None:
         message = {
@@ -560,6 +450,11 @@ class ActivationCoordinator:
             return WaitResult("takeover" if line == "takeover" else "wait")
         return WaitResult("activate")
 
+    def wait_for_handoff(self, waiter: WaiterEndpoint, timeout: float = 1.0) -> WaitResult:
+        if message := waiter.wait_for_message(timeout):
+            return WaitResult("notified", message)
+        return WaitResult("activate" if self.reconcile_activation() is not None else "handoff")
+
     def _prompt(self, activation_active: bool) -> bool:
         if activation_active:
             text = self.out.warn_text(
@@ -582,22 +477,19 @@ class ActivationOwner:
         waiter: WaiterEndpoint | None,
         requested_keys: list[str],
         out: Output,
-        *,
-        heartbeat_interval: float = 5.0,
     ) -> None:
         self.coord = coord
         self.waiter = waiter
         self.requested_keys = list(requested_keys)
         self.out = out
-        self.heartbeat_interval = heartbeat_interval
         self.cancel_endpoint: CancelEndpoint | None = None
         self.proc: subprocess.Popen[bytes] | None = None
         self._stop = threading.Event()
         self._canceled = threading.Event()
         self._cancel_thread: threading.Thread | None = None
-        self._heartbeat_thread: threading.Thread | None = None
+        self._proc_lock = threading.Lock()
 
-    def run_ssh_add(self, cmd: list[str] | list[list[str]], env: dict[str, str]) -> str:
+    def run_ssh_add(self, commands: list[list[str]], env: dict[str, str]) -> str:
         self.cancel_endpoint = self.coord.create_cancel_endpoint()
         cancel_path = str(self.cancel_endpoint.fifo_path) if self.cancel_endpoint is not None else ""
 
@@ -607,10 +499,7 @@ class ActivationOwner:
             self.coord.save_state(state)
 
         try:
-            if cmd and isinstance(cmd[0], list):
-                commands = cast(list[list[str]], cmd)
-            else:
-                commands = [cast(list[str], cmd)]
+            self._start_cancel_thread()
             for child_cmd in commands:
                 status = self._run_child(child_cmd, env)
                 if status != "success":
@@ -628,10 +517,10 @@ class ActivationOwner:
                 kwargs: dict[str, Any] = {"env": env, "close_fds": True}
                 if tty is not None:
                     kwargs.update({"stdin": tty, "stdout": tty, "stderr": tty})
-                self.proc = subprocess.Popen(cmd, **kwargs)
-                self.coord.mark_ssh_add_started(self.proc.pid)
-                self._start_cancel_thread()
-                self._start_heartbeat_thread()
+                with self._proc_lock:
+                    if self._canceled.is_set():
+                        return "canceled"
+                    self.proc = subprocess.Popen(cmd, **kwargs)
                 rc = self.proc.wait()
         except FileNotFoundError:
             self.out.warn("ssh-add not found")
@@ -665,16 +554,9 @@ class ActivationOwner:
         self._cancel_thread = threading.Thread(target=self._cancel_loop, name="keychain-cancel-listener", daemon=True)
         self._cancel_thread.start()
 
-    def _start_heartbeat_thread(self) -> None:
-        self._heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop, name="keychain-activation-heartbeat", daemon=True
-        )
-        self._heartbeat_thread.start()
-
     def _join_threads(self) -> None:
-        for thread in (self._cancel_thread, self._heartbeat_thread):
-            if thread is not None:
-                thread.join(timeout=1.0)
+        if self._cancel_thread is not None:
+            self._cancel_thread.join(timeout=1.0)
 
     def _cancel_loop(self) -> None:
         endpoint = self.cancel_endpoint
@@ -688,15 +570,12 @@ class ActivationOwner:
                 self._cancel_child()
                 return
 
-    def _heartbeat_loop(self) -> None:
-        while not self._stop.wait(self.heartbeat_interval):
-            self.coord.heartbeat()
-
     def _cancel_child(self) -> None:
-        proc = self.proc
+        with self._proc_lock:
+            self._canceled.set()
+            proc = self.proc
         if proc is None or proc.poll() is not None:
             return
-        self._canceled.set()
         with contextlib.suppress(OSError):
             proc.terminate()
         try:

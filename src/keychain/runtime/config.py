@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import configparser
 import os
+import stat
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,17 @@ _AGENT_ARG_ENVS = {
     "ssh_args": "KEYCHAIN_SSH_AGENT_ARGS",
     "gpg_args": "KEYCHAIN_GPG_AGENT_ARGS",
 }
+
+
+def _config_security_error(path: Path, file_stat: os.stat_result) -> str:
+    if not hasattr(os, "getuid"):
+        return ""
+    uid = os.getuid()
+    if file_stat.st_uid != uid:
+        return f"Refusing to read {path}: owned by uid {file_stat.st_uid}, not current uid {uid}."
+    if file_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return f"Refusing to read {path}: configuration is writable by group or others."
+    return ""
 
 
 class _CaseInsensitiveConfigParser(configparser.ConfigParser):
@@ -114,7 +126,11 @@ class RuntimeConfig:
         parser = _CaseInsensitiveConfigParser()
         if rc_path.is_file():
             try:
-                parser.read(rc_path)
+                with rc_path.open(encoding="utf-8") as rc_file:
+                    if error := _config_security_error(rc_path, os.fstat(rc_file.fileno())):
+                        self.parse_error = self.parse_error or error
+                        return
+                    parser.read_file(rc_file)
                 for section in parser.sections():
                     if section not in all_options_by_section:
                         self.rc_warnings.append(f"Ignoring unknown section [{section}] in .keychainrc")
@@ -128,6 +144,8 @@ class RuntimeConfig:
                         self.rc_data[section][key] = val
             except configparser.Error as e:
                 self.rc_warnings.append(f"Failed to parse {rc_path}: {e}")
+            except OSError as e:
+                self.rc_warnings.append(f"Failed to read {rc_path}: {e}")
 
         for varname, env_name in _AGENT_ARG_ENVS.items():
             value = self._agent_arg_value(varname, env_name, base_environ, allow_env)

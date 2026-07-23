@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Tests for keychain.util: Output and LockFile."""
 
+import multiprocessing
 import os
 import socket
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from keychain.util import LockFile, Output, pid_alive
+from keychain.util import KeychainError, LockFile, Output, pid_alive
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -15,6 +19,11 @@ from keychain.util import LockFile, Output, pid_alive
 
 def _out(quiet=True, debug=False):
     return Output.build(quiet=quiet, debug=debug, eval_mode=False, color=False)
+
+
+def _acquire_lock_and_exit(path: str) -> None:
+    lock = LockFile(path, no_lock=False, wait=0, out=_out())
+    os._exit(0 if lock.try_acquire() else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -123,11 +132,12 @@ class TestLockFile:
             assert lf.acquired
             assert lock.exists()
 
-    def test_release_removes_lock_file(self, tmp_path, silent_out):
+    def test_release_leaves_reusable_lock_file(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
         with LockFile(lock, no_lock=False, wait=1, out=silent_out):
             pass
-        assert not lock.exists()
+        with LockFile(lock, no_lock=False, wait=1, out=silent_out) as lf:
+            assert lf.acquired
 
     def test_nolock_is_noop_no_file_created(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
@@ -139,38 +149,35 @@ class TestLockFile:
         lock = tmp_path / "test.lock"
         with LockFile(lock, no_lock=False, wait=1, out=silent_out) as lf:
             assert lf.acquired
-            content = lock.read_text()
-            hostname, _, pid_s = content.partition(":")
-            assert hostname == socket.gethostname()
-            assert int(pid_s) == os.getpid()
+            if os.name != "nt":
+                assert lock.stat().st_mode & 0o777 == 0o600
 
-    def test_stale_local_lock_is_recovered(self, tmp_path, silent_out):
+        content = lock.read_text()
+        hostname, _, rest = content.partition(":")
+        assert hostname == socket.gethostname()
+        assert int(rest.split(":", 1)[0]) == os.getpid()
+
+    def test_abandoned_lock_content_does_not_block_acquisition(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
-        # PID 2**30 is far above the kernel max on any real system.
         lock.write_text(f"{socket.gethostname()}:{2**30}")
         with LockFile(lock, no_lock=False, wait=1, out=silent_out) as lf:
             assert lf.acquired
 
-    def test_legacy_plain_pid_stale_lock_recovered(self, tmp_path, silent_out):
+    def test_process_exit_releases_lock(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
-        # Pre-NFS-fix format: just a PID with no hostname.
-        lock.write_text(str(2**30))
-        with LockFile(lock, no_lock=False, wait=1, out=silent_out) as lf:
+        process = multiprocessing.get_context("spawn").Process(target=_acquire_lock_and_exit, args=(str(lock),))
+        process.start()
+        process.join(10)
+
+        assert process.exitcode == 0
+        with LockFile(lock, no_lock=False, wait=0, out=silent_out) as lf:
             assert lf.acquired
 
     def test_live_local_lock_not_stolen(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
-        # Our own PID is guaranteed alive.
-        lock.write_text(f"{socket.gethostname()}:{os.getpid()}")
-        lf = LockFile(lock, no_lock=False, wait=0, out=silent_out)
-        assert lf._acquire() is False
-
-    def test_remote_host_lock_not_stolen(self, tmp_path, silent_out):
-        lock = tmp_path / "test.lock"
-        # A lock from a different host must be left alone (NFS safety).
-        lock.write_text("remote-host-that-cannot-exist-xyz:12345")
-        lf = LockFile(lock, no_lock=False, wait=0, out=silent_out)
-        assert lf._acquire() is False
+        with LockFile(lock, no_lock=False, wait=1, out=silent_out):
+            contender = LockFile(lock, no_lock=False, wait=0, out=silent_out)
+            assert contender.try_acquire() is False
 
     def test_release_is_idempotent(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
@@ -180,24 +187,49 @@ class TestLockFile:
         lf.release()  # second release must not raise
         assert not lf.acquired
 
-    def test_lockwait_zero_force_acquires_live_lock(self, tmp_path, silent_out):
-        """gap §3.6 / usage-patterns.md §3.6: with ``--lockwait 0`` the
-        lockfile is forcibly taken over even when its owner is a live local
-        process. The wait loop falls through immediately and the
-        break-the-glass branch unlinks + reacquires.
-        """
+    def test_lockwait_zero_rejects_live_lock(self, tmp_path, silent_out):
         lock = tmp_path / "test.lock"
-        # Owner = ourselves (definitely alive). _acquire() would refuse
-        # this lock; __enter__ with wait=0 must overrule and force-take it.
-        lock.write_text(f"{socket.gethostname()}:{os.getpid()}")
-        with LockFile(lock, no_lock=False, wait=0, out=silent_out) as lf:
-            assert lf.acquired
-            # New lock content should now be ours, not the seeded value.
-            content = lock.read_text()
-            hostname, _, pid_s = content.partition(":")
-            assert hostname == socket.gethostname()
-            assert int(pid_s) == os.getpid()
-        assert not lock.exists()
+        with LockFile(lock, no_lock=False, wait=1, out=silent_out):
+            with pytest.raises(KeychainError, match="could not acquire lock"):
+                LockFile(lock, no_lock=False, wait=0, out=silent_out).__enter__()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows does not unlink open files")
+    def test_release_does_not_remove_replacement_lock(self, tmp_path, silent_out):
+        lock = tmp_path / "test.lock"
+        held = LockFile(lock, no_lock=False, wait=1, out=silent_out)
+        held.__enter__()
+        replacement = f"{socket.gethostname()}:{os.getpid()}:replacement"
+        lock.unlink()
+        lock.write_text(replacement)
+
+        held.release()
+
+        assert lock.read_text() == replacement
+
+    def test_concurrent_contenders_elect_one_owner(self, tmp_path, silent_out):
+        lock_path = tmp_path / "test.lock"
+        count = 12
+        start = threading.Barrier(count + 1)
+        attempted = threading.Barrier(count + 1)
+        release = threading.Event()
+
+        def contend() -> bool:
+            lock = LockFile(lock_path, no_lock=False, wait=0, out=silent_out)
+            start.wait()
+            acquired = lock.try_acquire()
+            attempted.wait()
+            if acquired:
+                release.wait()
+                lock.release()
+            return acquired
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            futures = [pool.submit(contend) for _ in range(count)]
+            start.wait()
+            attempted.wait()
+            release.set()
+
+        assert sum(future.result() for future in futures) == 1
 
 
 class TestPidAlive:
