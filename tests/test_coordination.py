@@ -176,11 +176,7 @@ class TestWaiters:
     def test_handoff_timeout_keeps_waiting_for_live_owner(self, tmp_path):
         paths = KeychainPaths(keydir=tmp_path, host="box")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
-        coord.save_state(
-            CoordinationState(
-                activation=ActivationInfo(in_progress=True)
-            )
-        )
+        coord.save_state(CoordinationState(activation=ActivationInfo(in_progress=True)))
         waiter = SimpleNamespace(wait_for_message=lambda timeout: {})
 
         with coord.activation_lock() as owner:
@@ -190,11 +186,7 @@ class TestWaiters:
     def test_handoff_timeout_recovers_orphaned_activation(self, tmp_path):
         paths = KeychainPaths(keydir=tmp_path, host="box")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
-        coord.save_state(
-            CoordinationState(
-                activation=ActivationInfo(in_progress=True)
-            )
-        )
+        coord.save_state(CoordinationState(activation=ActivationInfo(in_progress=True)))
         waiter = SimpleNamespace(wait_for_message=lambda timeout: {})
 
         assert coord.wait_for_handoff(waiter, timeout=0).action == "activate"
@@ -417,8 +409,7 @@ class TestWaiters:
                         [
                             sys.executable,
                             "-c",
-                            f"from pathlib import Path; Path({str(marker)!r}).touch(); "
-                            "import time; time.sleep(30)",
+                            f"from pathlib import Path; Path({str(marker)!r}).touch(); " "import time; time.sleep(30)",
                         ],
                     ],
                     os.environ.copy(),
@@ -461,7 +452,9 @@ class TestKeychainAppCoordination:
         paths = KeychainPaths(keydir=tmp_path, host="box")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
         app = main.KeychainApp(RuntimeConfig.resolve(["add"]), _out())
-        signals = tuple(sig for sig in (getattr(signal, "SIGHUP", None), signal.SIGINT, signal.SIGTERM) if sig is not None)
+        signals = tuple(
+            sig for sig in (getattr(signal, "SIGHUP", None), signal.SIGINT, signal.SIGTERM) if sig is not None
+        )
         originals = {sig: object() for sig in signals}
         installed = dict(originals)
 

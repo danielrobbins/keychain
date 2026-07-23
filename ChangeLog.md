@@ -5,8 +5,9 @@
 First stable release of Keychain 3.
 
 Keychain 3 is a ground-up Python 3 evolution of Daniel Robbins' long-running
-SSH and GPG agent manager. It preserves Keychain's single-file deployment
-model as a self-contained `keychain.pyz`, while replacing the historical
+SSH and GPG agent orchestrator. It preserves Keychain's single-file deployment
+model as a single-file, self-contained `keychain.pyz` (see
+[Python Rationale](/docs/python-rationale.md)), while replacing the historical
 Bourne shell implementation with a tested, auditable Python package. It
 requires Python 3.9 or newer and has no third-party runtime dependencies.
 
@@ -28,8 +29,8 @@ betas. Highlights include:
 - **A modern interface with strong 2.x compatibility.** The action-oriented
   command surface includes `add`, `agent`, `list`, `env`, `inspect`, `help`,
   and `man`. Traditional Keychain 2.x invocations remain supported through an
-  explicit compatibility layer; intentional differences are documented in
-  `docs/compatibility-deviations.md`.
+  explicit compatibility layer; intentional differences are documented under
+  `keychain man topic:compat`.
 
 - **Broader SSH and GPG workflows.** Keychain can load PKCS#11 providers for
   smartcards and hardware tokens, use or start `gpg-agent` with SSH support,
@@ -45,9 +46,9 @@ betas. Highlights include:
   all fail closed. `--confirm` and `--no-gui` are intentionally incompatible.
 
 - **Configuration, inspection, and embedded documentation.** Persistent
-  preferences live in `~/.keychainrc`; `keychain inspect` exposes resolved
+  preferences may live in an optional `~/.keychainrc`; `keychain inspect` exposes resolved
   runtime state in human-readable or JSON form; and the complete, versioned
-  manual ships inside the zipapp with topic and option-level help.
+  manual ships inside the zipapp with topic and option-level help (`keychain man` and `keychain man --list`).
 
 - **Hardened state handling and testing.** Agent sockets, pidfiles, locks,
   coordination state, and waiter endpoints are ownership- and permission-
@@ -57,30 +58,39 @@ betas. Highlights include:
 
 Changes since `3.0.0_beta3`:
 
-- Kept coordinated key-initialization prompts visible under `--quiet`, avoiding
-  an unexplained wait for Enter during shell startup (#223).
-- Expanded `inspect` with Keychain and Python runtime identity, parsed
-  configuration status, effective preference sources, and a privacy-safe view
-  of Keychain-relevant environment variables.
-- Consolidated ownership and permission checks into compact security records,
-  and organized `inspect --json` into a versioned diagnostic schema.
+- Added zero-dependency, native macOS `--confirm` dialog support (#222).
+- Made `--confirm --no-gui` fail explicitly.
+- Fixed an issue where `--quiet` suppressed the prompt to press Enter to
+  initialize keys (#223).
+- Expanded `inspect` with `.keychainrc` status, effective settings and their
+  sources, runtime identity, and relevant environment state. `inspect --json`
+  now emits a versioned diagnostic report suitable for bug reports.
+- Completed a dedicated security hardening pass across runtime storage,
+  configuration, agent handling, and generated shell output. Keychain now
+  rejects unsafe ownership or permissions on `.keychainrc` and runtime files,
+  validates SSH endpoints before use, rechecks agent identity before stopping
+  it, writes private state atomically, quotes exports for each target shell,
+  and rejects unsafe control characters.
+- Reworked concurrent initialization around operating-system advisory locks.
+  Lock ownership and liveness no longer depend on PID heuristics; locks are
+  released automatically when the owning process exits, and abandoned
+  activation handoffs are safely reconciled.
+- Hardened the release pipeline with commit-pinned GitHub Actions, verified
+  release artifacts, and automatically generated SHA256 checksums.
 - Converted command timeouts, malformed agent arguments, and operating-system
   failures into concise user errors instead of Python tracebacks (#224).
-- Added native macOS support for OpenSSH's per-use confirmation flow.
-- Made `--confirm --no-gui` fail explicitly rather than creating a key that
-  cannot satisfy its confirmation constraint.
 - Corrected askpass environment handling to follow OpenSSH's `DISPLAY`,
   `WAYLAND_DISPLAY`, and `SSH_ASKPASS_REQUIRE=force` rules.
-- Improved GPG decrypt warm-up portability by avoiding `/dev/null` as the
-  temporary encrypted payload.
-- Replaced PID-based stale-lock reclamation with operating-system advisory
-  locks that are released automatically when an owning process exits.
+- Strengthened GPG warm-up verification so `gpga:` proves both signing and
+  decryption capability before reporting success, and made decrypt verification
+  portable by avoiding `/dev/null` as the temporary encrypted payload.
 - Expanded end-to-end SSH confirmation and agent startup coverage.
+- Shortened managed `ssh-agent` socket names to avoid UNIX-domain socket path
+  limits on macOS, Linux, and other POSIX systems.
+- Extensive code cleanups throughout the codebase (removing deprecated code, simplifying logic where possible, etc.)
 
-When upgrading on macOS, an already-running managed `ssh-agent` cannot acquire
-the new confirmation helper after it has started. Run `keychain agent stop`
-once, then start Keychain normally to create an agent with the correct birth
-environment.
+Prior Keychain 3 beta users on MacOS will need to restart `ssh-agent` and Keychain completely in order to use the new `--confirm` functionality. Run
+`keychain agent stop` once, then start Keychain normally. This will initialize the new graphical `--confirm` support. You will now be prompted with a graphical dialog to allow or deny each use of the cached key.
 
 ## 3.0.0_beta3
 

@@ -115,9 +115,7 @@ class RuntimeConfig:
         self.rc_data.clear()
         self.rc_warnings.clear()
         self.rc_status = "absent"
-        self._diagnostic_environ = {
-            key: base_environ[key] for key in _DIAGNOSTIC_ENV_KEYS if key in base_environ
-        }
+        self._diagnostic_environ = {key: base_environ[key] for key in _DIAGNOSTIC_ENV_KEYS if key in base_environ}
         self.environ = dict(base_environ)
 
         # SECURITY: KEYCHAIN_* env vars are gated by --allow-env / -E.

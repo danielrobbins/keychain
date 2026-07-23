@@ -268,9 +268,7 @@ class Option(Element):
                 return None
         return raw.strip()
 
-    def resolution(
-        self, rc_data: dict[str, dict[str, str]], environ: dict[str, str]
-    ) -> tuple[Any, str]:
+    def resolution(self, rc_data: dict[str, dict[str, str]], environ: dict[str, str]) -> tuple[Any, str]:
         """Return the effective value and its source."""
         if self._cli_value is not UNSET:
             return self._cli_value, "command_line"

@@ -566,8 +566,7 @@ def main(argv: list[str] | None = None) -> None:
         if configuration["keychainrc"]["status"] == "loaded" or overrides:
             rc = configuration["keychainrc"]
             out.debug(
-                f"Configuration ({rc['status']}: {rc['path'] or '(none)'})"
-                + (f": {overrides}" if overrides else "")
+                f"Configuration ({rc['status']}: {rc['path'] or '(none)'})" + (f": {overrides}" if overrides else "")
             )
 
     for warning in args.rc_warnings:
