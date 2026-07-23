@@ -339,10 +339,34 @@ indefinitely.
 
 == @option confirm: ssh-add -c: prompt per use
 
-Pass `-c` to `ssh-add`: every subsequent use of the loaded key (e.g. by ssh
-/ scp) requires explicit user confirmation via `ssh-askpass`. A once-forever
-lifestyle preference; usually set in `~/.keychainrc` rather than typed each
-invocation.
+Pass `-c` to `ssh-add`: every subsequent use of the loaded key (for example,
+by `ssh`, `scp`, or Git over SSH) requires explicit user confirmation through
+OpenSSH's askpass mechanism. This is normally a persistent preference:
+
+```
+[agent]
+confirm = true
+```
+
+*macOS.* When Keychain starts a new managed `ssh-agent` with confirmation
+enabled, it installs a private helper at `~/.keychain/ssh-askpass-macos` (or
+the selected Keychain directory) and starts the agent with the environment
+OpenSSH needs to invoke it. The helper accepts confirmation requests only and
+displays a native graphical *Keychain SSH Confirmation* dialog. Only choosing *Allow* approves the operation; choosing *Deny*, closing or cancelling the dialog, an unavailable desktop session, or any helper failure refuses it.
+
+If `$SSH_ASKPASS` already names a custom helper when Keychain starts the
+managed agent, Keychain preserves it and enables OpenSSH's forced askpass
+mode. On other platforms, provide a suitable askpass helper in the agent's
+startup environment when the platform does not supply one.
+
+An agent's askpass environment is fixed when the agent starts. After upgrading
+an existing macOS installation, run `keychain agent stop` once if the current
+managed agent was created without confirmation support; the next Keychain
+invocation will start it with the native helper.
+
+`--confirm` cannot be combined with `--no-gui`. Keychain reports an error
+instead of silently weakening the request or loading a key whose confirmation
+constraint cannot be satisfied.
 
 == @option timeout: auto-expire keys after MIN minutes
 
