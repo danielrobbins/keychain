@@ -113,7 +113,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.9"
-files = ["src/keychain"]
+files = ["src/keychain", "scripts"]
 ignore_missing_imports = true
 no_implicit_optional = true
 
@@ -126,6 +126,8 @@ skips = [
     "B404",
     "B603",
     "B607",
+    # Bootstrap replaces itself with a directly selected Python interpreter.
+    "B606",
     # False positives on CLI/doc literals like "keychain" and "--".
     "B105",
 ]

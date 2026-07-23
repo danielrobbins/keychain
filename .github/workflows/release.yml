@@ -6,21 +6,25 @@ on:
       - "[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
-  contents: write
+  contents: read
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      title: ${{ steps.version.outputs.title }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
 
@@ -69,26 +73,40 @@ jobs:
             $0 == "## " ver {f=1; next}
             /^## / && f {exit}
             f {print}
-          ' ChangeLog.md > .release-notes.md
-          if [[ ! -s .release-notes.md ]]; then
+          ' ChangeLog.md > release-notes.md
+          if [[ ! -s release-notes.md ]]; then
             echo "Failed to extract ChangeLog.md notes for ${version}" >&2
             exit 1
           fi
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: keychain-${{ steps.version.outputs.version }}
           path: |
             dist/keychain-${{ steps.version.outputs.version }}.pyz
             dist/SHA256SUMS
-            .release-notes.md
+            release-notes.md
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: keychain-${{ needs.build.outputs.version }}
+          path: release
 
       - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          version="${{ steps.version.outputs.version }}"
+          cd release
+          version="${{ needs.build.outputs.version }}"
           if gh release view "${version}" >/dev/null 2>&1; then
             gh release upload "${version}" \
               "dist/keychain-${version}.pyz" \
@@ -97,10 +115,10 @@ jobs:
           else
             args=(
               --draft
-              --title "Keychain ${{ steps.version.outputs.title }}"
-              --notes-file .release-notes.md
+              --title "Keychain ${{ needs.build.outputs.title }}"
+              --notes-file release-notes.md
             )
-            if [[ "${{ steps.version.outputs.prerelease }}" == "true" ]]; then
+            if [[ "${{ needs.build.outputs.prerelease }}" == "true" ]]; then
               args+=(--prerelease)
             fi
             gh release create "${version}" \

@@ -9,9 +9,12 @@ config and that wildcard / negation patterns are skipped.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from keychain import keys
+from keychain.util import KeychainError
 
 
 class _Out:
@@ -134,6 +137,41 @@ def test_resolve_requested_keys_skips_gpg_probe_when_disabled(fake_home, monkeyp
     monkeypatch.setattr(keys, "run", fail_run)
     out = keys.resolve_requested_keys(False, False, ["barekey"], "gpg", _Out(), gpg_lookup=False)
     assert out == keys.ResolvedKeys([], [], [], [], [], [], ["barekey"])
+
+
+def test_resolve_requested_keys_reports_gpg_probe_timeout(fake_home, monkeypatch):
+    def timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(keys, "run", timeout)
+    with pytest.raises(KeychainError, match='gpg timed out while resolving key "ABCD1234"'):
+        keys.resolve_requested_keys(False, False, ["ABCD1234"], "gpg", _Out())
+
+
+def test_resolve_requested_keys_treats_missing_gpg_as_unresolved(fake_home, monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(keys, "run", missing)
+    out = keys.resolve_requested_keys(False, False, ["ABCD1234"], "gpg", _Out())
+    assert out.missing == ["ABCD1234"]
+
+
+def test_expand_host_reports_ssh_probe_timeout(monkeypatch):
+    def timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(keys, "run", timeout)
+    with pytest.raises(KeychainError, match='ssh timed out while expanding host "example.com"'):
+        keys.expand_host("example.com")
+
+
+def test_expand_host_treats_missing_ssh_as_no_identities(monkeypatch):
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(keys, "run", missing)
+    assert keys.expand_host("example.com") == keys.ResolvedKeys()
 
 
 def test_resolve_requested_keys_mixes_prefixed_and_bare(fake_home, monkeypatch):

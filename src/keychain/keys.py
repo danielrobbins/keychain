@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .output.core import Output
-from .util import dedupe_sorted, run
+from .util import KeychainError, dedupe_sorted, run
 
 
 @dataclass
@@ -92,6 +93,8 @@ def _resolve_bare_keys(keys: list[str], gpg_prog: str, gpg_lookup: bool) -> Reso
                 if r.returncode == 0:
                     result.gpg.append(k)
                     continue
+            except subprocess.TimeoutExpired as exc:
+                raise KeychainError(f'{gpg_prog} timed out while resolving key "{k}"') from exc
             except (FileNotFoundError, OSError):
                 pass
         result.missing.append(k)
@@ -121,6 +124,8 @@ def expand_host(hostname: str) -> ResolvedKeys:
     """Expand a ``host:`` extkey into resolved SSH keys via ``ssh -nG``."""
     try:
         r = run(["ssh", "-nG", hostname], timeout=10)
+    except subprocess.TimeoutExpired as exc:
+        raise KeychainError(f'ssh timed out while expanding host "{hostname}"') from exc
     except (FileNotFoundError, OSError):
         return ResolvedKeys()
     paths: list[str] = []

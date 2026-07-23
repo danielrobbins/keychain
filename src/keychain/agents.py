@@ -35,6 +35,13 @@ def _suppress_gui(env: dict[str, str]) -> None:
         env.pop(key, None)
 
 
+def _split_agent_args(value: str, agent: str) -> list[str]:
+    try:
+        return shlex.split(value)
+    except ValueError as exc:
+        raise KeychainError(f"Invalid {agent} agent arguments: {exc}") from exc
+
+
 _MACOS_ASKPASS = """\
 #!/bin/sh
 [ "${SSH_ASKPASS_PROMPT-}" = "confirm" ] || exit 1
@@ -534,7 +541,7 @@ class SshAgent:
             # SECURITY: KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only
             # when --allow-env / -E is set. Direct env var access here is
             # safe because the gate is enforced at the config layer.
-            cmd += shlex.split(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""))
+            cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
             spawn_env = dict(self.keychain_state.env)
             if bool(a.get_value("confirm")) and self.keychain_state.platform.name == "darwin":
                 askpass = spawn_env.get("SSH_ASKPASS")
@@ -765,7 +772,7 @@ class GpgAgent:
         if ssh_support:
             opts.append("--enable-ssh-support")
         # User-supplied extra flags (issue #21). Last so they win on duplicates.
-        opts += shlex.split(run_env.get("KEYCHAIN_GPG_AGENT_ARGS", ""))
+        opts += _split_agent_args(run_env.get("KEYCHAIN_GPG_AGENT_ARGS", ""), "GPG")
         out.info("Starting gpg-agent...")
         try:
             r = run(["gpg-agent", "--sh"] + opts, env=run_env)

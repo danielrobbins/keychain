@@ -121,7 +121,7 @@ def parse_tagged_text(text: str) -> dict[str, Any]:
             raise ValueError(f"duplicate doc tag {tag}")
         out["all"].append(tag)
         out.setdefault(section.kind, OrderedDict())
-        entry = {
+        entry: dict[str, Any] = {
             "short_help": section.short_help,
             "syntax": section.syntax,
             "description": section.body,

@@ -16,6 +16,7 @@ from keychain.agents import extract_fingerprints, findpids
 from keychain.env import SshAgentRef
 from keychain.output.core import Output
 from keychain.runtime import platform
+from keychain.util import KeychainError
 
 
 def _out(theme: str | None = None):
@@ -812,6 +813,30 @@ class TestAgentArgsPassthrough:
         assert cmd[0] == "gpg-agent"
         assert "--allow-preset-passphrase" in cmd
         assert "--debug-level=basic" in cmd
+
+    def test_malformed_ssh_agent_args_are_user_error(self, monkeypatch, short_keydir):
+        monkeypatch.setenv("KEYCHAIN_SSH_AGENT_ARGS", '"unterminated')
+        monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+        monkeypatch.delenv("SSH_AGENT_PID", raising=False)
+
+        with pytest.raises(KeychainError, match="Invalid SSH agent arguments: No closing quotation"):
+            self._build_ssh_agent(short_keydir).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+    def test_malformed_gpg_agent_args_are_user_error(self, monkeypatch, tmp_path):
+        from keychain import state
+        from keychain.paths import KeychainPaths
+        from keychain.runtime.config import RuntimeConfig
+
+        monkeypatch.setenv("KEYCHAIN_GPG_AGENT_ARGS", '"unterminated')
+        monkeypatch.setattr(agents, "gpg_main_socket", lambda *_args, **_kwargs: "")
+        args = RuntimeConfig.resolve(["add", "--no-gui"])
+        kstate = state.KeychainState(
+            paths=KeychainPaths(keydir=tmp_path, host="h"),
+            args=args,
+        )
+
+        with pytest.raises(KeychainError, match="Invalid GPG agent arguments: No closing quotation"):
+            agents.GpgAgent(kstate, _out()).start(ssh_support=False)
 
     def test_no_args_when_env_unset(self, monkeypatch, short_keydir):
         """Verify no extra ssh-agent flags are added when the passthrough env var is unset because the default spawn command should stay minimal."""

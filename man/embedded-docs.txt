@@ -711,8 +711,8 @@ Keys initialized by another terminal.
 *Implementation details.* Coordination state is stored in
 `~/.keychain/<host>.state.json` under the state lock. Waiter FIFOs live in
 `~/.keychain/<host>-waiters/` with per-process unique names. The activation
-lock is `~/.keychain/<host>.activation.lock`. All coordination files are
-mode 0o600 and owner-checked.
+lock is `~/.keychain/<host>.activation.lock`. Runtime files are private to the
+current user and are checked before use.
 
 *Scope.* The coordinated unlock flow applies to SSH key loading only. GPG
 keys use explicit warm-up paths (`gpgs:`, `gpge:`, `gpga:`) and do not
@@ -725,27 +725,33 @@ and the state lock is held only briefly for metadata updates.
 
 == @topic security: Security model [category=appendix, priority=50]
 
-*What keychain protects against.*
+Keychain runs with the authority of the invoking user. It assumes the operating
+system, the current user account, the user's executable search path, OpenSSH,
+and GnuPG are trusted. Within that boundary, Keychain protects its runtime
+state from other local users, validates agent endpoints before use, coordinates
+concurrent invocations, and quotes generated shell output.
 
-* Re-prompting for the same passphrase across many shell sessions: each key
-  needs its passphrase entered exactly once between agent restarts.
-* Accidental key exposure to other local users: the pidfile directory is created
-  mode 700 and owner-checked on every read; ssh-agent's UNIX-domain socket is
-  owner-only by default.
-* Stale agent processes pointing the env at sockets that no longer exist: probed
-  and discarded before use.
-* Multi-terminal race conditions: coordinated unlock (3.0.0_beta2+) uses
-  short-lived locks and FIFO notification to prevent `could not acquire lock` errors when multiple shells start simultaneously.
+*Runtime storage.* The default `~/.keychain/` directory is created mode `0700`.
+Before runtime state is used on POSIX systems, Keychain checks the directory
+and existing pidfiles, state files, lock files, and waiter directory. It
+refuses paths owned by another user, paths with any group or other permissions,
+and paths that cannot be inspected. Pidfiles and coordination state are
+replaced through private temporary files.
 
-*What keychain does NOT protect against.*
+*Agent endpoints.* An SSH endpoint must be a non-symlink UNIX-domain socket
+owned by the current user. Pidfile agents must also name a live process, and
+the selected endpoint is checked again immediately before `ssh-add` runs.
+Forwarded agents and the GnuPG SSH socket require their corresponding explicit
+opt-ins.
 
-* Local-root attackers. ssh-agent and its socket live in userspace; root can
-  ptrace any process or read any socket. Keychain doesn't change that.
-* Compromised SSH-server-side machines if you forwarded an agent into them
-  (`ssh -A`). The forwarded agent socket is controllable by the remote machine
-  for the duration of the forward.
-* Stolen unattended laptops: an unlocked agent is a key. Pair `--timeout` with
-  screen-lock policy.
+*Configuration and environment.* On POSIX systems, `.keychainrc` must be owned
+by the current user and must not be writable by group or others. `KEYCHAIN_*`
+environment variables are ignored unless `--allow-env` (`-E`) is supplied.
+External programs receive argument vectors rather than shell command strings.
+
+*Shell output.* Sourceable environment values are quoted for the selected
+shell. NUL and line-break characters are rejected rather than emitted into a
+pidfile or `--eval` output.
 
 *--ssh-allow-forwarded.* Adopting a forwarded agent socket on a remote host
 means the *source* machine -- the laptop you forwarded from -- can sign
@@ -754,16 +760,21 @@ of agent forwarding) but it widens the trust boundary. Don't enable on hosts you
 don't fully control.
 
 *Coordination security (3.0.0_beta2+).* The coordinated unlock protocol uses
-per-process FIFO endpoints (mode 0o600) for waiter notification. Only the
-activation owner can cancel its own `ssh-add` process; other terminals must
-request takeover explicitly by typing `takeover`. Stale activations are
-recovered only after confirming the owner process is dead and the heartbeat is
-stale. All coordination files are owner-checked and mode 0o600 or stricter.
+per-process FIFO endpoints for waiter notification and operating-system
+advisory locks for ownership. The open activation-lock descriptor is the
+authoritative liveness signal; PID, hostname, heartbeat, and lock-file contents
+are not separate ownership mechanisms. If the lock is free while metadata says
+an activation is active, that metadata is reconciled as stale. A FIFO wakeup
+only signals a possible state change, so waiters check the agent again before
+reporting success. `--no-lock` deliberately disables these guarantees.
 
-*File permissions.* Pidfiles, env-files, and coordination state files all
-live under `~/.keychain/` (mode 700). On every read keychain `stat()`s the
-file, verifies owner == current user, and refuses to operate if either check
-fails -- so a world-writable home directory does not expose keys.
+*What Keychain does not protect against.* Root, the current user, or a process
+already able to act as that user can reach or replace user-owned resources. A
+malicious program selected through `PATH`, an intentionally unsafe command-line
+or preference-file setting, and a compromised agent are also outside the trust
+boundary. Any process that can reach an unlocked agent socket may ask it to
+sign; use agent timeouts, confirmation constraints, screen locking, and careful
+forwarding policy as appropriate.
 
 == @topic agents: How keychain discovers, attaches, and spawns agents [category=reference, priority=50]
 
