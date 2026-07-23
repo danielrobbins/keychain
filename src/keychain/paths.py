@@ -6,6 +6,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import shlex
+import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -25,6 +27,18 @@ from .util import (
 # macOS has the smallest common sockaddr_un.sun_path limit: 104 bytes,
 # including the terminating null byte.
 _MAX_UNIX_SOCKET_PATH_BYTES = 103
+
+
+def _validate_value(value: str) -> None:
+    if any(char in value for char in "\0\r\n"):
+        raise KeychainError("Agent environment values cannot contain NUL or line breaks")
+
+
+def _quote(value: str, *, fish: bool = False) -> str:
+    _validate_value(value)
+    if fish:
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    return shlex.quote(value)
 
 
 @dataclass(frozen=True)
@@ -51,15 +65,23 @@ class Pidfile:
             raise
 
 
+@dataclass(frozen=True)
+class SecurityCheck:
+    label: str
+    value: str
+    hint: str = ""
+    severity: str = ""
+
+
 class ShPidfile(Pidfile):
     suffix = "-sh"
 
     def render(self, env: SshAgentRef) -> str:
         parts = []
         if env.sock:
-            parts.append(f'SSH_AUTH_SOCK="{env.sock}"; export SSH_AUTH_SOCK')
+            parts.append(f"SSH_AUTH_SOCK={_quote(env.sock)}; export SSH_AUTH_SOCK")
         if env.pid:
-            parts.append(f"SSH_AGENT_PID={env.pid}; export SSH_AGENT_PID;")
+            parts.append(f"SSH_AGENT_PID={_quote(env.pid)}; export SSH_AGENT_PID;")
         return ("\n".join(parts) + "\n") if parts else ""
 
 
@@ -69,9 +91,9 @@ class CshPidfile(Pidfile):
     def render(self, env: SshAgentRef) -> str:
         parts = []
         if env.sock:
-            parts.append(f'setenv SSH_AUTH_SOCK "{env.sock}";')
+            parts.append(f"setenv SSH_AUTH_SOCK {_quote(env.sock)};")
         if env.pid:
-            parts.append(f"setenv SSH_AGENT_PID {env.pid};")
+            parts.append(f"setenv SSH_AGENT_PID {_quote(env.pid)};")
         return ("\n".join(parts) + "\n") if parts else ""
 
 
@@ -81,9 +103,9 @@ class FishPidfile(Pidfile):
     def render(self, env: SshAgentRef) -> str:
         parts = []
         if env.sock:
-            parts.append(f'set -e SSH_AUTH_SOCK; set -x -U SSH_AUTH_SOCK "{env.sock}";')
+            parts.append(f"set -e SSH_AUTH_SOCK; set -x -U SSH_AUTH_SOCK {_quote(env.sock, fish=True)};")
         if env.pid:
-            parts.append(f"set -e SSH_AGENT_PID; set -x -U SSH_AGENT_PID {env.pid};")
+            parts.append(f"set -e SSH_AGENT_PID; set -x -U SSH_AGENT_PID {_quote(env.pid, fish=True)};")
         return ("\n".join(parts) + "\n") if parts else ""
 
 
@@ -93,8 +115,10 @@ class EnvfilePidfile(Pidfile):
     def render(self, env: SshAgentRef) -> str:
         parts = []
         if env.sock:
+            _validate_value(env.sock)
             parts.append(f"SSH_AUTH_SOCK={env.sock}")
         if env.pid:
+            _validate_value(env.pid)
             parts.append(f"SSH_AGENT_PID={env.pid}")
         return ("\n".join(parts) + "\n") if parts else ""
 
@@ -165,6 +189,7 @@ class KeychainPaths:
         else:
             base = Path.home() / ".keychain"
 
+        base = base.absolute()
         formats = tuple(fmt.strip() for fmt in (pid_formats or "sh,csh,fish,envfile").split(",") if fmt.strip())
         if "sh" not in formats:
             formats = ("sh",) + formats
@@ -206,14 +231,17 @@ class KeychainPaths:
 
     @property
     def ssh_agent_socket_path(self) -> Path:
-        host_digest = hashlib.sha256(os.fsencode(self.host)).digest()[:6]
-        socket_name = base64.urlsafe_b64encode(host_digest).decode()
-        path = self.keydir / f"{socket_name}.s"
+        path = self._ssh_agent_socket_path()
         if os.name != "nt" and len(os.fsencode(path)) > _MAX_UNIX_SOCKET_PATH_BYTES:
             raise KeychainError(
                 f"Keychain directory is too long for an ssh-agent socket: {self.keydir}"
             )
         return path
+
+    def _ssh_agent_socket_path(self) -> Path:
+        host_digest = hashlib.sha256(os.fsencode(self.host)).digest()[:6]
+        socket_name = base64.urlsafe_b64encode(host_digest).decode()
+        return self.keydir / f"{socket_name}.s"
 
     def render_env(
         self, env: SshAgentRef | Mapping[str, str], shell: str = "env", shell_env: Mapping[str, str] | None = None
@@ -229,7 +257,7 @@ class KeychainPaths:
 
     def clear(self) -> None:
         """Remove all runtime files for this keychain."""
-        unlink_quiet(*self.all_pidfiles, self.ssh_agent_socket_path)
+        unlink_quiet(*self.all_pidfiles, self._ssh_agent_socket_path())
 
     def write(self, agent_env: SshAgentRef, out: Output) -> None:
         """Write shell-specific pidfiles from the canonical agent env."""
@@ -245,7 +273,7 @@ class KeychainPaths:
                 pidf_cls(self.keydir / f"{self.host}-{fmt}", fmt).write(agent_env)
 
     # ---- directory verification ---------------------------------------
-    def verify_keydir(self, me: str, out: Output) -> None:
+    def ensure_keydir(self) -> None:
         if self.keydir.is_file():
             raise KeychainError(f"{self.keydir} is a file (it should be a directory)")
         if not self.keydir.is_dir():
@@ -253,14 +281,6 @@ class KeychainPaths:
                 self.keydir.mkdir(mode=0o700, parents=True)
             except OSError as e:
                 raise KeychainError(f"can't create {self.keydir}: {e}")
-
-        owner = get_owner(self.keydir)
-        if owner and owner != me:
-            raise KeychainError(
-                f"{self.keydir} is owned by {owner}, not {me}. " "Remove or chown the directory and re-run keychain."
-            )
-        if owner and lax_perms(self.keydir):
-            raise KeychainError(lax_perm_warning(self.keydir))
 
         # Probe write permission inside keydir.
         probe = self.pidfile_path("sh").with_suffix(f"{self.pidfile_path('sh').suffix}.probe")
@@ -270,27 +290,64 @@ class KeychainPaths:
             raise KeychainError(f"can't write inside {self.keydir}")
         unlink_quiet(probe)
 
-    def check_pidfile_perms(self, me: str, out: Output) -> None:
-        """Verify pidfile ownership and hard-fail on lax permissions.
+    def security_audit(self, me: str, socket_path: str = "") -> list[SecurityCheck]:
+        paths: list[tuple[str, Path, bool]] = [("keydir", self.keydir, True)]
+        paths.extend(
+            ("pidfile" if fmt == "sh" else f"{fmt}_pidfile", self.pidfile_path(fmt), True)
+            for fmt in self.pid_formats
+        )
+        paths.extend(
+            [
+                ("state_file", self.state_file, True),
+                ("state_lock", self.state_lockf, True),
+                ("activation_lock", self.activation_lockf, True),
+                ("waiters_dir", self.waiters_dir, True),
+            ]
+        )
+        if socket_path:
+            paths.append(("ssh_socket", Path(socket_path), False))
 
-        Pidfile contents are ``eval``'d by the user's shell (via
-        ``keychain --eval``). A pidfile owned by another user is therefore
-        an arbitrary-code-execution vector and is treated as a hard error.
-        Group/world permissions on the pidfile or its directory make
-        replacement attacks possible, so they are also treated as hard
-        errors.
-        """
-        for p in self.all_pidfiles:
-            if not p.is_file():
+        checks: list[SecurityCheck] = []
+        for label, path, check_mode in paths:
+            if not path.exists():
                 continue
-            owner = get_owner(p)
+            if label == "keydir" and not path.is_dir():
+                checks.append(SecurityCheck("keydir_type", "file", f"{path} is a file, not a directory.", "err"))
+                continue
+            owner = get_owner(path)
             if owner and owner != me:
-                raise KeychainError(
-                    "{} is owned by {}, not {}; refusing to use it. "
-                    "Remove or chown the file and re-run keychain.".format(p, owner, me)
+                checks.append(
+                    SecurityCheck(
+                        f"{label}_owner",
+                        owner,
+                        f"{path} is owned by {owner}, not {me}; refusing to use it.",
+                        "err",
+                    )
                 )
-            if owner and lax_perms(p):
-                raise KeychainError(lax_perm_warning(self.keydir))
+            else:
+                checks.append(SecurityCheck(f"{label}_owner", owner or "(unknown)", "(you)" if owner else ""))
+            if not check_mode:
+                continue
+            try:
+                mode = stat.S_IMODE(os.stat(path).st_mode)
+            except OSError:
+                checks.append(SecurityCheck(f"{label}_perms", "(unreadable)", f"Cannot inspect {path}.", "err"))
+                continue
+            unsafe = bool(owner and lax_perms(path))
+            checks.append(
+                SecurityCheck(
+                    f"{label}_perms",
+                    f"0{mode:o}",
+                    lax_perm_warning(self.keydir) if unsafe else "",
+                    "err" if unsafe else "",
+                )
+            )
+        return checks
+
+    def check_runtime_perms(self, me: str) -> None:
+        for check in self.security_audit(me):
+            if check.severity == "err":
+                raise KeychainError(check.hint)
 
 
 def _expand_home(path: str) -> Path:

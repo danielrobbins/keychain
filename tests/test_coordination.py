@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import stat
 import sys
@@ -29,7 +30,7 @@ from keychain.coordination import (
 from keychain.env import SshAgentRef
 from keychain.paths import KeychainPaths
 from keychain.runtime.config import RuntimeConfig
-from keychain.util import Output, pid_alive
+from keychain.util import KeychainError, LockFile, Output, pid_alive
 
 
 def _out():
@@ -47,12 +48,6 @@ class TestCoordinationState:
             generation=7,
             activation=ActivationInfo(
                 in_progress=True,
-                owner_pid=123,
-                owner_tty="/dev/pts/2",
-                owner_host="box",
-                owner_uid=1000,
-                started_at=10.0,
-                heartbeat_at=12.0,
                 status="loading",
                 requested_keys=["id_ed25519"],
             ),
@@ -72,7 +67,6 @@ class TestCoordinationState:
 
         assert loaded.generation == 7
         assert loaded.activation.in_progress is True
-        assert loaded.activation.owner_pid == 123
         assert loaded.activation.requested_keys == ["id_ed25519"]
         assert len(loaded.waiters) == 1
         assert loaded.waiters[0].fifo_path.endswith("456.fifo")
@@ -117,21 +111,20 @@ class TestActivationLock:
         with ActivationLock(path, no_lock=False, out=_out()) as lock:
             assert lock.acquired is True
             assert path.exists()
-            raw = path.read_text(encoding="utf-8")
-            assert raw.startswith(f"{socket.gethostname()}:{os.getpid()}:")
 
-        assert not path.exists()
+        raw = path.read_text(encoding="utf-8")
+        assert raw.startswith(f"{socket.gethostname()}:{os.getpid()}:")
+        with ActivationLock(path, no_lock=False, out=_out()) as lock:
+            assert lock.acquired is True
 
     def test_activation_lock_does_not_steal_live_local_lock(self, tmp_path):
         path = tmp_path / "box.activation.lock"
-        path.write_text(f"{socket.gethostname()}:{os.getpid()}:seed", encoding="utf-8")
 
-        with ActivationLock(path, no_lock=False, out=_out()) as lock:
-            assert lock.acquired is False
+        with ActivationLock(path, no_lock=False, out=_out()):
+            with ActivationLock(path, no_lock=False, out=_out()) as contender:
+                assert contender.acquired is False
 
-        assert path.read_text(encoding="utf-8").endswith(":seed")
-
-    def test_activation_lock_recovers_stale_local_lock(self, tmp_path):
+    def test_activation_lock_ignores_abandoned_content(self, tmp_path):
         path = tmp_path / "box.activation.lock"
         path.write_text(f"{socket.gethostname()}:{2**30}:seed", encoding="utf-8")
 
@@ -139,11 +132,13 @@ class TestActivationLock:
             assert lock.acquired is True
             assert path.exists()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Windows does not unlink open files")
     def test_activation_lock_does_not_remove_someone_elses_token(self, tmp_path):
         path = tmp_path / "box.activation.lock"
         lock = ActivationLock(path, no_lock=False, out=_out())
         assert lock.try_acquire() is True
 
+        path.unlink()
         path.write_text(f"{socket.gethostname()}:999999:other", encoding="utf-8")
         lock.release()
 
@@ -162,6 +157,40 @@ class TestWaiters:
         finally:
             os.close(write_fd)
             endpoint.cleanup()
+
+    def test_handoff_timeout_reopens_inactive_activation(self, tmp_path):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
+        waiter = SimpleNamespace(wait_for_message=lambda timeout: {})
+
+        assert coord.wait_for_handoff(waiter, timeout=0).action == "activate"
+
+    def test_handoff_timeout_keeps_waiting_for_live_owner(self, tmp_path):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
+        coord.save_state(
+            CoordinationState(
+                activation=ActivationInfo(in_progress=True)
+            )
+        )
+        waiter = SimpleNamespace(wait_for_message=lambda timeout: {})
+
+        with coord.activation_lock() as owner:
+            assert owner.acquired
+            assert coord.wait_for_handoff(waiter, timeout=0).action == "handoff"
+
+    def test_handoff_timeout_recovers_orphaned_activation(self, tmp_path):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
+        coord.save_state(
+            CoordinationState(
+                activation=ActivationInfo(in_progress=True)
+            )
+        )
+        waiter = SimpleNamespace(wait_for_message=lambda timeout: {})
+
+        assert coord.wait_for_handoff(waiter, timeout=0).action == "activate"
+        assert coord.load_state().activation.status == "canceled"
 
     def test_waiter_endpoint_buffers_back_to_back_messages(self, tmp_path):
         read_fd, write_fd = os.pipe()
@@ -226,7 +255,7 @@ class TestWaiters:
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
         state = CoordinationState(
             generation=1,
-            activation=ActivationInfo(in_progress=True, owner_pid=os.getpid(), status="loading"),
+            activation=ActivationInfo(in_progress=True, status="loading"),
             waiters=[
                 WaiterInfo(
                     pid=123,
@@ -248,13 +277,14 @@ class TestWaiters:
         assert loaded.activation.status == "success"
         assert loaded.waiters == []
 
-    def test_state_lock_wait_is_not_user_visible(self, tmp_path, capsys):
+    def test_state_lock_zero_wait_fails_without_user_visible_wait(self, tmp_path, capsys):
         paths = KeychainPaths(keydir=tmp_path, host="box")
-        paths.state_lockf.write_text(f"{socket.gethostname()}:{os.getpid()}", encoding="utf-8")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=0, out=_visible_out())
 
-        with coord.state_lock() as lock:
-            assert lock.acquired is True
+        with LockFile(paths.state_lockf, no_lock=False, wait=1, out=_out()):
+            with pytest.raises(KeychainError, match="could not acquire lock"):
+                with coord.state_lock():
+                    pytest.fail("live state lock must not be stolen")
 
         assert "Waiting" not in capsys.readouterr().err
 
@@ -271,8 +301,6 @@ class TestWaiters:
                 generation=1,
                 activation=ActivationInfo(
                     in_progress=True,
-                    owner_pid=os.getpid(),
-                    owner_host=socket.gethostname(),
                     cancel_endpoint=str(cancel.fifo_path),
                 ),
             )
@@ -289,7 +317,9 @@ class TestWaiters:
 
             thread = threading.Thread(target=owner_side_cancel)
             thread.start()
-            msg = coord.request_takeover(waiter, timeout=1.0)
+            with coord.activation_lock() as owner:
+                assert owner.acquired
+                msg = coord.request_takeover(waiter, timeout=1.0)
             thread.join(timeout=1.0)
 
             assert msg["status"] == "canceled"
@@ -310,8 +340,6 @@ class TestWaiters:
                 generation=1,
                 activation=ActivationInfo(
                     in_progress=True,
-                    owner_pid=os.getpid(),
-                    owner_host=socket.gethostname(),
                     cancel_endpoint=str(cancel.fifo_path),
                 ),
             )
@@ -329,7 +357,9 @@ class TestWaiters:
 
             monkeypatch.setattr(WaiterEndpoint, "wait_for_message", miss_notification)
 
-            msg = coord.request_takeover(waiter, timeout=1.0)
+            with coord.activation_lock() as owner:
+                assert owner.acquired
+                msg = coord.request_takeover(waiter, timeout=1.0)
 
             assert msg["status"] == "canceled"
             assert msg["generation"] == 2
@@ -337,31 +367,56 @@ class TestWaiters:
             waiter.cleanup()
             cancel.cleanup()
 
-    def test_activation_owner_records_successful_child(self, tmp_path):
+    def test_activation_owner_records_minimal_activation_state(self, tmp_path):
         paths = KeychainPaths(keydir=tmp_path, host="box")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
-        owner = ActivationOwner(coord, None, ["id_ed25519"], _out(), heartbeat_interval=0.01)
+        owner = ActivationOwner(coord, None, ["id_ed25519"], _out())
 
-        status = owner.run_ssh_add([sys.executable, "-c", ""], os.environ.copy())
+        status = owner.run_ssh_add([[sys.executable, "-c", ""]], os.environ.copy())
 
         state = coord.load_state()
         assert status == "success"
-        assert state.activation.ssh_add_pid is not None
+        assert state.activation.in_progress is True
+        assert state.activation.requested_keys == ["id_ed25519"]
+        assert set(state.activation.to_dict()) == {"in_progress", "cancel_endpoint", "status", "requested_keys"}
 
     @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO support required")
-    def test_activation_owner_cancel_notifies_waiter(self, tmp_path):
+    def test_activation_owner_cancel_notifies_waiter_during_second_child(self, tmp_path, monkeypatch):
         paths = KeychainPaths(keydir=tmp_path, host="box")
         coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
         waiter = coord.create_waiter()
         assert waiter is not None
         result: dict[str, str] = {}
         child_pid: list[int] = []
+        marker = tmp_path / "second-child"
+        owner = ActivationOwner(coord, None, ["id_ed25519"], _out())
+        listener_starts = 0
+        start_cancel_thread = owner._start_cancel_thread
+
+        def count_listener_start():
+            nonlocal listener_starts
+            listener_starts += 1
+            start_cancel_thread()
+
+        monkeypatch.setattr(owner, "_start_cancel_thread", count_listener_start)
 
         def owner_side():
-            owner = ActivationOwner(coord, None, ["id_ed25519"], _out(), heartbeat_interval=0.01)
-            status = owner.run_ssh_add([sys.executable, "-c", "import time; time.sleep(30)"], os.environ.copy())
-            result["status"] = status
-            coord.finish_activation(status)
+            with coord.activation_lock() as activation_lock:
+                assert activation_lock.acquired
+                status = owner.run_ssh_add(
+                    [
+                        [sys.executable, "-c", ""],
+                        [
+                            sys.executable,
+                            "-c",
+                            f"from pathlib import Path; Path({str(marker)!r}).touch(); "
+                            "import time; time.sleep(30)",
+                        ],
+                    ],
+                    os.environ.copy(),
+                )
+                result["status"] = status
+                coord.finish_activation(status)
 
         try:
             thread = threading.Thread(target=owner_side)
@@ -370,8 +425,8 @@ class TestWaiters:
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 state = coord.load_state()
-                if state.activation.cancel_endpoint and state.activation.ssh_add_pid:
-                    child_pid.append(state.activation.ssh_add_pid)
+                if state.activation.cancel_endpoint and marker.exists() and owner.proc is not None:
+                    child_pid.append(owner.proc.pid)
                     with coord.state_lock():
                         state = coord.load_state()
                         coord.register_waiter(state, waiter, ["id_ed25519"])
@@ -388,15 +443,52 @@ class TestWaiters:
             assert result == {"status": "canceled"}
             assert not thread.is_alive()
             assert child_pid and not pid_alive(child_pid[0])
+            assert listener_starts == 1
         finally:
             waiter.cleanup()
 
 
 class TestKeychainAppCoordination:
+    def test_signal_finalizes_state_before_releasing_activation_lock(self, tmp_path, monkeypatch):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        coord = ActivationCoordinator(paths, no_lock=False, lockwait=1, out=_out())
+        app = main.KeychainApp(RuntimeConfig.resolve(["add"]), _out())
+        signals = tuple(sig for sig in (getattr(signal, "SIGHUP", None), signal.SIGINT, signal.SIGTERM) if sig is not None)
+        originals = {sig: object() for sig in signals}
+        installed = dict(originals)
+
+        def fake_signal(sig, handler):
+            previous = installed.get(sig, object())
+            installed[sig] = handler
+            return previous
+
+        def interrupt(*_args):
+            installed[signal.SIGTERM](signal.SIGTERM, None)
+
+        lock_was_held: list[bool] = []
+        finish_activation = coord.finish_activation
+
+        def finish_while_locked(status):
+            with ActivationLock(paths.activation_lockf, no_lock=False, out=_out()) as contender:
+                lock_was_held.append(not contender.acquired)
+            finish_activation(status)
+
+        monkeypatch.setattr(main.signal, "signal", fake_signal)
+        monkeypatch.setattr(app, "_wipe_before_activation", interrupt)
+        monkeypatch.setattr(coord, "finish_activation", finish_while_locked)
+
+        with pytest.raises(SystemExit):
+            app._try_activation(coord, None, main._MissingKeys(), False)
+
+        assert lock_was_held == [True]
+        assert installed == originals
+        with ActivationLock(paths.activation_lockf, no_lock=False, out=_out()) as contender:
+            assert contender.acquired is True
+
     def test_direct_activation_uses_new_activation_lock_not_legacy_lock(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ActivationCoordinator, "create_waiter", lambda self: None)
         paths = KeychainPaths(keydir=tmp_path, host="box")
-        loaded: list[tuple[list[str], dict[str, str]]] = []
+        loaded: list[tuple[list[list[str]], dict[str, str]]] = []
 
         class _Owner:
             def __init__(self, _coord, _waiter, requested_keys, _out):
@@ -420,7 +512,7 @@ class TestKeychainAppCoordination:
             def prepare_load(self, missing, pkcs11=None, *, announce=True):
                 assert pkcs11 == []
                 assert announce is True
-                return SshAddPlan(["ssh-add", *missing], {"SSH_AUTH_SOCK": self.env.sock})
+                return SshAddPlan([["ssh-add", *missing]], {"SSH_AUTH_SOCK": self.env.sock})
 
             def wipe(self):
                 raise AssertionError("wipe should not run")
@@ -442,10 +534,10 @@ class TestKeychainAppCoordination:
 
         assert app._do_add(["id_ed25519"], [], [], [], [], [], False, False) == 0
 
-        assert loaded == [(["ssh-add", "id_ed25519"], {"SSH_AUTH_SOCK": "/tmp/agent.sock"})]
+        assert loaded == [([["ssh-add", "id_ed25519"]], {"SSH_AUTH_SOCK": "/tmp/agent.sock"})]
         assert not paths.lockf.exists()
-        assert not paths.activation_lockf.exists()
-        assert not paths.state_lockf.exists()
+        assert paths.activation_lockf.exists()
+        assert paths.state_lockf.exists()
         state_data = json.loads(paths.state_file.read_text(encoding="utf-8"))
         assert state_data["generation"] == 1
         assert state_data["activation"]["status"] == "success"
@@ -455,7 +547,7 @@ class TestKeychainAppCoordination:
         paths = KeychainPaths(keydir=tmp_path, host="box")
         remote_done = False
         wait_modes: list[bool] = []
-        owner_calls: list[list[str]] = []
+        owner_calls: list[list[list[str]]] = []
 
         monkeypatch.setattr(ActivationCoordinator, "can_prompt", lambda self: True)
 
@@ -498,7 +590,7 @@ class TestKeychainAppCoordination:
             def prepare_load(self, missing, pkcs11=None, *, announce=True):
                 assert pkcs11 == []
                 assert announce is False
-                return SshAddPlan(["ssh-add", *missing], {"SSH_AUTH_SOCK": self.env.sock})
+                return SshAddPlan([["ssh-add", *missing]], {"SSH_AUTH_SOCK": self.env.sock})
 
             def wipe(self):
                 raise AssertionError("wipe should not run")
@@ -515,8 +607,40 @@ class TestKeychainAppCoordination:
 
         assert app._do_add(["id_ed25519"], [], [], [], [], [], False, False) == 0
 
-        assert owner_calls == [["ssh-add", "id_ed25519"]]
+        assert owner_calls == [[["ssh-add", "id_ed25519"]]]
         assert wait_modes == [False]
         err = capsys.readouterr().err
         assert "Key initialization is still needed" not in err
         assert "Keys initialized by another terminal." in err
+
+    def test_gpga_proves_decryption_even_when_signing_is_warm(self):
+        calls: list[tuple[str, list[str]]] = []
+
+        class _SSH:
+            def list_missing(self, keys, *, announce_known=True):
+                return list(keys)
+
+            def list_missing_pkcs11(self, providers, *, announce_known=True):
+                return list(providers)
+
+        class _GPG:
+            def list_missing(self, keys, *, mode="--sign", announce_known=True):
+                return []
+
+            def load(self, keys, mode="--sign"):
+                calls.append((mode, list(keys)))
+                return True
+
+            def load_decryption(self, keys):
+                calls.append(("decrypt", list(keys)))
+                return True
+
+        args = RuntimeConfig.resolve(["add"])
+        app = main.KeychainApp(args, _out())
+        app._kstate = SimpleNamespace(ssh=_SSH(), gpg=_GPG())
+
+        missing = app._missing_keys([], [], [], [], ["GPGKEY"], [])
+        app._load_gpg_missing_keys(missing)
+
+        assert missing.gpg_a == ["GPGKEY"]
+        assert calls == [("--sign", ["GPGKEY"]), ("decrypt", ["GPGKEY"])]

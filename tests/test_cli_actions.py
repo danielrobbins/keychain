@@ -35,7 +35,7 @@ class TestResolveAction:
         seen: list[str] = []
 
         class _Paths:
-            def verify_keydir(self, _user, _out):
+            def ensure_keydir(self):
                 return None
 
         class _SSH:
@@ -110,7 +110,7 @@ class TestResolveAction:
         removed: list[list[str]] = []
 
         class _Paths:
-            def verify_keydir(self, _user, _out):
+            def ensure_keydir(self):
                 return None
 
         class _SSH:
@@ -137,7 +137,7 @@ class TestResolveAction:
         ns = RuntimeConfig.resolve(["forget", "gpgk:ABCD1234"])
 
         class _Paths:
-            def verify_keydir(self, _user, _out):
+            def ensure_keydir(self):
                 return None
 
         class _SSH:
@@ -175,7 +175,7 @@ class TestResolveAction:
         ns = RuntimeConfig.resolve(["add", "ghost-key"])
 
         class _Paths:
-            def verify_keydir(self, _user, _out):
+            def ensure_keydir(self):
                 return None
 
         class _State:
@@ -199,7 +199,7 @@ class TestResolveAction:
         ns = RuntimeConfig.resolve(["add", "pkcs11:/usr/lib/pkcs11/opensc-pkcs11.so"])
 
         class _Paths:
-            def verify_keydir(self, _user, _out):
+            def ensure_keydir(self):
                 return None
 
         class _State:

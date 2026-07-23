@@ -64,6 +64,8 @@ Changes since `3.0.0_beta3`:
   `WAYLAND_DISPLAY`, and `SSH_ASKPASS_REQUIRE=force` rules.
 - Improved GPG decrypt warm-up portability by avoiding `/dev/null` as the
   temporary encrypted payload.
+- Replaced PID-based stale-lock reclamation with operating-system advisory
+  locks that are released automatically when an owning process exits.
 - Expanded end-to-end SSH confirmation and agent startup coverage.
 
 When upgrading on macOS, an already-running managed `ssh-agent` cannot acquire

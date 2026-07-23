@@ -228,3 +228,47 @@ def test_gpge_warms_encryption_subkey_for_decryption(gpg_home) -> None:
     passfile.unlink()
     _assert_ok(_gpg(env, "--batch", "--yes", "--decrypt", "-o", str(out), str(cipher), timeout=15))
     assert out.read_text(encoding="utf-8") == "plaintext\n"
+
+
+def test_gpga_rejects_signing_only_key_after_signing_is_warm(gpg_home) -> None:
+    env, _home, passfile, _pinentry_log = gpg_home
+    _assert_ok(
+        _gpg(
+            env,
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase-file",
+            str(passfile),
+            "--quick-generate-key",
+            "Keychain Signing Test <keychain@example.invalid>",
+            "rsa2048",
+            "sign",
+            "0",
+        )
+    )
+    fingerprint = _fingerprint(env)
+    _assert_ok(
+        _gpg(
+            env,
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase-file",
+            str(passfile),
+            "--no-options",
+            "--sign",
+            "--local-user",
+            fingerprint,
+            "-o-",
+        )
+    )
+
+    keychain = _run(
+        [sys.executable, "-m", "keychain", "--no-color", "--quiet", "add", f"gpga:{fingerprint}"],
+        env,
+        timeout=60,
+    )
+
+    assert keychain.returncode != 0
+    assert "Unable to add GPG encryption keys" in keychain.stderr

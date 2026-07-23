@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 from dataclasses import dataclass
@@ -1116,7 +1117,7 @@ def _render_explain_panels(panels: list[ExplainPanelSpec], out, box_inner: int) 
     )
 
 
-def _pager_command() -> str | None:
+def _pager_command() -> list[str] | None:
     """Return a pager command if stdout is a TTY and not piped.
 
     Checks ``$PAGER`` first, then falls back to ``less -R`` (ANSI passthrough),
@@ -1127,11 +1128,14 @@ def _pager_command() -> str | None:
         return None
     env_pager = os.environ.get("PAGER")
     if env_pager:
-        return env_pager
+        try:
+            return shlex.split(env_pager) or None
+        except ValueError:
+            return None
     if shutil.which("less"):
-        return "less -R"
+        return ["less", "-R"]
     if shutil.which("more"):
-        return "more"
+        return ["more"]
     return None
 
 
@@ -1143,7 +1147,11 @@ def _run_pager(text: str) -> None:
         return
     import subprocess
 
-    proc = subprocess.Popen(pager.split(), stdin=subprocess.PIPE, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
+    try:
+        proc = subprocess.Popen(pager, stdin=subprocess.PIPE, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
+    except OSError:
+        sys.stdout.write(text)
+        return
     proc.communicate(input=text.encode("utf-8"))
 
 

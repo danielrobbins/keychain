@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
-import stat
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..state import KeychainState
-from ..util import Output, get_owner
+from ..util import Output
+
+if TYPE_CHECKING:
+    from ..state import KeychainState
 
 
 def _format_kv_rows(rows: list, out: Output) -> list[str]:
@@ -53,27 +53,6 @@ def _format_kv_rows(rows: list, out: Output) -> list[str]:
     return lines
 
 
-def _owner_row(label: str, path: Any, me: str) -> tuple[str, str, str, str]:
-    """Build a (label, value, hint, severity) row for a path's owner check."""
-    owner = get_owner(path)
-    if not owner:
-        return (label, "(unknown)", "", "")
-    if me and owner != me:
-        return (label, owner, f"owned by {owner}, not you ({me}); refusing to use this file", "warn")
-    return (label, owner, "(you)", "")
-
-
-def _mode_row(label: str, path: Any, lax_hint: str) -> tuple[str, str, str, str]:
-    """Build a (label, value, hint, severity) row for a path's permission bits."""
-    try:
-        mode = stat.S_IMODE(os.stat(str(path)).st_mode)
-    except OSError:
-        return (label, "(unreadable)", "", "")
-    octal = f"0{mode:o}"
-    hint = lax_hint if mode & (stat.S_IRWXG | stat.S_IRWXO) else ""
-    return (label, octal, hint, "warn" if hint else "")
-
-
 def render_inspect(state: KeychainState, out: Output) -> None:
     """Print a structured snapshot of every probe in *state* to *out*."""
     from .tables import compose_columns, render_panel, render_table
@@ -114,8 +93,8 @@ def render_inspect(state: KeychainState, out: Output) -> None:
     sections.append(("Keychain Directory", keyd_rows))
 
     perms_rows: list[tuple] = []
-    for lbl, val, hint, sev in state.security_audit:
-        perms_rows.append((lbl.replace("_", " "), val, hint, sev))
+    for check in state.security_audit:
+        perms_rows.append((check.label.replace("_", " "), check.value, check.hint, check.severity))
     sections.append(("Permissions", perms_rows))
 
     pidf_rows: list[tuple] = [
@@ -183,14 +162,14 @@ def render_inspect(state: KeychainState, out: Output) -> None:
 
     out.line()
     seen: set[tuple[str, str]] = set()
-    for _lbl, _val, hint, sev in state.security_audit:
-        if not hint or (sev, hint) in seen:
+    for check in state.security_audit:
+        if not check.hint or (check.severity, check.hint) in seen:
             continue
-        seen.add((sev, hint))
-        if sev == "warn":
-            out.warn(hint)
-        elif sev == "err":
-            out.error(hint)
+        seen.add((check.severity, check.hint))
+        if check.severity == "warn":
+            out.warn(check.hint)
+        elif check.severity == "err":
+            out.error(check.hint)
     out.line()
 
 
@@ -247,7 +226,7 @@ def render_inspect_json(state: KeychainState) -> None:
             "keydir_writable": state.keydir_writable if state.keydir_exists else False,
             "keydir_lax_perms": state.keydir_lax_perms if state.keydir_exists else False,
             "audit": [
-                {"label": label, "value": value, "hint": hint} for label, value, hint, _sev in state.security_audit
+                {"label": check.label, "value": check.value, "hint": check.hint} for check in state.security_audit
             ],
         },
     }
