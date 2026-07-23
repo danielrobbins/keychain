@@ -267,10 +267,10 @@ class TestOutputFormatOptions:
         ns = RuntimeConfig.resolve(["inspect", "--json"])
         assert ns.get_value("json") is True
 
-    def test_theme_flag_default_is_none(self, monkeypatch, tmp_path):
+    def test_theme_flag_uses_authored_default(self, monkeypatch, tmp_path):
         monkeypatch.setenv("KEYCHAIN_CONFIG", str(tmp_path / "missing.conf"))
         ns = RuntimeConfig.resolve(["version"])
-        assert ns.get_value("theme") is None
+        assert ns.get_value("theme") == "modern"
 
     def test_theme_flag_carries_value(self):
         ns = RuntimeConfig.resolve(["version", "--theme", "modern"])

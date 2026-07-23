@@ -239,9 +239,14 @@ Print `SSH_AUTH_SOCK` and `SSH_AGENT_PID` from the best available source
 
 Run every state probe keychain would run during a real `add` (host detection,
 paths, perms, env-file, agent reachability, key list, extkey expansion, ...) and
-present all settings related to the internal runtime, in easy-to-read topical
-boxes. This is an excellent troubleshooting aid. Use with `--json` to generate
-JSON output suitable for state dumps.
+present the internal runtime in easy-to-read topical boxes. Runtime identity,
+the parsed `~/.keychainrc`, effective preferences and their sources, and the
+presence of Keychain-relevant environment variables are included. Environment
+reporting is restricted to a diagnostic allowlist; unrelated variables and
+literal configuration-file contents are never exposed. Use with `--json` to
+generate a complete machine-readable state dump suitable for bug reports. The
+versioned JSON schema groups diagnostics under `runtime`, `configuration`,
+`keychain_state`, `agent_state`, and `keys`.
 
 == @action version: Print version banner.
 
@@ -521,7 +526,8 @@ Print the version banner and exit. `-V` is an alias.
 
 == @global quiet: suppress non-error output on stderr
 
-Silence informational messages on stderr. Errors are still printed.
+Silence informational messages on stderr. Explicit command results, required
+interactive prompts and errors are still printed.
 
 == @global debug: trace agent-selection decisions on stderr
 

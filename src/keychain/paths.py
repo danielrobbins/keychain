@@ -68,9 +68,19 @@ class Pidfile:
 @dataclass(frozen=True)
 class SecurityCheck:
     label: str
-    value: str
-    hint: str = ""
+    path: Path
+    owner: str = ""
+    mode: str | None = None
+    message: str = ""
     severity: str = ""
+
+    @property
+    def summary(self) -> str:
+        return " / ".join(part for part in (self.owner or "(unknown)", self.mode) if part)
+
+    @property
+    def status(self) -> str:
+        return {"warn": "warning", "err": "error"}.get(self.severity, "ok")
 
 
 class ShPidfile(Pidfile):
@@ -311,43 +321,36 @@ class KeychainPaths:
         for label, path, check_mode in paths:
             if not path.exists():
                 continue
-            if label == "keydir" and not path.is_dir():
-                checks.append(SecurityCheck("keydir_type", "file", f"{path} is a file, not a directory.", "err"))
-                continue
             owner = get_owner(path)
-            if owner and owner != me:
-                checks.append(
-                    SecurityCheck(
-                        f"{label}_owner",
-                        owner,
-                        f"{path} is owned by {owner}, not {me}; refusing to use it.",
-                        "err",
-                    )
-                )
-            else:
-                checks.append(SecurityCheck(f"{label}_owner", owner or "(unknown)", "(you)" if owner else ""))
-            if not check_mode:
-                continue
-            try:
-                mode = stat.S_IMODE(os.stat(path).st_mode)
-            except OSError:
-                checks.append(SecurityCheck(f"{label}_perms", "(unreadable)", f"Cannot inspect {path}.", "err"))
-                continue
-            unsafe = bool(owner and lax_perms(path))
-            checks.append(
-                SecurityCheck(
-                    f"{label}_perms",
-                    f"0{mode:o}",
-                    lax_perm_warning(self.keydir) if unsafe else "",
-                    "err" if unsafe else "",
-                )
-            )
+            mode: str | None = None
+            mode_error = ""
+            if check_mode:
+                try:
+                    mode = f"0{stat.S_IMODE(os.stat(path).st_mode):o}"
+                except OSError:
+                    mode_error = f"Cannot inspect {path}."
+
+            message = ""
+            severity = ""
+            if label == "keydir" and not path.is_dir():
+                message = f"{path} is a file, not a directory."
+                severity = "err"
+            elif owner and owner != me:
+                message = f"{path} is owned by {owner}, not {me}; refusing to use it."
+                severity = "err"
+            elif mode_error:
+                message = mode_error
+                severity = "err"
+            elif check_mode and owner and lax_perms(path):
+                message = lax_perm_warning(self.keydir)
+                severity = "err"
+            checks.append(SecurityCheck(label, path, owner, mode, message, severity))
         return checks
 
     def check_runtime_perms(self, me: str) -> None:
         for check in self.security_audit(me):
             if check.severity == "err":
-                raise KeychainError(check.hint)
+                raise KeychainError(check.message)
 
 
 def _expand_home(path: str) -> Path:

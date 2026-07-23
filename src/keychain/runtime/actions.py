@@ -109,7 +109,8 @@ class Option(Element):
     metavar: str | None = None  # display name for the value in usage output
     argparse_action: str | None = None  # explicit argparse action= override (e.g. "store_true", "append")
     exclusive_group: str | None = None  # bucket key for add_mutually_exclusive_group()
-    env: str | None = None  # environment variable to set when option is specified
+    env: str | None = None  # environment variable binding for this option
+    env_presence: str | None = None  # environment variable whose presence enables this option
     config_section: str | None = None  # INI section name for config file binding
     config_key: str | None = None  # INI key override; defaults to name if omitted
     examples: tuple[tuple[str, str], ...] = ()  # (description, command) pairs for docs
@@ -267,31 +268,34 @@ class Option(Element):
                 return None
         return raw.strip()
 
-    def resolve_value(self, rc_data: dict[str, dict[str, str]], environ: dict[str, str]) -> Any:
-        """O(1) Dynamic Lookup respecting the config hierarchy."""
-
-        # 1. CLI (Highest Priority)
+    def resolution(
+        self, rc_data: dict[str, dict[str, str]], environ: dict[str, str]
+    ) -> tuple[Any, str]:
+        """Return the effective value and its source."""
         if self._cli_value is not UNSET:
-            return self._cli_value
+            return self._cli_value, "command_line"
 
-        # 2. Environment Variables
+        if self.env_presence and self.env_presence in environ:
+            return True, "environment"
         if self.env and self.env in environ:
-            return self._coerce(environ[self.env])
+            return self._coerce(environ[self.env]), "environment"
 
-        # 3. .keychainrc
         if self.config_section and rc_data:
             section = rc_data.get(self.config_section, {})
             effective_key = self.config_key or self.varname
             if effective_key in section:
                 value = self._coerce(section[effective_key])
                 if self.config_invert_bool and self.type == "bool":
-                    return not bool(value)
-                return value
+                    value = not bool(value)
+                return value, "keychainrc"
 
-        # 4. Fallback Default
         if self.default is not None:
-            return self.default
-        return False if self.type == "bool" else None
+            return self.default, "default"
+        return (False if self.type == "bool" else None), "default"
+
+    def resolve_value(self, rc_data: dict[str, dict[str, str]], environ: dict[str, str]) -> Any:
+        """O(1) dynamic lookup respecting the config hierarchy."""
+        return self.resolution(rc_data, environ)[0]
 
     def reset_cli(self) -> None:
         """Reset the CLI-provided value, usually invoked before a compat fallback parse."""
@@ -517,12 +521,13 @@ ROOT_ACTION.add_option(option="--debug", cli_aliases=("-D",))
 ROOT_ACTION.add_option(
     option="--nocolor",
     cli_aliases=("--no-color",),
+    env_presence="NO_COLOR",
     config_section="output",
     config_key="color",
     config_invert_bool=True,
     config_doc_tag="config:output.color",
 )
-ROOT_ACTION.add_option(option="--theme", type="str", config_section="output")
+ROOT_ACTION.add_option(option="--theme", type="str", default="modern", config_section="output")
 ROOT_ACTION.add_option(
     option="--no-gui",
     cli_aliases=("--nogui",),
@@ -611,6 +616,7 @@ Option(option="--ssh-agent-socket", actions={cmd_add, agent_start}, type="str", 
 Option(
     varname="ssh_args",
     type="str",
+    env="KEYCHAIN_SSH_AGENT_ARGS",
     config_section="agent.env",
     config_doc_tag="config:agent.env.ssh_args",
     actions={cmd_add, agent_start},
@@ -618,6 +624,7 @@ Option(
 Option(
     varname="gpg_args",
     type="str",
+    env="KEYCHAIN_GPG_AGENT_ARGS",
     config_section="agent.env",
     config_doc_tag="config:agent.env.gpg_args",
     actions={cmd_add, agent_start},

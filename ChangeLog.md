@@ -57,6 +57,13 @@ betas. Highlights include:
 
 Changes since `3.0.0_beta3`:
 
+- Kept coordinated key-initialization prompts visible under `--quiet`, avoiding
+  an unexplained wait for Enter during shell startup (#223).
+- Expanded `inspect` with Keychain and Python runtime identity, parsed
+  configuration status, effective preference sources, and a privacy-safe view
+  of Keychain-relevant environment variables.
+- Consolidated ownership and permission checks into compact security records,
+  and organized `inspect --json` into a versioned diagnostic schema.
 - Converted command timeouts, malformed agent arguments, and operating-system
   failures into concise user errors instead of Python tracebacks (#224).
 - Added native macOS support for OpenSSH's per-use confirmation flow.

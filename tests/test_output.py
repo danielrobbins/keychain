@@ -195,6 +195,20 @@ def test_line_suppressed_under_quiet(capsys):
     assert capsys.readouterr().err == ""
 
 
+def test_result_bypasses_quiet(capsys):
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+    out.result("requested")
+    assert capsys.readouterr().err == "requested\n"
+
+
+def test_ephemeral_prompt_bypasses_quiet(monkeypatch, capsys):
+    monkeypatch.setattr(os, "isatty", lambda fd: False)
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+
+    assert out.ephemeral_line("Press Enter") is False
+    assert capsys.readouterr().err == "Press Enter\n"
+
+
 def test_ephemeral_line_uses_clearable_terminal_control(monkeypatch, capsys):
     monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
     monkeypatch.setattr(output_core.shutil, "get_terminal_size", lambda fallback: os.terminal_size((120, 24)))

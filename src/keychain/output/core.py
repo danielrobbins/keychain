@@ -539,18 +539,23 @@ class Output:
             return
         print(_stringify(msg), file=sys.stderr)
 
+    def result(self, msg: Renderable = "") -> None:
+        """Explicit command result on stderr. Never suppressed by quiet."""
+        if not self._silent:
+            print(_stringify(msg), file=sys.stderr)
+
     def ephemeral_line(self, msg: Renderable) -> bool:
         """Render a clearable stderr line for interactive prompts.
 
         Returns ``True`` when the line was emitted without a newline and can be
         cleared by :meth:`clear_ephemeral_line`. When terminal control is not
-        safe, falls back to :meth:`line` and returns ``False``.
+        safe, falls back to :meth:`result` and returns ``False``.
         """
-        if self._silent or self.quiet:
+        if self._silent:
             return False
         text = _stringify(msg)
         if not self._can_use_ephemeral_line(text):
-            self.line(text)
+            self.result(text)
             return False
         sys.stderr.write(f"\r\x1b[2K{text}")
         sys.stderr.flush()
@@ -558,7 +563,7 @@ class Output:
 
     def clear_ephemeral_line(self, *, after_input: bool = False) -> None:
         """Clear the last :meth:`ephemeral_line` prompt when terminal-safe."""
-        if self._silent or self.quiet or not self._terminal_control_enabled():
+        if self._silent or not self._terminal_control_enabled():
             return
         prefix = "\x1b[1A" if after_input else ""
         sys.stderr.write(f"{prefix}\r\x1b[2K")
@@ -604,10 +609,10 @@ class Output:
 
     def heading(self, title: Renderable) -> None:
         """Section heading: ``▌ Title`` (cyan bar + cyan label)."""
-        if self._silent or self.quiet:
+        if self._silent:
             return
-        self.line()
-        self.line(f" {self.glyph('bar')} {Span(_stringify(title), 'heading')}")
+        self.result()
+        self.result(f" {self.glyph('bar')} {Span(_stringify(title), 'heading')}")
 
     def banner(self, body: Renderable) -> None:
         """Single ``▌ body`` line (used by the version banner)."""
