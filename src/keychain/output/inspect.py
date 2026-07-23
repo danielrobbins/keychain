@@ -7,7 +7,7 @@ import json
 import shutil
 from typing import TYPE_CHECKING, Any
 
-from ..util import Output
+from .core import Output
 
 if TYPE_CHECKING:
     from ..state import KeychainState

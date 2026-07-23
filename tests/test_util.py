@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Tests for keychain.util: Output and LockFile."""
+"""Tests for keychain.util locking and process helpers."""
 
 import multiprocessing
 import os
@@ -10,7 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from keychain.util import KeychainError, LockFile, Output, pid_alive
+from keychain.output.core import Output
+from keychain.util import KeychainError, LockFile, pid_alive
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -29,90 +30,6 @@ def _acquire_lock_and_exit(path: str) -> None:
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
-
-
-class TestOutputBuild:
-    def test_no_color_clears_all_escapes(self):
-        out = _out()
-        for name in ("BLUE", "CYAN", "CYANN", "GREEN", "RED", "PURP", "YEL", "OFF"):
-            assert out.c(name) == ""
-
-    def test_color_populates_escapes(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True)
-        assert out.c("GREEN") != ""
-        assert out.c("OFF") != ""
-
-    def test_unknown_color_key_returns_empty(self):
-        out = _out()
-        assert out.c("NONEXISTENT") == ""
-
-    def test_quiet_suppresses_mesg(self, capsys):
-        _out(quiet=True).mesg("should not appear")
-        assert capsys.readouterr().err == ""
-
-    def test_not_quiet_emits_mesg(self, capsys):
-        _out(quiet=False).mesg("hello world")
-        assert "hello world" in capsys.readouterr().err
-
-    def test_warn_always_emits_even_when_quiet(self, capsys):
-        _out(quiet=True).warn("danger")
-        assert "danger" in capsys.readouterr().err
-
-    def test_note_suppressed_when_quiet(self, capsys):
-        _out(quiet=True).note("just a note")
-        assert capsys.readouterr().err == ""
-
-    def test_debug_off_suppresses_message(self, capsys):
-        _out(debug=False).debug("hidden")
-        assert "hidden" not in capsys.readouterr().err
-
-    def test_debug_on_emits_message(self, capsys):
-        _out(debug=True).debug("visible")
-        assert "visible" in capsys.readouterr().err
-
-
-class TestOutputTheming:
-    def test_default_theme_uses_modern_palette(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        monkeypatch.delenv("KEYCHAIN_THEME", raising=False)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True)
-        # Modern (the new default) uses 256-color escapes: \033[38;5;NNNm
-        assert "38;5;" in out.c("GREEN")
-        assert out.theme == "modern"
-
-    def test_modern_theme_uses_256_color_palette(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")
-        # Modern palette uses 256-color escapes: \033[38;5;NNNm
-        assert "38;5;" in out.c("GREEN")
-        assert out.theme == "modern"
-
-    def test_legacy_theme_uses_8_color_palette(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="legacy")
-        # Legacy palette uses bold 8-color green: \033[32;01m
-        assert "32;01" in out.c("GREEN")
-        assert out.theme == "legacy"
-
-    def test_explicit_theme_flag(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")
-        assert "38;5;" in out.c("GREEN")
-
-    def test_unknown_theme_falls_back_to_default(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="neon-burrito")
-        # Falls back to the modern (default) palette without raising.
-        assert "38;5;" in out.c("GREEN")
-
-    def test_json_forces_quiet_and_no_color(self, monkeypatch):
-        monkeypatch.setattr(os, "isatty", lambda fd: True)
-        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern", json=True)
-        assert out.json is True
-        assert out.quiet is True
-        # color is suppressed so JSON consumers never see ANSI escapes.
-        assert out.c("GREEN") == ""
 
 
 # ---------------------------------------------------------------------------

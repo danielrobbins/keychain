@@ -129,7 +129,9 @@ def gpg_home():
     pinentry_log.write_text("", encoding="utf-8")
     pinentry = root / "pinentry-test"
     _write_fake_pinentry(pinentry, passfile, pinentry_log)
-    gpg_wrapper = root / "gpg-wrapper"
+    wrapper_dir = root / "bin"
+    wrapper_dir.mkdir()
+    gpg_wrapper = wrapper_dir / "gpg"
     _write_gpg_wrapper(gpg_wrapper, passfile)
     (gnupg / "gpg-agent.conf").write_text(
         f"pinentry-program {pinentry}\n" "allow-loopback-pinentry\n" "default-cache-ttl 600\n" "max-cache-ttl 600\n",
@@ -141,8 +143,8 @@ def gpg_home():
         {
             "HOME": str(home),
             "GNUPGHOME": str(gnupg),
-            "GPG_BIN": str(gpg_wrapper),
             "GPG_TTY": "",
+            "PATH": str(wrapper_dir) + os.pathsep + env.get("PATH", ""),
             "PYTHONPATH": str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", ""),
         }
     )

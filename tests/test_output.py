@@ -8,13 +8,13 @@ criteria for the new surface. This file covers:
 * ``Span`` interpolation respects the active theme
 * ``Output.silent()`` swallows every emitter
 * role helpers return :class:`Span` instances tagged with the right role
-* legacy palette / glyph back-compat still works through ``out.c('CYANN')``
 """
 
 import os
 
 import pytest
 
+from keychain import util
 from keychain.output import core as output_core
 from keychain.output.core import (
     DEFAULT_THEME,
@@ -142,8 +142,8 @@ def test_note_glyph_uses_green_accent(monkeypatch):
     monkeypatch.setattr(os, "isatty", lambda fd: True)
     out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")
     glyph = out.glyph("note")
-    assert glyph.startswith(out.colors["GREEN"])
-    assert out.glyphs["note"] in glyph
+    assert glyph.startswith(THEMES["modern"].palette["GREEN"])
+    assert THEMES["modern"].glyphs["note"] in glyph
 
 
 # ---------------------------------------------------------------------------
@@ -243,14 +243,30 @@ def test_warn_suppressed_under_json(capsys):
     assert capsys.readouterr().err == ""
 
 
-# ---------------------------------------------------------------------------
-# Back-compat: out.c() still works for the deprecation window (step 6)
-# ---------------------------------------------------------------------------
+def test_quiet_and_debug_emitter_policy(capsys):
+    quiet = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+    quiet.info("hidden")
+    quiet.note("hidden")
+    quiet.warn("visible")
+    quiet.debug("hidden")
+
+    captured = capsys.readouterr().err
+    assert "visible" in captured
+    assert "hidden" not in captured
 
 
-def test_legacy_palette_accessor_still_works(monkeypatch):
-    monkeypatch.setattr(os, "isatty", lambda fd: True)
-    out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="legacy")
-    # Legacy palette name 'CYANN' is still resolvable via the deprecated
-    # out.c() shim so out-of-tree callers keep working.
-    assert out.c("CYANN") != ""
+def test_debug_emits_only_when_enabled(capsys):
+    Output.build(quiet=False, debug=False, eval_mode=False, color=False).debug("hidden")
+    Output.build(quiet=False, debug=True, eval_mode=False, color=False).debug("visible")
+
+    captured = capsys.readouterr().err
+    assert "visible" in captured
+    assert "hidden" not in captured
+
+
+def test_completed_migration_exposes_only_canonical_output_api():
+    out = Output.silent()
+
+    for old_name in ("c", "colors", "glyphs", "mesg", "qprint", "section", "banner_line"):
+        assert not hasattr(out, old_name)
+    assert not hasattr(util, "Output")

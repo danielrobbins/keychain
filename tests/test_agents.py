@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import socket
 import stat
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -13,12 +14,19 @@ import pytest
 from keychain import agents
 from keychain.agents import extract_fingerprints, findpids
 from keychain.env import SshAgentRef
+from keychain.output.core import Output
 from keychain.runtime import platform
-from keychain.util import Output
 
 
 def _out(theme: str | None = None):
     return Output.build(quiet=True, debug=False, eval_mode=False, color=False, theme=theme)
+
+
+def test_gpg_program_selection_ignores_unrelated_environment(monkeypatch):
+    monkeypatch.setenv("GPG_BIN", "/tmp/untrusted-gpg")
+
+    assert agents.choose_gpg_prog(False) == "gpg"
+    assert agents.choose_gpg_prog(True) == "gpg2"
 
 
 # ---------------------------------------------------------------------------
@@ -246,12 +254,17 @@ class TestSshAgentLoadOutput:
 class TestGpgAgentEnvironment:
     def _agent(self, *, no_gui: bool):
         env = {
+            "KEYCHAIN_TEST_MARKER": "preserved",
             "DISPLAY": ":0",
             "WAYLAND_DISPLAY": "wayland-0",
             "SSH_ASKPASS": "/tmp/askpass",
             "SSH_ASKPASS_REQUIRE": "force",
         }
-        state = SimpleNamespace(env=env, args=SimpleNamespace(get_value=lambda name: no_gui if name == "no_gui" else None))
+        state = SimpleNamespace(
+            env=env,
+            args=SimpleNamespace(get_value=lambda name: no_gui if name == "no_gui" else None),
+            gpg_prog="gpg",
+        )
         return agents.GpgAgent(state, Output.silent())
 
     def test_no_gui_removes_x11_wayland_and_askpass(self):
@@ -266,18 +279,54 @@ class TestGpgAgentEnvironment:
         assert env["DISPLAY"] == ":0"
         assert env["WAYLAND_DISPLAY"] == "wayland-0"
 
+    def test_missing_probe_uses_resolved_no_gui_environment(self, monkeypatch):
+        captured: list[dict[str, str]] = []
+
+        def fake_run(_cmd, **kwargs):
+            captured.append(kwargs["env"])
+            return SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        monkeypatch.setattr(agents, "run", fake_run)
+
+        assert self._agent(no_gui=True).list_missing(["KEY"]) == ["KEY"]
+        assert captured[0]["KEYCHAIN_TEST_MARKER"] == "preserved"
+        for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+            assert key not in captured[0]
+
+    def test_gpg_subprocess_helper_uses_resolved_tty_environment(self, monkeypatch):
+        captured: list[dict[str, str]] = []
+
+        def fake_run(_cmd, **kwargs):
+            captured.append(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(agents, "get_tty", lambda: "/dev/pts/test")
+
+        self._agent(no_gui=True)._run_gpg(["--version"], tty=True)
+
+        assert captured[0]["KEYCHAIN_TEST_MARKER"] == "preserved"
+        assert captured[0]["GPG_TTY"] == "/dev/pts/test"
+        for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
+            assert key not in captured[0]
+
 
 class TestGpgAgentWipe:
     def _agent(self, monkeypatch, returncode=1, stdout="", stderr="", debug=False):
         def fake_run(cmd, **kwargs):
             assert cmd == ["gpg-connect-agent", "--no-autostart"]
+            assert kwargs["env"] == {"KEYCHAIN_TEST_MARKER": "preserved"}
             assert kwargs["input_"] == "RELOADAGENT\n"
             assert kwargs["timeout"] == 5
             return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
         monkeypatch.setattr(agents, "run", fake_run)
         out = Output.build(quiet=False, debug=debug, eval_mode=False, color=False)
-        return agents.GpgAgent(SimpleNamespace(), out)
+        state = SimpleNamespace(
+            env={"KEYCHAIN_TEST_MARKER": "preserved"},
+            args=SimpleNamespace(get_value=lambda _name: False),
+        )
+        return agents.GpgAgent(state, out)
 
     def test_blank_failure_is_quiet_by_default(self, monkeypatch, capsys):
         """Verify a no-agent/no-output gpg wipe failure does not render a janky empty output detail."""
@@ -718,7 +767,6 @@ class TestAgentArgsPassthrough:
         from keychain import state
         from keychain.paths import KeychainPaths
         from keychain.runtime.config import RuntimeConfig
-        from keychain.util import Output
 
         args = RuntimeConfig.resolve(["add", "--no-inherit", "--no-gui"])
 
@@ -748,7 +796,6 @@ class TestAgentArgsPassthrough:
         from keychain import state
         from keychain.paths import KeychainPaths
         from keychain.runtime.config import RuntimeConfig
-        from keychain.util import Output
 
         cap = self._capture_run(monkeypatch)
         monkeypatch.setenv("KEYCHAIN_GPG_AGENT_ARGS", "--allow-preset-passphrase --debug-level=basic")

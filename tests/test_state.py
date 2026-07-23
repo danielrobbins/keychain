@@ -11,9 +11,9 @@ import pytest
 from keychain import agents, keys, state
 from keychain.env import SshAgentRef
 from keychain.output import inspect as inspect_view
+from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.runtime import platform
-from keychain.util import Output
 
 
 @contextmanager
