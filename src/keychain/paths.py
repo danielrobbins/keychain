@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import ClassVar
 
 from .env import SshAgentRef
+from .output.core import Output
 from .util import (
     KeychainError,
-    Output,
     get_owner,
     lax_perm_warning,
     lax_perms,

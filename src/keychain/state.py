@@ -24,12 +24,12 @@ from typing import Any
 
 from . import agents, keys
 from .env import SshAgentRef
+from .output.core import Output
 from .paths import KeychainPaths, SecurityCheck
 from .runtime.platform import Platform
 from .runtime.platform import detect as detect_platform
 from .util import (
     KeychainError,
-    Output,
     current_user,
     lax_perms,
     pid_alive,
@@ -195,7 +195,7 @@ class KeychainState:
 
     @cached_property
     def gpg_prog(self) -> str:
-        return agents.choose_gpg_prog(bool(self.args.get_value("gpg2")) if self.args is not None else False, self.env)
+        return agents.choose_gpg_prog(bool(self.args.get_value("gpg2")) if self.args is not None else False)
 
     @cached_property
     def gpg_version(self) -> str:

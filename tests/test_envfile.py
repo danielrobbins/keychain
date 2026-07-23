@@ -8,6 +8,7 @@ import json
 from keychain.agents import SocketValidation
 from keychain.env import SshAgentRef
 from keychain.main import main
+from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 
 # ---------------------------------------------------------------------------
@@ -21,8 +22,6 @@ class TestEnvFileWritten:
         assert p.pidfile_path("envfile") == tmp_path / "myhost-envfile"
 
     def test_write_emits_bare_envfile(self, tmp_path):
-        from keychain.util import Output
-
         p = KeychainPaths(keydir=tmp_path, host="myhost")
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         p.write(SshAgentRef("/tmp/agent.sock", "4242"), out)
@@ -32,8 +31,6 @@ class TestEnvFileWritten:
         assert content == "SSH_AUTH_SOCK=/tmp/agent.sock\nSSH_AGENT_PID=4242\n"
 
     def test_clear_removes_envfile(self, short_keydir):
-        from keychain.util import Output
-
         p = KeychainPaths(keydir=short_keydir, host="myhost")
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         p.write(SshAgentRef("/x"), out)

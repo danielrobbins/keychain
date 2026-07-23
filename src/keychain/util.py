@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Shared utilities: exceptions, output, locking, small POSIX helpers.
+"""Shared utilities: exceptions, locking, subprocesses, and POSIX helpers.
 
 Targets Python 3.9+ (RHEL 8 users opt in via ``dnf module install python39``).
 """
@@ -18,7 +18,10 @@ import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Union, cast
+from typing import TYPE_CHECKING, Any, Union, cast
+
+if TYPE_CHECKING:
+    from .output.core import Output
 
 if sys.platform == "win32":
     import msvcrt
@@ -43,33 +46,6 @@ PathLike = Union[str, "os.PathLike[str]"]
 
 class KeychainError(Exception):
     """Raised for user-visible fatal errors. Caught once in :func:`cli.main`."""
-
-
-# ---------------------------------------------------------------------------
-# Output / colors / themes -- moved to keychain.output. Re-exported here so
-# ``from keychain.util import Output`` keeps working through the deprecation
-# window. New code should import from ``keychain.output`` directly.
-# ---------------------------------------------------------------------------
-
-from .output.core import (  # noqa: E402,F401  (re-export for back-compat)
-    DEFAULT_THEME,
-    THEMES,
-    Output,
-    Span,
-    stderr_supports_unicode,
-)
-
-
-# Back-compat: docs/render.py imports ``resolve_theme`` and uses the
-# legacy-palette dict shape (``{'CYANN': '...', 'OFF': '...'}``). The new
-# :class:`~keychain.output.Theme` exposes that as ``Theme.palette``.
-def resolve_theme(name):  # type: ignore[no-untyped-def]
-    """Return the legacy palette dict for *name*; fall back to default."""
-    if name:
-        key = name.strip().lower()
-        if key in THEMES:
-            return dict(THEMES[key].palette)
-    return dict(THEMES[DEFAULT_THEME].palette)
 
 
 # ---------------------------------------------------------------------------

@@ -19,15 +19,15 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 
 from . import __version__, agents, keys, state
 from .coordination import ActivationCoordinator, ActivationOwner, WaiterEndpoint
 from .env import SshAgentRef
+from .output.core import Output
 from .runtime import platform
 from .runtime.actions import NO_BANNER_ACTIONS, OUTPUT_ACTIONS, ROOT_ACTION
 from .runtime.config import OptionError, RuntimeConfig
-from .util import KeychainError, Output
+from .util import KeychainError
 
 
 def _emit_eval_failure(enabled: bool) -> None:
@@ -36,23 +36,6 @@ def _emit_eval_failure(enabled: bool) -> None:
 
 
 _HELP_PROJECT_URL = "https://kernel-seeds.org/projects/keychain/"
-
-
-@dataclass
-class _MissingKeys:
-    ssh: list[str] = field(default_factory=list)
-    gpg: list[str] = field(default_factory=list)
-    gpg_s: list[str] = field(default_factory=list)
-    gpg_e: list[str] = field(default_factory=list)
-    gpg_a: list[str] = field(default_factory=list)
-    pkcs11: list[str] = field(default_factory=list)
-
-    @property
-    def any(self) -> bool:
-        return bool(self.ssh or self.gpg or self.gpg_s or self.gpg_e or self.gpg_a or self.pkcs11)
-
-    def labels(self) -> list[str]:
-        return [*self.ssh, *self.gpg, *self.gpg_s, *self.gpg_e, *self.gpg_a, *self.pkcs11]
 
 
 def banner(out: Output) -> None:
@@ -235,7 +218,7 @@ class KeychainApp:
     def _handle_agent_start_action(self) -> int:
         self._ensure_keydir()
         ssh_spawn_gpg, ssh_allow_gpg = self._agent_settings()
-        return self._do_add([], [], [], [], [], [], ssh_spawn_gpg, ssh_allow_gpg)
+        return self._do_add(keys.ResolvedKeys(), ssh_spawn_gpg, ssh_allow_gpg)
 
     def _handle_wipe_action(self) -> int:
         self._ensure_keydir()
@@ -278,16 +261,7 @@ class KeychainApp:
                 "Run 'keychain help add' for more information."
             )
         ssh_spawn_gpg, ssh_allow_gpg = self._agent_settings()
-        return self._do_add(
-            resolved.ssh,
-            resolved.gpg,
-            resolved.gpg_s,
-            resolved.gpg_e,
-            resolved.gpg_a,
-            resolved.pkcs11,
-            ssh_spawn_gpg,
-            ssh_allow_gpg,
-        )
+        return self._do_add(resolved, ssh_spawn_gpg, ssh_allow_gpg)
 
     # ---- Shared helpers -----------------------------------------------
 
@@ -311,12 +285,7 @@ class KeychainApp:
 
     def _do_add(
         self,
-        ssh_keys: list[str],
-        gpg_keys: list[str],
-        gpg_s_keys: list[str],
-        gpg_e_keys: list[str],
-        gpg_a_keys: list[str],
-        pkcs11_keys: list[str],
+        requested: keys.ResolvedKeys,
         ssh_spawn_gpg: bool,
         ssh_allow_gpg: bool,
     ) -> int:
@@ -331,21 +300,14 @@ class KeychainApp:
         wipe_pending = bool(self.args.get_value("clear"))
 
         with coord.state_lock():
-            quick_succeeded = self._prepare_agent_state(
-                gpg_keys,
-                gpg_s_keys,
-                gpg_e_keys,
-                gpg_a_keys,
-                ssh_spawn_gpg,
-                ssh_allow_gpg,
-            )
+            quick_succeeded = self._prepare_agent_state(requested, ssh_spawn_gpg, ssh_allow_gpg)
 
         if bool(self.args.get_value("noask")) or quick_succeeded:
             self.out.line()
             return 0
 
         with coord.state_lock():
-            missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys)
+            missing = self._missing_keys(requested)
 
         if not missing.any:
             self.out.line()
@@ -359,7 +321,7 @@ class KeychainApp:
 
         try:
             with coord.state_lock():
-                missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys)
+                missing = self._missing_keys(requested)
                 if not missing.any:
                     self.out.line()
                     return 0
@@ -383,15 +345,7 @@ class KeychainApp:
                 if wait_result.action == "notified":
                     handoff_wait = False
                     status = str(wait_result.message.get("status", ""))
-                    missing = self._missing_keys_after_notification(
-                        ssh_keys,
-                        gpg_keys,
-                        gpg_s_keys,
-                        gpg_e_keys,
-                        gpg_a_keys,
-                        pkcs11_keys,
-                        status=status,
-                    )
+                    missing = self._missing_keys_after_notification(requested, status=status)
                     if not missing.any:
                         self.out.info("Keys initialized by another terminal.")
                         self.out.line()
@@ -420,9 +374,7 @@ class KeychainApp:
                     handoff_wait = False
                     takeover = coord.request_takeover(waiter)
                     if takeover.get("status") in ("canceled", "inactive"):
-                        missing = self._missing_keys(
-                            ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys
-                        )
+                        missing = self._missing_keys(requested)
                         if not missing.any:
                             self.out.info("Keys initialized by another terminal.")
                             self.out.line()
@@ -439,7 +391,7 @@ class KeychainApp:
                 quiet_handoff_wait = handoff_wait
 
                 with coord.state_lock():
-                    missing = self._missing_keys(ssh_keys, gpg_keys, gpg_s_keys, gpg_e_keys, gpg_a_keys, pkcs11_keys)
+                    missing = self._missing_keys(requested)
                     if not missing.any:
                         self.out.info("Keys initialized by another terminal.")
                         self.out.line()
@@ -457,10 +409,7 @@ class KeychainApp:
 
     def _prepare_agent_state(
         self,
-        gpg_keys: list[str],
-        gpg_s_keys: list[str],
-        gpg_e_keys: list[str],
-        gpg_a_keys: list[str],
+        requested: keys.ResolvedKeys,
         ssh_spawn_gpg: bool,
         ssh_allow_gpg: bool,
     ) -> bool:
@@ -468,7 +417,7 @@ class KeychainApp:
 
         # gpg-agent is started separately when GPG keys are wanted and the
         # ssh-agent is *not* the gpg-agent itself (--ssh-spawn-gpg).
-        if (gpg_keys or gpg_s_keys or gpg_e_keys or gpg_a_keys) and not ssh_spawn_gpg:
+        if (requested.gpg or requested.gpg_s or requested.gpg_e or requested.gpg_a) and not ssh_spawn_gpg:
             gpg_env = self.kstate.gpg.start(ssh_support=False)
             if gpg_env and gpg_env.sock:
                 self.kstate.ssh.env = self.kstate.ssh.env.with_sock(gpg_env.sock)
@@ -483,56 +432,38 @@ class KeychainApp:
 
     def _missing_keys(
         self,
-        ssh_keys: list[str],
-        gpg_keys: list[str],
-        gpg_s_keys: list[str],
-        gpg_e_keys: list[str],
-        gpg_a_keys: list[str],
-        pkcs11_keys: list[str],
+        requested: keys.ResolvedKeys,
         *,
         announce_known: bool = True,
-    ) -> _MissingKeys:
-        return _MissingKeys(
-            ssh=self.kstate.ssh.list_missing(ssh_keys, announce_known=announce_known),
-            gpg=self.kstate.gpg.list_missing(gpg_keys, announce_known=announce_known) if gpg_keys else [],
-            gpg_s=self.kstate.gpg.list_missing(gpg_s_keys, mode="--sign", announce_known=announce_known)
-            if gpg_s_keys
+    ) -> keys.ResolvedKeys:
+        return keys.ResolvedKeys(
+            ssh=self.kstate.ssh.list_missing(requested.ssh, announce_known=announce_known),
+            gpg=self.kstate.gpg.list_missing(requested.gpg, announce_known=announce_known) if requested.gpg else [],
+            gpg_s=self.kstate.gpg.list_missing(requested.gpg_s, mode="--sign", announce_known=announce_known)
+            if requested.gpg_s
             else [],
-            gpg_e=list(gpg_e_keys),
-            gpg_a=list(gpg_a_keys),
-            pkcs11=self.kstate.ssh.list_missing_pkcs11(pkcs11_keys, announce_known=announce_known)
-            if pkcs11_keys
+            gpg_e=list(requested.gpg_e),
+            gpg_a=list(requested.gpg_a),
+            pkcs11=self.kstate.ssh.list_missing_pkcs11(requested.pkcs11, announce_known=announce_known)
+            if requested.pkcs11
             else [],
         )
 
     def _missing_keys_after_notification(
         self,
-        ssh_keys: list[str],
-        gpg_keys: list[str],
-        gpg_s_keys: list[str],
-        gpg_e_keys: list[str],
-        gpg_a_keys: list[str],
-        pkcs11_keys: list[str],
+        requested: keys.ResolvedKeys,
         *,
         status: str,
-    ) -> _MissingKeys:
+    ) -> keys.ResolvedKeys:
         attempts = 6 if status == "success" else 1
         for attempt in range(attempts):
-            missing = self._missing_keys(
-                ssh_keys,
-                gpg_keys,
-                gpg_s_keys,
-                gpg_e_keys,
-                gpg_a_keys,
-                pkcs11_keys,
-                announce_known=False,
-            )
+            missing = self._missing_keys(requested, announce_known=False)
             if not missing.any or attempt == attempts - 1:
                 return missing
             time.sleep(0.05)
         return missing
 
-    def _activate_direct(self, coord: ActivationCoordinator, missing: _MissingKeys, wipe_pending: bool) -> None:
+    def _activate_direct(self, coord: ActivationCoordinator, missing: keys.ResolvedKeys, wipe_pending: bool) -> None:
         deadline = time.monotonic() + coord.lockwait
         while True:
             if self._try_activation(coord, None, missing, wipe_pending) == "success":
@@ -545,7 +476,7 @@ class KeychainApp:
         self,
         coord: ActivationCoordinator,
         waiter: WaiterEndpoint | None,
-        missing: _MissingKeys,
+        missing: keys.ResolvedKeys,
         wipe_pending: bool,
     ) -> str:
         with coord.activation_lock() as activation:
@@ -580,13 +511,13 @@ class KeychainApp:
                     coord.finish_activation(status)
             return "success"
 
-    def _wipe_before_activation(self, missing: _MissingKeys, wipe_pending: bool) -> None:
+    def _wipe_before_activation(self, missing: keys.ResolvedKeys, wipe_pending: bool) -> None:
         if wipe_pending:
             self.kstate.ssh.wipe()
             if missing.gpg or missing.gpg_s or missing.gpg_e or missing.gpg_a:
                 self.kstate.gpg.wipe()
 
-    def _load_gpg_missing_keys(self, missing: _MissingKeys) -> None:
+    def _load_gpg_missing_keys(self, missing: keys.ResolvedKeys) -> None:
         if missing.gpg and not self.kstate.gpg.load(missing.gpg):
             raise KeychainError("Unable to add GPG keys")
         if missing.gpg_s and not self.kstate.gpg.load(missing.gpg_s, mode="--sign"):

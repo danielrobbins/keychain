@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .env import SshAgentRef
-from .util import KeychainError, Output, current_uid, get_tty, pid_alive, run, unlink_quiet
+from .output.core import Output
+from .util import KeychainError, current_uid, get_tty, pid_alive, run, unlink_quiet
 
 if TYPE_CHECKING:
     from .state import KeychainState
@@ -108,12 +109,8 @@ def gpg_has_ssh_support() -> bool:
     return "enable-ssh-support" in (r.stdout + r.stderr)
 
 
-def choose_gpg_prog(force_gpg2: bool, env: Mapping[str, str] | None = None) -> str:
+def choose_gpg_prog(force_gpg2: bool) -> str:
     """Decide which GnuPG binary to invoke."""
-    env = os.environ if env is None else env
-    bin_override = env.get("GPG_BIN")
-    if bin_override:
-        return bin_override
     return "gpg2" if force_gpg2 else "gpg"
 
 
@@ -723,7 +720,7 @@ class GpgAgent:
         return env
 
     def _run_gpg(
-        self, args: list[str], *, env: dict[str, str] | None = None, input_: str = "", timeout: int | None = None
+        self, args: list[str], *, tty: bool = False, input_: str = "", timeout: int | None = None
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [self.k.gpg_prog, *args],
@@ -732,7 +729,7 @@ class GpgAgent:
             text=True,
             encoding="utf-8",
             errors="replace",
-            env=self._gpg_env() if env is None else env,
+            env=self._gpg_env(tty=tty),
             timeout=timeout,
             check=False,
         )
@@ -748,16 +745,17 @@ class GpgAgent:
         manager with ``--homedir /var/tmp/zypp.XXX`` -- is ignored.
         """
         out = self.out
-        sock = gpg_main_socket(self.k.env)
-        if sock and gpg_socket_is_primary(sock, self.k.env) and ssh_socket_valid(sock):
+        run_env = self._gpg_env()
+        sock = gpg_main_socket(run_env)
+        if sock and gpg_socket_is_primary(sock, run_env) and ssh_socket_valid(sock):
             if not ssh_support:
                 out.info(f"Using existing gpg-agent: {out.id(sock)}")
                 return SshAgentRef()
-            ssh_sock = gpg_ssh_socket(self.k.env)
+            ssh_sock = gpg_ssh_socket(run_env)
             if ssh_sock and ssh_socket_valid(ssh_sock):
                 out.info(f"Using existing gpg-agent: {out.id(ssh_sock)} (SSH)")
                 return SshAgentRef(ssh_sock)
-        if sock and not gpg_socket_is_primary(sock, self.k.env):
+        if sock and not gpg_socket_is_primary(sock, run_env):
             out.debug(f"ignoring non-primary gpg-agent socket: {sock}")
         opts = ["--daemon"]
         timeout = self.k.args.get_value("timeout")
@@ -767,10 +765,10 @@ class GpgAgent:
         if ssh_support:
             opts.append("--enable-ssh-support")
         # User-supplied extra flags (issue #21). Last so they win on duplicates.
-        opts += shlex.split(self.k.env.get("KEYCHAIN_GPG_AGENT_ARGS", ""))
+        opts += shlex.split(run_env.get("KEYCHAIN_GPG_AGENT_ARGS", ""))
         out.info("Starting gpg-agent...")
         try:
-            r = run(["gpg-agent", "--sh"] + opts, env=self.k.env)
+            r = run(["gpg-agent", "--sh"] + opts, env=run_env)
         except (FileNotFoundError, OSError):
             return None
         return SshAgentRef.from_text(r.stdout) if r.returncode == 0 else None
@@ -779,7 +777,12 @@ class GpgAgent:
 
     def wipe(self) -> None:
         try:
-            r = run(["gpg-connect-agent", "--no-autostart"], input_="RELOADAGENT\n", timeout=5)
+            r = run(
+                ["gpg-connect-agent", "--no-autostart"],
+                env=self._gpg_env(),
+                input_="RELOADAGENT\n",
+                timeout=5,
+            )
         except FileNotFoundError:
             self.out.debug("gpg-agent wipe skipped: gpg-connect-agent not found")
             return
@@ -801,8 +804,7 @@ class GpgAgent:
     def list_missing(self, gpg_keys: list[str], mode: str = "--sign", *, announce_known: bool = True) -> list[str]:
         out = self.out
         missing: list[str] = []
-        tty = get_tty()
-        extra_env = {"GPG_TTY": tty} if tty else {}
+        run_env = self._gpg_env(tty=True)
         for k in filter(None, gpg_keys):
             try:
                 r = run(
@@ -818,7 +820,7 @@ class GpgAgent:
                         "-o-",
                     ],
                     input_="",
-                    env=extra_env,
+                    env=run_env,
                     timeout=10,
                 )
                 if r.returncode == 0:
@@ -832,7 +834,6 @@ class GpgAgent:
 
     def load(self, gpg_keys: list[str], mode: str = "--sign") -> bool:
         out = self.out
-        run_env = self._gpg_env(tty=True)
         for k in filter(None, gpg_keys):
             out.info(f"Adding gpg key: {k}")
             try:
@@ -846,7 +847,7 @@ class GpgAgent:
                         k,
                         "-o-",
                     ],
-                    env=run_env,
+                    tty=True,
                 )
             except (FileNotFoundError, OSError):
                 out.warn(f"{self.k.gpg_prog} not found")
@@ -859,7 +860,6 @@ class GpgAgent:
 
     def load_decryption(self, gpg_keys: list[str]) -> bool:
         out = self.out
-        run_env = self._gpg_env()
         with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
             plain = Path(td) / "plain"
             cipher = Path(td) / "cipher.gpg"
@@ -882,7 +882,7 @@ class GpgAgent:
                             str(cipher),
                             str(plain),
                         ],
-                        env=run_env,
+                        tty=True,
                         timeout=10,
                     )
                     dec = self._run_gpg(
@@ -896,7 +896,7 @@ class GpgAgent:
                             str(decrypted),
                             str(cipher),
                         ],
-                        env=run_env,
+                        tty=True,
                         timeout=30,
                     )
                 except (FileNotFoundError, OSError):

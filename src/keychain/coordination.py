@@ -25,8 +25,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .output.core import Output
 from .paths import KeychainPaths
-from .util import LockFile, Output, get_tty, unlink_quiet
+from .util import LockFile, get_tty, unlink_quiet
 
 
 def _json_load(path: Path) -> dict[str, Any]:

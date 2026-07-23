@@ -28,9 +28,10 @@ from keychain.coordination import (
     WaitResult,
 )
 from keychain.env import SshAgentRef
+from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.runtime.config import RuntimeConfig
-from keychain.util import KeychainError, LockFile, Output, pid_alive
+from keychain.util import KeychainError, LockFile, pid_alive
 
 
 def _out():
@@ -478,7 +479,7 @@ class TestKeychainAppCoordination:
         monkeypatch.setattr(coord, "finish_activation", finish_while_locked)
 
         with pytest.raises(SystemExit):
-            app._try_activation(coord, None, main._MissingKeys(), False)
+            app._try_activation(coord, None, main.keys.ResolvedKeys(), False)
 
         assert lock_was_held == [True]
         assert installed == originals
@@ -532,7 +533,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, out)
         app._kstate = kstate
 
-        assert app._do_add(["id_ed25519"], [], [], [], [], [], False, False) == 0
+        assert app._do_add(main.keys.ResolvedKeys(ssh=["id_ed25519"]), False, False) == 0
 
         assert loaded == [([["ssh-add", "id_ed25519"]], {"SSH_AUTH_SOCK": "/tmp/agent.sock"})]
         assert not paths.lockf.exists()
@@ -605,7 +606,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, _visible_out())
         app._kstate = kstate
 
-        assert app._do_add(["id_ed25519"], [], [], [], [], [], False, False) == 0
+        assert app._do_add(main.keys.ResolvedKeys(ssh=["id_ed25519"]), False, False) == 0
 
         assert owner_calls == [[["ssh-add", "id_ed25519"]]]
         assert wait_modes == [False]
@@ -639,7 +640,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, _out())
         app._kstate = SimpleNamespace(ssh=_SSH(), gpg=_GPG())
 
-        missing = app._missing_keys([], [], [], [], ["GPGKEY"], [])
+        missing = app._missing_keys(main.keys.ResolvedKeys(gpg_a=["GPGKEY"]))
         app._load_gpg_missing_keys(missing)
 
         assert missing.gpg_a == ["GPGKEY"]

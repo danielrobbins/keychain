@@ -11,8 +11,9 @@ from unittest.mock import patch
 import pytest
 
 from keychain.env import SshAgentRef
+from keychain.output.core import Output
 from keychain.paths import KeychainPaths
-from keychain.util import KeychainError, Output
+from keychain.util import KeychainError
 from tests.support import set_home
 
 

@@ -5,8 +5,9 @@ import pytest
 
 from keychain import main
 from keychain.main import KeychainApp
+from keychain.output.core import Output
 from keychain.runtime.config import RuntimeConfig
-from keychain.util import KeychainError, Output
+from keychain.util import KeychainError
 
 
 class TestParseArgsActions:

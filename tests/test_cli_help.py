@@ -7,8 +7,8 @@ import pytest
 
 from keychain import main
 from keychain.main import helpinfo
+from keychain.output.core import Output
 from keychain.runtime.config import RuntimeConfig
-from keychain.util import Output
 
 
 class TestHelpVersionOutput:

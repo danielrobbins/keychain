@@ -7,9 +7,8 @@ Three layers, smallest first:
   ``__str__`` looks up the active :class:`Theme` from a thread-local set
   by :meth:`Output.build` and renders the wrapped text with that theme's
   ANSI prefix and reset.
-* :class:`Theme` -- ``role -> ANSI prefix`` plus a glyph map plus a
-  legacy palette mapping (kept so older tests / ``out.c('CYANN')``
-  callers continue to work during the deprecation window).
+* :class:`Theme` -- ``role -> ANSI prefix`` plus a glyph map and its
+  internal palette.
 * :class:`Output` -- emitters (``info``/``warn``/``note``/``error``/
   ``debug``/``line``/``heading``/``banner``/``write``) plus role
   helpers (``id``/``path``/``value``/``flag``/``warn_text``/
@@ -49,6 +48,7 @@ ROLES: tuple[str, ...] = (
     "kbd",  # shell snippets in prose
     "doc_text",  # normal prose inside embedded docs
     "doc_code",  # inline `code` spans inside prose docs
+    "doc_block",  # fenced code blocks inside prose docs
     "doc_emph",  # emphasized *text* inside prose docs
     "underlined_heading",  # bold cyan + underline for action/option/config/section headings
 )
@@ -57,7 +57,7 @@ DEFAULT_THEME = "modern"
 
 
 # ---------------------------------------------------------------------------
-# Palettes (legacy palette names retained for back-compat ``out.c('CYANN')``)
+# Palettes
 # ---------------------------------------------------------------------------
 
 _LEGACY_PALETTE: dict[str, str] = {
@@ -111,6 +111,7 @@ def _roles_for(palette: Mapping[str, str]) -> dict[str, str]:
         "kbd": palette["CYANN"],
         "doc_text": palette["DOC"],
         "doc_code": palette["AMBER"],
+        "doc_block": palette["CYANN"],
         "doc_emph": palette["BOLD"],
         "underlined_heading": f"\x1b[1m\x1b[4m{palette['CYANN']}",
     }
@@ -318,10 +319,6 @@ class Output:
     theme: str = DEFAULT_THEME
     # Active Theme. Internal; call sites use role helpers / emitters.
     _theme: Theme = field(default=_NULL_THEME, repr=False)
-    # Back-compat: legacy palette dict for ``out.c('CYANN')`` callers.
-    colors: Mapping[str, str] = field(default_factory=lambda: _NO_ANSI)
-    # Back-compat: glyph map. Internal; new code uses ``out.glyph(role)``.
-    glyphs: Mapping[str, str] = field(default_factory=lambda: _GLYPHS_ASCII)
     # When True, every emitter (including warn/error) is a no-op.
     # Used by :meth:`silent` for state probes; not user-tunable.
     _silent: bool = field(default=False, repr=False)
@@ -369,8 +366,6 @@ class Output:
             json=json,
             theme=chosen,
             _theme=active,
-            colors=active.palette,
-            glyphs=active.glyphs,
         )
 
     @classmethod
@@ -386,29 +381,16 @@ class Output:
             json=False,
             theme=DEFAULT_THEME,
             _theme=_NULL_THEME,
-            colors=_NO_ANSI,
-            glyphs=_GLYPHS_ASCII,
             _silent=True,
         )
-
-    # ---- back-compat color accessor (deprecated) ----------------------
-    def c(self, name: str) -> str:
-        """Return the legacy palette ANSI prefix for *name* (e.g. 'CYANN').
-
-        Deprecated: new code should use role helpers (``out.id``,
-        ``out.value``, ``out.dim``, ...) instead. Kept so the test suite
-        and any out-of-tree callers keep working through the deprecation
-        window described in ``docs/output-api.md`` (step 6).
-        """
-        return self.colors.get(name, "")
 
     # ---- glyph accessor ------------------------------------------------
     def glyph(self, role: str) -> str:
         """Return *role*'s glyph wrapped in its theme color (or bare)."""
-        g = self.glyphs.get(role, "*")
+        g = self._theme.glyphs.get(role, "*")
         col = _GLYPH_COLOR.get(role, "")
-        if col and self.colors.get(col):
-            return f"{self.colors[col]}{g}{self.colors.get('OFF', '')}"
+        if col and self._theme.palette.get(col):
+            return f"{self._theme.palette[col]}{g}{self._theme.reset}"
         return g
 
     # ---- role helpers (Span constructors) -----------------------------
@@ -476,7 +458,7 @@ class Output:
         """
         if not text:
             return ""
-        if not self.colors.get("OFF"):
+        if not self._theme.palette.get("OFF"):
             return _strip_doc_inline(text)
 
         text_on = self._theme.roles.get("doc_text", "")
@@ -592,32 +574,32 @@ class Output:
         """Inline warning. Suppressed by json (and by silent())."""
         if self._silent or self.json:
             return
-        prefix = self.colors.get("YEL", "")
-        off = self.colors.get("OFF", "")
+        prefix = self._theme.palette.get("YEL", "")
+        off = self._theme.palette.get("OFF", "")
         print(f" {self.glyph('warn')} {prefix}Warning{off}: {_stringify(msg)}", file=sys.stderr)
 
     def note(self, msg: Renderable) -> None:
         """Notice (›). Suppressed by quiet / json."""
         if self._silent or self.quiet:
             return
-        prefix = self.colors.get("PURP", "")
-        off = self.colors.get("OFF", "")
+        prefix = self._theme.palette.get("PURP", "")
+        off = self._theme.palette.get("OFF", "")
         print(f" {self.glyph('note')} {prefix}Note{off}: {_stringify(msg)}", file=sys.stderr)
 
     def error(self, msg: Renderable) -> None:
         """Inline error. Suppressed by json (and by silent())."""
         if self._silent or self.json:
             return
-        prefix = self.colors.get("RED", "")
-        off = self.colors.get("OFF", "")
+        prefix = self._theme.palette.get("RED", "")
+        off = self._theme.palette.get("OFF", "")
         print(f" {self.glyph('err')} {prefix}Error{off}: {_stringify(msg)}", file=sys.stderr)
 
     def debug(self, msg: Renderable) -> None:
         """Debug trace. Suppressed unless ``debug_on`` and not json."""
         if self._silent or self.json or not self.debug_on:
             return
-        prefix = self.colors.get("DIM", "")
-        off = self.colors.get("OFF", "")
+        prefix = self._theme.palette.get("DIM", "")
+        off = self._theme.palette.get("OFF", "")
         print(f" {self.glyph('debug')} {prefix}{_stringify(msg)}{off}", file=sys.stderr)
 
     def heading(self, title: Renderable) -> None:
@@ -632,22 +614,6 @@ class Output:
         if self._silent or self.quiet:
             return
         self.line(f" {self.glyph('bar')} {_stringify(body)}")
-
-    # ---- deprecated emitter aliases ------------------------------------
-    # Old names kept so the existing test suite and out-of-tree callers
-    # continue to work for one release. Step 6 of the migration plan
-    # deletes these.
-    def mesg(self, msg: str) -> None:
-        self.info(msg)
-
-    def qprint(self, msg: str = "") -> None:
-        self.line(msg)
-
-    def section(self, title: str) -> None:
-        self.heading(title)
-
-    def banner_line(self, body: str) -> None:
-        self.banner(body)
 
     def _can_use_ephemeral_line(self, text: str) -> bool:
         if not self._terminal_control_enabled():

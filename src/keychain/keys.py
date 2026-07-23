@@ -3,21 +3,29 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .util import Output, dedupe_sorted, run
+from .output.core import Output
+from .util import dedupe_sorted, run
 
 
 @dataclass
 class ResolvedKeys:
-    ssh: list[str]
-    gpg: list[str]
-    gpg_s: list[str]
-    gpg_e: list[str]
-    gpg_a: list[str]
-    pkcs11: list[str]
-    missing: list[str]
+    ssh: list[str] = field(default_factory=list)
+    gpg: list[str] = field(default_factory=list)
+    gpg_s: list[str] = field(default_factory=list)
+    gpg_e: list[str] = field(default_factory=list)
+    gpg_a: list[str] = field(default_factory=list)
+    pkcs11: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
+
+    @property
+    def any(self) -> bool:
+        return bool(self.ssh or self.gpg or self.gpg_s or self.gpg_e or self.gpg_a or self.pkcs11)
+
+    def labels(self) -> list[str]:
+        return [*self.ssh, *self.gpg, *self.gpg_s, *self.gpg_e, *self.gpg_a, *self.pkcs11]
 
     def extend(self, other: ResolvedKeys) -> None:
         self.ssh.extend(other.ssh)
@@ -30,13 +38,13 @@ class ResolvedKeys:
 
     def deduped(self) -> ResolvedKeys:
         return ResolvedKeys(
-            dedupe_sorted(self.ssh),
-            dedupe_sorted(self.gpg),
-            dedupe_sorted(self.gpg_s),
-            dedupe_sorted(self.gpg_e),
-            dedupe_sorted(self.gpg_a),
-            dedupe_sorted(self.pkcs11),
-            dedupe_sorted(self.missing),
+            ssh=dedupe_sorted(self.ssh),
+            gpg=dedupe_sorted(self.gpg),
+            gpg_s=dedupe_sorted(self.gpg_s),
+            gpg_e=dedupe_sorted(self.gpg_e),
+            gpg_a=dedupe_sorted(self.gpg_a),
+            pkcs11=dedupe_sorted(self.pkcs11),
+            missing=dedupe_sorted(self.missing),
         )
 
 
@@ -50,7 +58,7 @@ def all_host_identities(out: Output) -> ResolvedKeys:
     config = Path.home() / ".ssh" / "config"
     if not config.is_file():
         out.warn("No ~/.ssh/config -- can't extract host identities")
-        return ResolvedKeys([], [], [], [], [], [], [])
+        return ResolvedKeys()
     hosts: set[str] = set()
     for line in config.read_text(encoding="utf-8", errors="replace").splitlines():
         s = line.strip()
@@ -60,7 +68,7 @@ def all_host_identities(out: Output) -> ResolvedKeys:
             # Skip negations and pure wildcards: ssh -G needs a concrete name.
             if not any(c in pat for c in "*?!"):
                 hosts.add(pat)
-    result = ResolvedKeys([], [], [], [], [], [], [])
+    result = ResolvedKeys()
     for h in sorted(hosts):
         result.extend(expand_host(h))
     return result
@@ -68,7 +76,7 @@ def all_host_identities(out: Output) -> ResolvedKeys:
 
 def _resolve_bare_keys(keys: list[str], gpg_prog: str, gpg_lookup: bool) -> ResolvedKeys:
     """Resolve plain command-line key names."""
-    result = ResolvedKeys([], [], [], [], [], [], [])
+    result = ResolvedKeys()
     home_ssh = Path.home() / ".ssh"
     for k in filter(None, keys):
         if Path(k).is_file():
@@ -103,7 +111,7 @@ def _add_ssh_key(result: ResolvedKeys, key: str) -> None:
 
 def keyf_expand(paths: list[str]) -> ResolvedKeys:
     """Resolve plain SSH key paths."""
-    result = ResolvedKeys([], [], [], [], [], [], [])
+    result = ResolvedKeys()
     for path in paths:
         _add_ssh_key(result, path)
     return result
@@ -114,7 +122,7 @@ def expand_host(hostname: str) -> ResolvedKeys:
     try:
         r = run(["ssh", "-nG", hostname], timeout=10)
     except (FileNotFoundError, OSError):
-        return ResolvedKeys([], [], [], [], [], [], [])
+        return ResolvedKeys()
     paths: list[str] = []
     for line in r.stdout.splitlines():
         if line.startswith("identityfile "):
@@ -124,7 +132,7 @@ def expand_host(hostname: str) -> ResolvedKeys:
 
 def extkey_expand(extkeys: list[str], out: Output) -> ResolvedKeys:
     """Expand public extended-key syntax; warn on unknown prefixes."""
-    result = ResolvedKeys([], [], [], [], [], [], [])
+    result = ResolvedKeys()
     for ek in filter(None, extkeys):
         if ek.startswith("host:"):
             result.extend(expand_host(ek.removeprefix("host:")))
@@ -160,7 +168,7 @@ def resolve_requested_keys(
     *,
     gpg_lookup: bool = True,
 ) -> ResolvedKeys:
-    result = ResolvedKeys([], [], [], [], [], [], [])
+    result = ResolvedKeys()
     if confallhosts:
         result.extend(all_host_identities(out))
     # ``--extended`` is a compatibility no-op. Prefixes are always accepted,

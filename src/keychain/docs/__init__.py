@@ -19,6 +19,7 @@ from functools import cache
 from importlib.resources import files
 from typing import Any
 
+from ..output.core import Output, Span
 from ..output.tables import render_panel, visible_width
 
 
@@ -737,9 +738,7 @@ def _render_manual_text(text: str, width: int, out) -> list[str]:
                 if rendered and rendered[-1] != "":
                     rendered.append("")
                 continue
-            code_color = out.colors.get("CYANN", "")
-            reset = out.colors.get("OFF", "")
-            rendered.append(f"    {code_color}{line}{reset}")
+            rendered.append(f"    {Span(line, 'doc_block')}")
             continue
         if line == "":
             _flush_paragraph()
@@ -1180,7 +1179,6 @@ def run_man(args, out) -> int:
 
 def run_explain(argv: list[str]) -> int:
     from ..runtime.config import RuntimeConfig
-    from ..util import Output
 
     color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
     if "--nocolor" in argv or "--no-color" in argv:

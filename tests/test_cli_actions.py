@@ -8,9 +8,10 @@ import pytest
 
 from keychain import keys, main
 from keychain.main import KeychainApp
+from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.runtime.config import RuntimeConfig
-from keychain.util import KeychainError, Output
+from keychain.util import KeychainError
 from tests.support import set_home
 
 
@@ -214,9 +215,7 @@ class TestResolveAction:
         app = KeychainApp(ns, out)
         app._kstate = _State()
         app._agent_settings = lambda: (False, False)
-        app._do_add = lambda ssh, gpg, gpg_s, gpg_e, gpg_a, pkcs11, *_rest: pkcs11 == [
-            "/usr/lib/pkcs11/opensc-pkcs11.so"
-        ]
+        app._do_add = lambda requested, *_rest: requested.pkcs11 == ["/usr/lib/pkcs11/opensc-pkcs11.so"]
 
         assert app._handle_add_action() is True
 
