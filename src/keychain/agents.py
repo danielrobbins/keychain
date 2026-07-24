@@ -474,8 +474,10 @@ class SshAgent:
         self._allow_gpg = ssh_allow_gpg
         self._allow_forwarded = bool(a.get_value("ssh_allow_forwarded"))
         paths = self.keychain_state.paths
+        confirm = bool(a.get_value("confirm"))
+        native_confirm = confirm and self.keychain_state.platform.name == "darwin"
 
-        if bool(a.get_value("confirm")) and bool(a.get_value("no_gui")):
+        if confirm and bool(a.get_value("no_gui")):
             raise KeychainError("--confirm requires graphical confirmation and cannot be combined with --no-gui")
 
         # 1. Quick path: trust an existing pidfile if it is both valid AND
@@ -508,7 +510,7 @@ class SshAgent:
                 return False
 
         # 3. Try inherited environment.
-        if not bool(a.get_value("no_inherit")):
+        if not (bool(a.get_value("no_inherit")) or native_confirm):
             inh = SshAgentRef.from_env(self.keychain_state.env)
             valid_inh = self.envcheck("env", inh, quick=False) if inh else None
             if valid_inh:
@@ -543,7 +545,7 @@ class SshAgent:
             # safe because the gate is enforced at the config layer.
             cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
             spawn_env = dict(self.keychain_state.env)
-            if bool(a.get_value("confirm")) and self.keychain_state.platform.name == "darwin":
+            if native_confirm:
                 askpass = spawn_env.get("SSH_ASKPASS")
                 if not askpass:
                     askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
@@ -841,28 +843,30 @@ class GpgAgent:
 
     def load(self, gpg_keys: list[str], mode: str = "--sign") -> bool:
         out = self.out
-        for k in filter(None, gpg_keys):
-            out.info(f"Adding gpg key: {k}")
-            try:
-                r = self._run_gpg(
-                    [
-                        "--no-autostart",
-                        "--no-options",
-                        "--use-agent",
-                        mode,
-                        "--local-user",
-                        k,
-                        "-o-",
-                    ],
-                    tty=True,
-                )
-            except (FileNotFoundError, OSError):
-                out.warn(f"{self.k.gpg_prog} not found")
-                return False
-            if r.returncode != 0:
-                err = (r.stdout + r.stderr).strip()
-                out.warn(f"Error adding gpg key (error code: {r.returncode}; output: {err})")
-                return False
+        with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
+            for index, k in enumerate(filter(None, gpg_keys)):
+                out.info(f"Adding gpg key: {k}")
+                try:
+                    r = self._run_gpg(
+                        [
+                            "--no-autostart",
+                            "--no-options",
+                            "--use-agent",
+                            mode,
+                            "--local-user",
+                            k,
+                            "--output",
+                            str(Path(td) / f"{index}.gpg"),
+                        ],
+                        tty=True,
+                    )
+                except (FileNotFoundError, OSError):
+                    out.warn(f"{self.k.gpg_prog} not found")
+                    return False
+                if r.returncode != 0:
+                    err = r.stderr.strip()
+                    out.warn(f"Error adding gpg key (error code: {r.returncode}; output: {err})")
+                    return False
         return True
 
     def load_decryption(self, gpg_keys: list[str]) -> bool:

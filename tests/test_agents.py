@@ -312,6 +312,36 @@ class TestGpgAgentEnvironment:
             assert key not in captured[0]
 
 
+class TestGpgAgentLoad:
+    def test_cancelled_warmup_never_renders_binary_output(self, monkeypatch, capsys):
+        state = SimpleNamespace(
+            env={},
+            args=SimpleNamespace(get_value=lambda _name: False),
+            gpg_prog="gpg",
+        )
+        agent = agents.GpgAgent(state, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
+        command: list[str] = []
+
+        def fake_run(args, **_kwargs):
+            command.extend(args)
+            return SimpleNamespace(
+                returncode=2,
+                stdout="\x1b[2J\ufffdbinary signature",
+                stderr="gpg: signing failed: Operation cancelled\n",
+            )
+
+        monkeypatch.setattr(agent, "_run_gpg", fake_run)
+
+        assert agent.load(["KEYID"]) is False
+
+        err = capsys.readouterr().err
+        assert "Operation cancelled" in err
+        assert "\x1b" not in err
+        assert "\ufffd" not in err
+        assert "-o-" not in command
+        assert "--output" in command
+
+
 class TestGpgAgentWipe:
     def _agent(self, monkeypatch, returncode=1, stdout="", stderr="", debug=False):
         def fake_run(cmd, **kwargs):
@@ -587,12 +617,12 @@ class TestSshEnvcheckUnknownSource:
 
 
 class TestSshAgentStartupOutput:
-    def _agent_with_args(self, keydir, *extra_args):
+    def _agent_with_args(self, keydir, *extra_args, inherit=False):
         from keychain import state
         from keychain.paths import KeychainPaths
         from keychain.runtime.config import RuntimeConfig
 
-        args = RuntimeConfig.resolve(["add", "--no-inherit", *extra_args])
+        args = RuntimeConfig.resolve(["add", *(("--no-inherit",) if not inherit else ()), *extra_args])
         paths = KeychainPaths(keydir=keydir, host="h")
         kstate = state.KeychainState(paths=paths, env={}, args=args)
         out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
@@ -736,6 +766,52 @@ class TestSshAgentStartupOutput:
         assert captured_env["SSH_ASKPASS"] == "/custom/askpass"
         assert captured_env["SSH_ASKPASS_REQUIRE"] == "force"
         assert not (paths.keydir / "ssh-askpass-macos").exists()
+
+    def test_macos_confirm_does_not_inherit_agent(self, short_keydir, monkeypatch):
+        """Native confirmation requires an agent born with Keychain's askpass environment."""
+        agent, _paths = self._agent_with_args(short_keydir, "--confirm", inherit=True)
+        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        agent.keychain_state.env.update({"SSH_AUTH_SOCK": "/tmp/inherited.sock", "SSH_AGENT_PID": "42"})
+        checked_sources: list[str] = []
+
+        def fake_envcheck(source, agent_env, quick):
+            checked_sources.append(source)
+            return agent_env
+
+        monkeypatch.setattr(agent, "envcheck", fake_envcheck)
+        self._fake_spawn(monkeypatch)
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        assert "env" not in checked_sources
+        assert agent.env.sock == "/tmp/keychain-test-agent.sock"
+
+    def test_macos_confirm_still_reuses_pidfile_agent(self, short_keydir, monkeypatch):
+        """Implicit --no-inherit must not bypass Keychain's normal pidfile lookup."""
+        agent, paths = self._agent_with_args(short_keydir, "--confirm", inherit=True)
+        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        pidfile_agent = SshAgentRef(sock="/tmp/pidfile.sock", pid="42")
+        paths.write(pidfile_agent, _out())
+        monkeypatch.setattr(agent, "envcheck", lambda _source, agent_env, quick: agent_env)
+        monkeypatch.setattr(agents, "run", lambda *_args, **_kwargs: pytest.fail("must reuse pidfile agent"))
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        assert agent.env == pidfile_agent
+
+    @pytest.mark.parametrize(("platform_name", "extra_args"), [("darwin", ()), ("linux", ("--confirm",))])
+    def test_implicit_no_inherit_is_macos_confirm_only(self, short_keydir, monkeypatch, platform_name, extra_args):
+        """Normal macOS starts and confirmed Linux starts retain inherited-agent behavior."""
+        agent, _paths = self._agent_with_args(short_keydir, *extra_args, inherit=True)
+        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name=platform_name))
+        inherited = SshAgentRef(sock="/tmp/inherited.sock", pid="42")
+        agent.keychain_state.env.update(inherited.as_dict())
+        monkeypatch.setattr(agent, "envcheck", lambda _source, agent_env, quick: agent_env)
+        monkeypatch.setattr(agents, "run", lambda *_args, **_kwargs: pytest.fail("must reuse inherited agent"))
+
+        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+
+        assert agent.env == inherited
 
 
 # ---------------------------------------------------------------------------
