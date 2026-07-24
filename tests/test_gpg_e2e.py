@@ -47,33 +47,6 @@ def _assert_ok(result: subprocess.CompletedProcess) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def _write_fake_pinentry(path: Path, passfile: Path, log: Path) -> None:
-    path.write_text(
-        f"""#!/bin/sh
-passfile={shlex.quote(str(passfile))}
-log={shlex.quote(str(log))}
-printf "OK fake pinentry\\n"
-while IFS= read -r line; do
-  printf "%s\\n" "$line" >> "$log"
-  case "$line" in
-    GETPIN*)
-      if [ -r "$passfile" ]; then
-        printf "D %s\\n" "$(cat "$passfile")"
-        printf "OK\\n"
-      else
-        printf "ERR 83886179 Operation cancelled\\n"
-      fi
-      ;;
-    BYE*) printf "OK\\n"; exit 0 ;;
-    *) printf "OK\\n" ;;
-  esac
-done
-""",
-        encoding="utf-8",
-    )
-    path.chmod(0o700)
-
-
 def _write_gpg_wrapper(path: Path, passfile: Path) -> None:
     path.write_text(
         f"""#!/bin/sh
@@ -125,16 +98,12 @@ def gpg_home():
 
     passfile = root / "passphrase"
     passfile.write_text("secret-pass", encoding="utf-8")
-    pinentry_log = root / "pinentry.log"
-    pinentry_log.write_text("", encoding="utf-8")
-    pinentry = root / "pinentry-test"
-    _write_fake_pinentry(pinentry, passfile, pinentry_log)
     wrapper_dir = root / "bin"
     wrapper_dir.mkdir()
     gpg_wrapper = wrapper_dir / "gpg"
     _write_gpg_wrapper(gpg_wrapper, passfile)
     (gnupg / "gpg-agent.conf").write_text(
-        f"pinentry-program {pinentry}\n" "allow-loopback-pinentry\n" "default-cache-ttl 600\n" "max-cache-ttl 600\n",
+        "allow-loopback-pinentry\n" "default-cache-ttl 600\n" "max-cache-ttl 600\n",
         encoding="utf-8",
     )
 
@@ -143,7 +112,6 @@ def gpg_home():
         {
             "HOME": str(home),
             "GNUPGHOME": str(gnupg),
-            "GPG_TTY": "",
             "PATH": str(wrapper_dir) + os.pathsep + env.get("PATH", ""),
             "PYTHONPATH": str(ROOT / "src") + os.pathsep + env.get("PYTHONPATH", ""),
         }
@@ -151,7 +119,7 @@ def gpg_home():
     env.pop("SSH_AUTH_SOCK", None)
     env.pop("SSH_AGENT_PID", None)
 
-    yield env, home, passfile, pinentry_log
+    yield env, home, passfile
 
     _run(["gpgconf", "--kill", "gpg-agent"], env, timeout=10)
     _kill_keychain_ssh_agents(home)
@@ -159,7 +127,7 @@ def gpg_home():
 
 
 def test_gpge_warms_encryption_subkey_for_decryption(gpg_home) -> None:
-    env, home, passfile, _pinentry_log = gpg_home
+    env, home, passfile = gpg_home
 
     _assert_ok(
         _gpg(
@@ -233,7 +201,7 @@ def test_gpge_warms_encryption_subkey_for_decryption(gpg_home) -> None:
 
 
 def test_gpga_rejects_signing_only_key_after_signing_is_warm(gpg_home) -> None:
-    env, _home, passfile, _pinentry_log = gpg_home
+    env, _home, passfile = gpg_home
     _assert_ok(
         _gpg(
             env,
@@ -274,3 +242,36 @@ def test_gpga_rejects_signing_only_key_after_signing_is_warm(gpg_home) -> None:
 
     assert keychain.returncode != 0
     assert "Unable to add GPG encryption keys" in keychain.stderr
+
+
+def test_failed_signing_warmup_has_clean_diagnostics(gpg_home) -> None:
+    env, _home, passfile = gpg_home
+    _assert_ok(
+        _gpg(
+            env,
+            "--batch",
+            "--pinentry-mode",
+            "loopback",
+            "--passphrase-file",
+            str(passfile),
+            "--quick-generate-key",
+            "Keychain Cancellation Test <keychain@example.invalid>",
+            "rsa2048",
+            "sign",
+            "0",
+        )
+    )
+    fingerprint = _fingerprint(env)
+    _assert_ok(_gpg(env, "--batch", "--yes", "--delete-secret-keys", fingerprint))
+
+    keychain = _run(
+        [sys.executable, "-m", "keychain", "--no-color", "--quiet", "add", f"gpgs:{fingerprint}"],
+        env,
+        timeout=60,
+    )
+
+    assert keychain.returncode != 0
+    assert "Unable to add GPG signing keys" in keychain.stderr
+    assert "\ufffd" not in keychain.stderr
+    assert "\x1b" not in keychain.stderr
+    assert not any(ord(char) < 32 and char not in "\n\r\t" for char in keychain.stderr)

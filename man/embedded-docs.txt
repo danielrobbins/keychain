@@ -353,6 +353,12 @@ OpenSSH's askpass mechanism. This is normally a persistent preference:
 confirm = true
 ```
 
+On macOS, `--confirm` implicitly applies `--no-inherit`: Keychain does not
+adopt the `$SSH_AUTH_SOCK` / `$SSH_AGENT_PID` inherited from the parent shell.
+This ensures that, when no valid Keychain pidfile agent exists, Keychain starts
+an agent with the native confirmation environment described below. Other
+platforms retain normal inherited-agent discovery.
+
 *macOS.* When Keychain starts a new managed `ssh-agent` with confirmation
 enabled, it installs a private helper at `~/.keychain/ssh-askpass-macos` (or
 the selected Keychain directory) and starts the agent with the environment
@@ -364,10 +370,11 @@ managed agent, Keychain preserves it and enables OpenSSH's forced askpass
 mode. On other platforms, provide a suitable askpass helper in the agent's
 startup environment when the platform does not supply one.
 
-An agent's askpass environment is fixed when the agent starts. After upgrading
-an existing macOS installation, run `keychain agent stop` once if the current
-managed agent was created without confirmation support; the next Keychain
-invocation will start it with the native helper.
+An agent's askpass environment is fixed when the agent starts, and a valid
+pidfile agent is considered before inherited-agent discovery. After upgrading,
+run `keychain agent stop` once if Keychain's pidfile refers to an agent created
+without confirmation support; the next confirmed invocation will start it with
+the native helper. See issue #227.
 
 `--confirm` cannot be combined with `--no-gui`. Keychain reports an error
 instead of silently weakening the request or loading a key whose confirmation
