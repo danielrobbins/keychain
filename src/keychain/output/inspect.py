@@ -60,9 +60,6 @@ def render_inspect(state: KeychainState, out: Output) -> None:
     sections: list[tuple[str, list[tuple]]] = []
 
     runtime = state.runtime_info
-    primary_hint = ""
-    if state.gpg_main_socket and not state.gpg_primary_socket_is_ours:
-        primary_hint = "socket is outside our gpg homedir; keychain will NOT adopt this agent"
     runtime_rows: list[tuple] = [
         ("hostname", state.hostname, f"- via {state.hostname_source}"),
         ("platform", f"{state.platform.name} / {runtime['machine']}", ""),
@@ -76,9 +73,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         ("ssh path", state.ssh_path or "(not found)", ""),
         ("gpg version", state.gpg_version or "(unknown)", ""),
         ("gpg path", state.gpg_path or "(not found)", ""),
-        ("gpg ssh support", state.gpg_has_ssh_support, ""),
-        ("gpg ssh socket", state.gpg_ssh_socket or "(none)", ""),
-        ("gpg main socket", state.gpg_main_socket or "(none)", primary_hint),
+        ("gpg main socket", state.gpg_main_socket or "(none)", ""),
     ]
     sections.append(("Runtime", runtime_rows))
 
@@ -152,10 +147,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         pidf_rows.append(("processes", "listing not available on this platform", ""))
     else:
         pidf_rows.append(("ssh-agent pids", _fmt_pids(state.ssh_agent_pids), ""))
-        gpg_hint = ""
-        if state.gpg_foreign_agents_present:
-            gpg_hint = "at least one is foreign (e.g. package-manager with --homedir); these are ignored by keychain"
-        pidf_rows.append(("gpg-agent pids", _fmt_pids(state.gpg_agent_pids), gpg_hint))
+        pidf_rows.append(("gpg-agent pids", _fmt_pids(state.gpg_agent_pids), ""))
     sections.append(("Agent State", pidf_rows))
 
     term_w = shutil.get_terminal_size((80, 24)).columns
@@ -180,7 +172,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         for line in table.splitlines():
             out.result(line)
     else:
-        if state.has_reachable_agent:
+        if state.has_selected_ssh_agent:
             out.result(f"   {out.dim('(none loaded)')}")
         else:
             out.result(f"   {out.dim('(no agent reachable)')}")
@@ -270,10 +262,7 @@ def render_inspect_json(state: KeychainState) -> None:
             "gpg": {
                 "version": state.gpg_version or None,
                 "path": state.gpg_path or None,
-                "ssh_support": state.gpg_has_ssh_support,
-                "ssh_socket": state.gpg_ssh_socket or None,
                 "main_socket": state.gpg_main_socket or None,
-                "primary_socket_is_ours": state.gpg_primary_socket_is_ours,
             },
         },
         "configuration": state.config_diagnostics,
@@ -320,7 +309,6 @@ def render_inspect_json(state: KeychainState) -> None:
                 "supported": state.process_listing_supported,
                 "ssh_agent_pids": list(state.ssh_agent_pids),
                 "gpg_agent_pids": list(state.gpg_agent_pids),
-                "gpg_foreign_agents_present": state.gpg_foreign_agents_present,
             },
         },
         "keys": {

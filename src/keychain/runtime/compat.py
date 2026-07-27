@@ -203,7 +203,7 @@ class Compat:
                     if subcmd is None:
                         subcmd = "wipe"
                         if value == "all":
-                            sub_args = []
+                            sub_args = ["--ssh", "--gpg"]
                         elif value in ("ssh", "gpg"):
                             sub_args = [f"--{value}"]
                         else:

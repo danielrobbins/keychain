@@ -172,7 +172,7 @@ class TestResolveAction:
         captured = capsys.readouterr()
         assert "Timed out while updating the systemd user environment" in captured.err
 
-    def test_add_with_only_missing_keys_refuses_to_start_agent(self):
+    def test_add_with_only_missing_keys_refuses_after_gpg_resolution(self):
         ns = RuntimeConfig.resolve(["add", "ghost-key"])
 
         class _Paths:
@@ -184,6 +184,7 @@ class TestResolveAction:
             paths = _Paths()
 
             def resolve_requested_keys(self, _out, *, gpg_lookup=True):
+                assert gpg_lookup is True
                 return keys.ResolvedKeys([], [], [], [], [], [], ["ghost-key"])
 
         _State.args = ns
@@ -341,17 +342,17 @@ class TestListFingerprints:
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         assert KeychainApp(ns, out)._resolve_action() == "list"
 
-    def test_list_json_uses_find_active_agent_env(self, monkeypatch):
+    def test_list_json_uses_policy_selected_agent(self, monkeypatch):
         seen = []
 
         monkeypatch.setattr(main.agents, "render_list_json", lambda env: seen.append(env))
         kstate = SimpleNamespace(
             pidfile_env=main.SshAgentRef(sock="/tmp/stale.sock", pid="9999"),
-            find_active_agent_env=main.SshAgentRef(sock="/tmp/live.sock", pid="1111"),
+            selected_ssh_env=main.SshAgentRef(sock="/tmp/live.sock", pid="1111"),
         )
         out_json = Output.build(quiet=True, debug=False, eval_mode=False, color=False, json=True)
 
         app = KeychainApp(RuntimeConfig.resolve(["list", "--json"]), out_json)
         app._kstate = kstate
         assert app._handle_list_action() == 0
-        assert seen == [kstate.find_active_agent_env]
+        assert seen == [kstate.selected_ssh_env]

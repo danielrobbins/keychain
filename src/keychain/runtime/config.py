@@ -14,7 +14,8 @@ from typing import Any
 from .actions import ROOT_ACTION, UNSET, Action, Option
 from .compat import COMPAT
 
-_AGENT_ARG_VARS = ("ssh_args", "gpg_args")
+_AGENT_ARG_VARS = ("ssh_args",)
+_KEYCHAIN_ENV_VARS = {"KEYCHAIN_CONFIG", "KEYCHAIN_SSH_AGENT_ARGS"}
 
 _DIAGNOSTIC_ENV_VALUES = (
     "HOME",
@@ -29,7 +30,6 @@ _DIAGNOSTIC_ENV_VALUES = (
     "GNUPGHOME",
     "KEYCHAIN_CONFIG",
     "KEYCHAIN_SSH_AGENT_ARGS",
-    "KEYCHAIN_GPG_AGENT_ARGS",
 )
 _DIAGNOSTIC_ENV_KEYS = _DIAGNOSTIC_ENV_VALUES + (
     "NO_COLOR",
@@ -132,10 +132,9 @@ class RuntimeConfig:
             rc_path = Path(base_environ.get("HOME", "~")).expanduser() / ".keychainrc"
         self.rc_path = rc_path
 
-        if not allow_env:
-            for key in list(self.environ):
-                if key.startswith("KEYCHAIN_"):
-                    del self.environ[key]
+        for key in list(self.environ):
+            if key.startswith("KEYCHAIN_") and (not allow_env or key not in _KEYCHAIN_ENV_VARS):
+                del self.environ[key]
         self.env = dict(self.environ)
 
         # Validate sections layout using AST — keys stored lowercase for

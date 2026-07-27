@@ -96,15 +96,15 @@ class TestTranslate:
 
     def test_wipe_with_value(self):
         # ``--wipe ssh`` -> ``wipe --ssh``; ``--wipe gpg`` -> ``wipe --gpg``;
-        # ``--wipe all`` -> bare ``wipe`` (default semantics: both).
+        # ``--wipe all`` keeps its legacy both-target behavior explicitly.
         assert translate(["--wipe", "ssh"]) == ["wipe", "--ssh"]
         assert translate(["--wipe", "gpg"]) == ["wipe", "--gpg"]
-        assert translate(["--wipe", "all"]) == ["wipe"]
+        assert translate(["--wipe", "all"]) == ["wipe", "--ssh", "--gpg"]
 
     def test_wipe_with_equals(self):
         assert translate(["--wipe=gpg"]) == ["wipe", "--gpg"]
         assert translate(["--wipe=ssh"]) == ["wipe", "--ssh"]
-        assert translate(["--wipe=all"]) == ["wipe"]
+        assert translate(["--wipe=all"]) == ["wipe", "--ssh", "--gpg"]
 
     def test_ssh_rm_carries_keys(self):
         # keychain 2.x ``--ssh-rm`` / ``-r`` -> new-style ``forget``.
@@ -241,7 +241,7 @@ class TestEquivalentCommandQuoting:
 
 
 # ---------------------------------------------------------------------------
-# Short-flag cluster expansion (gap §3.2 / usage-patterns.md §2.3)
+# Short-flag cluster expansion
 # ---------------------------------------------------------------------------
 
 

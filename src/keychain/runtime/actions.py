@@ -510,8 +510,8 @@ ROOT_ACTION.add_option(option="--version", cli_aliases=("-V",), action_adapter=_
 ROOT_ACTION.add_option(option="--explain", see_also=("man",))
 
 # Security gate: all KEYCHAIN_* env var ingestion is disabled by default.
-# Set --allow-env (or -E) to permit KEYCHAIN_CONFIG,
-# KEYCHAIN_SSH_AGENT_ARGS, and KEYCHAIN_GPG_AGENT_ARGS to take effect.
+# Set --allow-env (or -E) to permit KEYCHAIN_CONFIG and
+# KEYCHAIN_SSH_AGENT_ARGS to take effect.
 ROOT_ACTION.add_option(option="--allow-env", cli_aliases=("-E",), type="bool", default=False)
 
 ROOT_ACTION.add_option(option="--quiet", cli_aliases=("-q",), config_section="output")
@@ -597,8 +597,6 @@ cmd_add.add_option(option="--clear", config_section="agent", doc_tag="option:cle
 cmd_add.add_option(option="--extended", cli_aliases=("--ext", "-e"), deprecated=True, config_section="keys")
 cmd_add.add_option(option="--confallhosts", config_section="keys", doc_tag="option:confallhosts")
 
-Option(option="--ssh-allow-gpg", actions={cmd_add, agent_start}, config_section="agent")
-Option(option="--ssh-spawn-gpg", actions={cmd_add, agent_start}, config_section="agent")
 Option(option="--ssh-allow-forwarded", actions={cmd_add, agent_start}, config_section="agent")
 Option(
     varname="no_inherit",
@@ -619,15 +617,6 @@ Option(
     config_doc_tag="config:agent.env.ssh_args",
     actions={cmd_add, agent_start},
 )
-Option(
-    varname="gpg_args",
-    type="str",
-    env="KEYCHAIN_GPG_AGENT_ARGS",
-    config_section="agent.env",
-    config_doc_tag="config:agent.env.gpg_args",
-    actions={cmd_add, agent_start},
-)
-
 Option(
     option="--lockwait",
     type="int",
@@ -668,6 +657,13 @@ Option(
     deprecated=True,
     deprecation_message="--attempts is now deprecated.",
 )
+for option in ("--ssh-allow-gpg", "--ssh-spawn-gpg"):
+    Option(
+        option=option,
+        actions={cmd_add, agent_start},
+        deprecated=True,
+        deprecation_message=f"{option} is deprecated and ignored; Keychain now uses ssh-agent exclusively for SSH keys.",
+    )
 Option(option="--no-lock", cli_aliases=("--nolock",), actions={cmd_add, agent_start})
 
 agent_stop.add_option(option="--mine", exclusive_group="target")

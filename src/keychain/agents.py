@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""ssh-agent and gpg-agent: detection, lifecycle, key listing and loading."""
+"""SSH-agent management and GnuPG credential operations."""
 
 from __future__ import annotations
 
@@ -108,14 +108,6 @@ def detect_ssh() -> bool:
     return "OpenSSH" in (r.stdout + r.stderr)
 
 
-def gpg_has_ssh_support() -> bool:
-    try:
-        r = run(["gpg-agent", "--help"])
-    except (FileNotFoundError, OSError):
-        return False
-    return "enable-ssh-support" in (r.stdout + r.stderr)
-
-
 def choose_gpg_prog(force_gpg2: bool) -> str:
     """Decide which GnuPG binary to invoke."""
     return "gpg2" if force_gpg2 else "gpg"
@@ -148,46 +140,6 @@ def gpg_ssh_socket(env: Mapping[str, str] | None = None) -> str:
 
 def gpg_main_socket(env: Mapping[str, str] | None = None) -> str:
     return _gpg_query("socket_name", env)
-
-
-def gpg_user_homedirs(env: Mapping[str, str] | None = None, uid: int | None = None) -> list[Path]:
-    """Directories whose ``S.gpg-agent`` we consider "ours".
-
-    Includes ``$GNUPGHOME``, ``$HOME/.gnupg``, and the XDG-style
-    ``/run/user/<uid>/gnupg`` (used by GnuPG 2.1+ on Linux). Anything
-    outside this set -- e.g. a package-manager's ``--homedir /var/tmp/zypp.X``
-    socket -- is treated as someone else's agent.
-    """
-    env = os.environ if env is None else env
-    if uid is None:
-        uid = current_uid()
-    homes: list[Path] = []
-    gh = env.get("GNUPGHOME")
-    if gh:
-        homes.append(Path(gh))
-    home = env.get("HOME") or os.path.expanduser("~")
-    if home:
-        homes.append(Path(home) / ".gnupg")
-    if uid is not None:
-        homes.append(Path(f"/run/user/{uid}/gnupg"))
-    # Resolve to absolute paths; ignore homedirs that don't currently exist
-    # (Path.resolve(strict=False) is the default on 3.9+).
-    return [h.resolve() for h in homes]
-
-
-def gpg_socket_is_primary(sock: str, env: Mapping[str, str] | None = None, uid: int | None = None) -> bool:
-    """True if *sock* lives under one of :func:`gpg_user_homedirs`.
-
-    Used to refuse to adopt gpg-agents started by other tools (package
-    managers, build sandboxes) that happen to be running as our uid.
-    """
-    if not sock:
-        return False
-    try:
-        sock_dir = Path(sock).resolve().parent
-    except (OSError, ValueError):
-        return False
-    return any(sock_dir == h for h in gpg_user_homedirs(env, uid))
 
 
 def validate_ssh_socket(sock: str) -> SocketValidation:
@@ -341,18 +293,19 @@ class SshAgent:
     def __init__(self, state: KeychainState, out: Output) -> None:
         self.keychain_state = state
         self.out = out
-        self.env: SshAgentRef = state.find_active_agent_env
+        self.env = SshAgentRef()
+        self.env_source = ""
         self._spawn_context = ""
-        # Set by :meth:`start`; consumed by :meth:`envcheck` so per-call
-        # plumbing of these flags is not needed.
-        self._allow_gpg = False
-        self._allow_forwarded = False
+
+    def _option(self, name: str):
+        args = getattr(self.keychain_state, "args", None)
+        return args.get_value(name) if args is not None else None
 
     # ---- list / fingerprint probes -----------------------------------
 
     def list_loaded(self) -> tuple[list[str], int]:
         """Run ``ssh-add -l``; return ``(fingerprints, retcode)``."""
-        return ssh_l(self.env.as_dict())
+        return ssh_l((self.env or self.select_existing()).as_dict())
 
     def fingerprint(self, filename: str) -> str | None:
         """Return the fingerprint of private key *filename*, or None on failure."""
@@ -387,7 +340,7 @@ class SshAgent:
 
     # ---- env validation ----------------------------------------------
 
-    def envcheck(self, source: str, agent_env: SshAgentRef, quick: bool) -> SshAgentRef | None:
+    def _validate_candidate(self, source: str, agent_env: SshAgentRef, *, announce: bool = False) -> SshAgentRef | None:
         """Validate ``SSH_AUTH_SOCK`` / ``SSH_AGENT_PID`` from *agent_env*."""
         out = self.out
         sock = agent_env.sock
@@ -396,10 +349,9 @@ class SshAgent:
         # user expects keychain to reuse that agent.  Silently falling through to
         # spawn a new one (because the socket has been rm'd or the process died)
         # is exactly the "why didn't keychain find my agent?" surprise we want to
-        # avoid -- surface those rejections as notes.  Other sources (forwarded
-        # sockets the user hasn't opted in to, gpg-agent's SSH socket) stay at
+        # avoid -- surface those rejections as notes. Other sources stay at
         # debug to avoid noise on every invocation.
-        visible = source in ("pidfile", "env") and not quick
+        visible = announce and source in ("pidfile", "env")
 
         sock_validation = validate_ssh_socket(sock)
         if not sock_validation.valid:
@@ -411,6 +363,12 @@ class SshAgent:
                     out.debug(msg)
                     if visible:
                         self._remember_spawn_context(source, sock_validation.reason)
+            return None
+
+        gsock = gpg_ssh_socket(self.keychain_state.env) if not pid_str or Path(sock).name == "S.gpg-agent.ssh" else ""
+        if gsock and gsock == sock:
+            if announce:
+                out.note("Ignoring gpg-agent SSH socket; Keychain manages SSH keys with ssh-agent.")
             return None
 
         if pid_str:
@@ -425,17 +383,9 @@ class SshAgent:
                 pid_str = ""
 
         if not pid_str:
-            # No PID -- might be gpg-agent's SSH socket or a forwarded socket.
-            gsock = gpg_ssh_socket()
-            if gsock and gsock == sock:
-                if self._allow_gpg:
-                    if not quick:
-                        out.info(f"Using ssh-agent ({source}): {out.id(gsock)} (GnuPG)")
-                    return SshAgentRef(sock)
-                out.debug("Ignoring SSH_AUTH_SOCK -- this is the GnuPG-supplied socket")
-                return None
-            if self._allow_forwarded:
-                if not quick:
+            # A reachable socket without a PID may be a forwarded agent.
+            if bool(self._option("ssh_allow_forwarded")):
+                if announce:
                     out.info(f"Using {out.value('forwarded')} ssh-agent: {out.value(sock)}")
                 return SshAgentRef(sock, forwarded=True)
             # No SSH_AGENT_PID, not GnuPG, and forwarding disallowed: could be a
@@ -444,9 +394,25 @@ class SshAgent:
             out.debug(f"Ignoring SSH_AUTH_SOCK ({sock}) -- no SSH_AGENT_PID set, source unknown")
             return None
 
-        if not quick:
+        if announce:
             out.info(f"Existing ssh-agent ({source}): {out.id(pid_str)}")
         return SshAgentRef(sock, pid_str)
+
+    def select_existing(self, *, pidfile_only: bool = False, announce: bool = False) -> SshAgentRef:
+        """Select an existing SSH agent according to Keychain policy."""
+        candidates = [("pidfile", self.keychain_state.pidfile_env)]
+        native_confirm = bool(self._option("confirm")) and self.keychain_state.platform.name == "darwin"
+        if not pidfile_only and not (bool(self._option("no_inherit")) or native_confirm):
+            candidates.append(("env", self.keychain_state.inherited_env))
+
+        self.env = SshAgentRef()
+        self.env_source = ""
+        for source, candidate in candidates:
+            if candidate and (selected := self._validate_candidate(source, candidate, announce=announce)):
+                self.env = selected
+                self.env_source = source
+                break
+        return self.env
 
     def _remember_spawn_context(self, source: str, reason: str) -> None:
         display_reason = {"missing": "socket missing"}.get(reason, reason)
@@ -460,7 +426,7 @@ class SshAgent:
     def _our_pid(self) -> int | None:
         return self.env.pid_int
 
-    def start(self, ssh_spawn_gpg: bool, ssh_allow_gpg: bool) -> bool:
+    def start(self) -> bool:
         """Find or spawn an ssh-agent.
 
         Returns True if a *quick* start succeeded (an existing agent was
@@ -470,9 +436,6 @@ class SshAgent:
         """
         a = self.keychain_state.args
         self._spawn_context = ""
-        # Latch run-flag flags so :meth:`envcheck` can pull them from self.
-        self._allow_gpg = ssh_allow_gpg
-        self._allow_forwarded = bool(a.get_value("ssh_allow_forwarded"))
         paths = self.keychain_state.paths
         confirm = bool(a.get_value("confirm"))
         native_confirm = confirm and self.keychain_state.platform.name == "darwin"
@@ -483,89 +446,67 @@ class SshAgent:
         # 1. Quick path: trust an existing pidfile if it is both valid AND
         # already has keys loaded -- saves a full key reload on repeat invocations.
         if bool(a.get_value("quick")):
-            env = self.keychain_state.pidfile_env
+            env = self.select_existing(pidfile_only=True)
             if env:
-                test_env = self.envcheck("quick", env, quick=True)
-                if test_env:
-                    saved_env = self.env
-                    self.env = test_env
-                    fps, _ = self.list_loaded()
-                    if fps:
-                        self.out.info("Found existing populated ssh-agent (quick)")
-                        return True
-                    self.env = saved_env
-                    self.out.note("Quick start unsuccessful -- no keys loaded...")
-                else:
-                    self.out.note("Quick start unsuccessful -- no agent found...")
+                fps, _ = self.list_loaded()
+                if fps:
+                    self.out.info("Found existing populated ssh-agent (quick)")
+                    return True
+                self.out.note("Quick start unsuccessful -- no keys loaded...")
             else:
                 self.out.note("Quick start unsuccessful -- no agent found...")
 
-        # 2. Normal path. Try existing pidfile.
-        env = self.keychain_state.pidfile_env
+        # 2. Normal path. Try the pidfile, then the inherited environment.
+        env = self.select_existing(announce=True)
         if env:
-            test_env = self.envcheck("pidfile", env, quick=False)
-            if test_env:
+            if self.env_source == "pidfile":
                 self.out.debug("pidfile is valid")
-                self.env = test_env
-                return False
+            elif not env.forwarded:
+                paths.write(env, self.out)
+            return False
 
-        # 3. Try inherited environment.
-        if not (bool(a.get_value("no_inherit")) or native_confirm):
-            inh = SshAgentRef.from_env(self.keychain_state.env)
-            valid_inh = self.envcheck("env", inh, quick=False) if inh else None
-            if valid_inh:
-                self.env = valid_inh
-                if not valid_inh.forwarded:
-                    paths.write(valid_inh, self.out)
-                    self.env = self.keychain_state.pidfile_env
-                return False
-
-        # 4. Spawn a new agent.
+        # 3. Spawn a new agent.
         paths.clear()
-        spawned: SshAgentRef | None
-        if ssh_spawn_gpg:
-            spawned = self.keychain_state.gpg.start(ssh_support=True)
+        context = f" ({self._spawn_context})" if self._spawn_context else ""
+        self.out.info(f"Starting ssh-agent{context}...")
+        cmd = ["ssh-agent", "-s"]
+        timeout = a.get_value("timeout")
+        if timeout is not None:
+            cmd += ["-t", str(timeout * 60)]
+        ssh_agent_socket = a.get_value("ssh_agent_socket")
+        if ssh_agent_socket:
+            cmd += ["-a", ssh_agent_socket]
         else:
-            context = f" ({self._spawn_context})" if self._spawn_context else ""
-            self.out.info(f"Starting ssh-agent{context}...")
-            cmd = ["ssh-agent", "-s"]
-            timeout = a.get_value("timeout")
-            if timeout is not None:
-                cmd += ["-t", str(timeout * 60)]
-            ssh_agent_socket = a.get_value("ssh_agent_socket")
-            if ssh_agent_socket:
-                cmd += ["-a", ssh_agent_socket]
-            else:
-                ssh_agent_socket = str(paths.ssh_agent_socket_path)
-                unlink_quiet(ssh_agent_socket)
-                cmd += ["-a", ssh_agent_socket]
-            # User-supplied extra flags (issue #21).
-            # SECURITY: KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only
-            # when --allow-env / -E is set. Direct env var access here is
-            # safe because the gate is enforced at the config layer.
-            cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
-            spawn_env = dict(self.keychain_state.env)
-            if native_confirm:
-                askpass = spawn_env.get("SSH_ASKPASS")
-                if not askpass:
-                    askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
-                    spawn_env["SSH_ASKPASS"] = askpass
-                spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
-            try:
-                r = run(cmd, env=spawn_env)
-            except (FileNotFoundError, OSError) as exc:
-                raise KeychainError(f"Unable to start ssh-agent: {exc}") from exc
-            if r.returncode != 0:
-                detail = (r.stderr or r.stdout).strip()
-                if detail:
-                    raise KeychainError(f"ssh-agent failed to start: {detail}")
-                raise KeychainError(f"ssh-agent failed to start with exit status {r.returncode}")
-            spawned = SshAgentRef.from_text(r.stdout)
-            if not spawned:
-                raise KeychainError("ssh-agent started but did not return its socket information")
-        if spawned:
-            paths.write(spawned, self.out)
-            self.env = spawned
+            ssh_agent_socket = str(paths.ssh_agent_socket_path)
+            unlink_quiet(ssh_agent_socket)
+            cmd += ["-a", ssh_agent_socket]
+        # User-supplied extra flags (issue #21).
+        # SECURITY: KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only
+        # when --allow-env / -E is set. Direct env var access here is
+        # safe because the gate is enforced at the config layer.
+        cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
+        spawn_env = dict(self.keychain_state.env)
+        if native_confirm:
+            askpass = spawn_env.get("SSH_ASKPASS")
+            if not askpass:
+                askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
+                spawn_env["SSH_ASKPASS"] = askpass
+            spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
+        try:
+            r = run(cmd, env=spawn_env)
+        except (FileNotFoundError, OSError) as exc:
+            raise KeychainError(f"Unable to start ssh-agent: {exc}") from exc
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout).strip()
+            if detail:
+                raise KeychainError(f"ssh-agent failed to start: {detail}")
+            raise KeychainError(f"ssh-agent failed to start with exit status {r.returncode}")
+        spawned = SshAgentRef.from_text(r.stdout)
+        if not spawned:
+            raise KeychainError("ssh-agent started but did not return its socket information")
+        paths.write(spawned, self.out)
+        self.env = spawned
+        self.env_source = "spawned"
         return False
 
     def stop(self, which: str) -> None:
@@ -612,8 +553,9 @@ class SshAgent:
     # ---- key operations ----------------------------------------------
 
     def wipe(self) -> None:
+        env = self.env or self.select_existing()
         try:
-            r = run(["ssh-add", "-D"], env=self.env.as_dict(), c_locale=False)
+            r = run(["ssh-add", "-D"], env=env.as_dict(), c_locale=False)
         except (FileNotFoundError, OSError):
             self.out.warn("ssh-add not found")
             return
@@ -623,9 +565,10 @@ class SshAgent:
     def remove(self, ssh_keys: list[str]) -> None:
         if not ssh_keys:
             raise KeychainError("No ssh keys specified to remove.")
+        env = self.env or self.select_existing()
         for k in ssh_keys:
             try:
-                r = run(["ssh-add", "-d", k], env=self.env.as_dict(), c_locale=False)
+                r = run(["ssh-add", "-d", k], env=env.as_dict(), c_locale=False)
             except (FileNotFoundError, OSError):
                 raise KeychainError("ssh-add not found")
             if r.returncode == 0:
@@ -659,7 +602,7 @@ class SshAgent:
         # Re-validate the agent before loading keys to close the TOCTOU race
         # between start() validation and actual key loading.  If the agent
         # died or was replaced, refuse to load keys into a foreign agent.
-        test = self.envcheck("pidfile", self.env, quick=True)
+        test = self._validate_candidate("selected", self.env)
         if not test:
             out.warn("Agent disappeared; refusing to load keys")
             return None
@@ -706,15 +649,15 @@ class SshAgent:
 
     def passthrough(self, arg: str) -> int:
         """Run ``ssh-add <arg>`` inheriting stdio (legacy theme `list` fallback)."""
-        env = self.env.overlay()
+        env = (self.env or self.select_existing()).overlay()
         try:
             return subprocess.run(["ssh-add", arg], env=env, check=False).returncode
         except (FileNotFoundError, OSError):
             return 127
 
 
-class GpgAgent:
-    """gpg-agent operations bound to a :class:`~keychain.state.KeychainState`."""
+class GpgOperations:
+    """Native GnuPG operations bound to a :class:`~keychain.state.KeychainState`."""
 
     def __init__(self, k, out: Output) -> None:
         self.k = k
@@ -743,47 +686,6 @@ class GpgAgent:
             check=False,
         )
 
-    # ---- lifecycle ---------------------------------------------------
-
-    def start(self, ssh_support: bool) -> SshAgentRef | None:
-        """Start (or adopt) gpg-agent. Returns its agent env, or None.
-
-        Adoption is restricted to agents whose socket lives under one of the
-        user's gpg homedirs (see :func:`gpg_socket_is_primary`). A foreign
-        gpg-agent owned by the same uid -- e.g. one spawned by a package
-        manager with ``--homedir /var/tmp/zypp.XXX`` -- is ignored.
-        """
-        out = self.out
-        run_env = self._gpg_env()
-        sock = gpg_main_socket(run_env)
-        if sock and gpg_socket_is_primary(sock, run_env) and ssh_socket_valid(sock):
-            if not ssh_support:
-                out.info(f"Using existing gpg-agent: {out.id(sock)}")
-                return SshAgentRef()
-            ssh_sock = gpg_ssh_socket(run_env)
-            if ssh_sock and ssh_socket_valid(ssh_sock):
-                out.info(f"Using existing gpg-agent: {out.id(ssh_sock)} (SSH)")
-                return SshAgentRef(ssh_sock)
-        if sock and not gpg_socket_is_primary(sock, run_env):
-            out.debug(f"ignoring non-primary gpg-agent socket: {sock}")
-        opts = ["--daemon"]
-        timeout = self.k.args.get_value("timeout")
-        if timeout is not None:
-            secs = timeout * 60
-            opts += [f"--default-cache-ttl={secs}", f"--max-cache-ttl={secs}"]
-        if ssh_support:
-            opts.append("--enable-ssh-support")
-        # User-supplied extra flags (issue #21). Last so they win on duplicates.
-        opts += _split_agent_args(run_env.get("KEYCHAIN_GPG_AGENT_ARGS", ""), "GPG")
-        out.info("Starting gpg-agent...")
-        try:
-            r = run(["gpg-agent", "--sh"] + opts, env=run_env)
-        except (FileNotFoundError, OSError):
-            return None
-        return SshAgentRef.from_text(r.stdout) if r.returncode == 0 else None
-
-    # ---- key operations ----------------------------------------------
-
     def wipe(self) -> None:
         try:
             r = run(
@@ -793,66 +695,34 @@ class GpgAgent:
                 timeout=5,
             )
         except FileNotFoundError:
-            self.out.debug("gpg-agent wipe skipped: gpg-connect-agent not found")
-            return
-        except subprocess.TimeoutExpired:
-            self.out.debug("gpg-agent wipe skipped: gpg-connect-agent timed out")
-            return
+            raise KeychainError("Unable to clear GPG passphrase cache: gpg-connect-agent not found")
+        except subprocess.TimeoutExpired as exc:
+            raise KeychainError("Unable to clear GPG passphrase cache: gpg-connect-agent timed out") from exc
         except OSError as exc:
-            self.out.debug(f"gpg-agent wipe skipped: {exc}")
-            return
+            raise KeychainError(f"Unable to clear GPG passphrase cache: {exc}") from exc
 
         output = "\n".join(part.strip() for part in (r.stdout, r.stderr) if part.strip())
         if r.returncode == 0 and r.stdout.strip() == "OK":
-            self.out.info("gpg-agent: All identities removed.")
-        elif output:
-            self.out.debug(f"gpg-agent could not remove identities: {output}")
-        else:
-            self.out.debug("gpg-agent wipe skipped: no agent response")
+            self.out.info("gpg-agent: Passphrase cache cleared.")
+            return
+        if "no gpg-agent running" in output.lower():
+            self.out.info("No gpg-agent found running.")
+            return
+        if output:
+            raise KeychainError(f"Unable to clear GPG passphrase cache: {output}")
+        raise KeychainError(f"Unable to clear GPG passphrase cache: unconfirmed exit status {r.returncode}")
 
-    def list_missing(self, gpg_keys: list[str], mode: str = "--sign", *, announce_known: bool = True) -> list[str]:
-        out = self.out
-        missing: list[str] = []
-        run_env = self._gpg_env(tty=True)
-        for k in filter(None, gpg_keys):
-            try:
-                r = run(
-                    [
-                        self.k.gpg_prog,
-                        "--no-autostart",
-                        "--no-options",
-                        "--use-agent",
-                        "--no-tty",
-                        mode,
-                        "--local-user",
-                        k,
-                        "-o-",
-                    ],
-                    input_="",
-                    env=run_env,
-                    timeout=10,
-                )
-                if r.returncode == 0:
-                    if announce_known:
-                        out.info(f"Known gpg key: {out.id(k)}")
-                    continue
-            except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
-                pass
-            missing.append(k)
-        return missing
-
-    def load(self, gpg_keys: list[str], mode: str = "--sign") -> bool:
+    def warm_signing(self, gpg_keys: list[str]) -> None:
         out = self.out
         with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
             for index, k in enumerate(filter(None, gpg_keys)):
-                out.info(f"Adding gpg key: {k}")
+                out.info(f"Warming GPG signing key: {out.id(k)}")
                 try:
                     r = self._run_gpg(
                         [
-                            "--no-autostart",
                             "--no-options",
                             "--use-agent",
-                            mode,
+                            "--sign",
                             "--local-user",
                             k,
                             "--output",
@@ -860,24 +730,23 @@ class GpgAgent:
                         ],
                         tty=True,
                     )
-                except (FileNotFoundError, OSError):
-                    out.warn(f"{self.k.gpg_prog} not found")
-                    return False
+                except FileNotFoundError as exc:
+                    raise KeychainError(f"Unable to warm GPG signing key {k}: {self.k.gpg_prog} not found") from exc
+                except OSError as exc:
+                    raise KeychainError(f"Unable to warm GPG signing key {k}: {exc}") from exc
                 if r.returncode != 0:
-                    err = r.stderr.strip()
-                    out.warn(f"Error adding gpg key (error code: {r.returncode}; output: {err})")
-                    return False
-        return True
+                    detail = r.stderr.strip() or f"gpg exited with status {r.returncode}"
+                    raise KeychainError(f"Unable to warm GPG signing key {k}: {detail}")
 
-    def load_decryption(self, gpg_keys: list[str]) -> bool:
+    def warm_decryption(self, gpg_keys: list[str]) -> None:
         out = self.out
         with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
             plain = Path(td) / "plain"
-            cipher = Path(td) / "cipher.gpg"
-            decrypted = Path(td) / "decrypted"
             plain.write_text("keychain\n", encoding="utf-8")
-            for k in filter(None, gpg_keys):
-                out.info(f"Adding gpg encryption key: {k}")
+            for index, k in enumerate(filter(None, gpg_keys)):
+                cipher = Path(td) / f"{index}.gpg"
+                decrypted = Path(td) / f"{index}.plain"
+                out.info(f"Warming GPG decryption key: {out.id(k)}")
                 try:
                     enc = self._run_gpg(
                         [
@@ -896,10 +765,12 @@ class GpgAgent:
                         tty=True,
                         timeout=10,
                     )
+                    if enc.returncode != 0:
+                        detail = enc.stderr.strip() or f"gpg exited with status {enc.returncode}"
+                        raise KeychainError(f"Unable to prepare GPG decryption test for {k}: {detail}")
                     dec = self._run_gpg(
                         [
                             "--yes",
-                            "--no-autostart",
                             "--no-options",
                             "--use-agent",
                             "--decrypt",
@@ -910,17 +781,21 @@ class GpgAgent:
                         tty=True,
                         timeout=30,
                     )
-                except (FileNotFoundError, OSError):
-                    out.warn(f"{self.k.gpg_prog} not found")
-                    return False
-                except subprocess.TimeoutExpired:
-                    out.warn(f"Error adding gpg encryption key: {k} timed out")
-                    return False
-                if enc.returncode != 0 or dec.returncode != 0:
-                    err = (enc.stdout + enc.stderr + dec.stdout + dec.stderr).strip()
-                    out.warn(f"Error adding gpg encryption key (output: {err})")
-                    return False
-        return True
+                except FileNotFoundError as exc:
+                    raise KeychainError(f"Unable to warm GPG decryption key {k}: {self.k.gpg_prog} not found") from exc
+                except subprocess.TimeoutExpired as exc:
+                    raise KeychainError(f"Unable to warm GPG decryption key {k}: operation timed out") from exc
+                except OSError as exc:
+                    raise KeychainError(f"Unable to warm GPG decryption key {k}: {exc}") from exc
+                if dec.returncode != 0:
+                    detail = dec.stderr.strip() or f"gpg exited with status {dec.returncode}"
+                    raise KeychainError(f"Unable to warm GPG decryption key {k}: {detail}")
+                try:
+                    verified = decrypted.read_bytes() == plain.read_bytes()
+                except OSError as exc:
+                    raise KeychainError(f"Unable to verify GPG decryption key {k}: {exc}") from exc
+                if not verified:
+                    raise KeychainError(f"Unable to verify GPG decryption key {k}: decrypted content did not match")
 
 
 def render_list_table(kstate, out: Output) -> int:
@@ -931,7 +806,7 @@ def render_list_table(kstate, out: Output) -> int:
     from .output.tables import render_table
 
     try:
-        result = run(["ssh-add", "-l"], env=kstate.find_active_agent_env.overlay())
+        result = run(["ssh-add", "-l"], env=kstate.selected_ssh_env.overlay())
     except (FileNotFoundError, OSError):
         out.error("ssh-add not found on PATH")
         return 127

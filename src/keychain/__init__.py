@@ -1,4 +1,4 @@
-# keychain - Manager for ssh-agent, gpg-agent and private keys
+# keychain - Manager for ssh-agent and private keys, with native GnuPG support
 # Copyright 2026 Daniel Robbins
 # SPDX-License-Identifier: GPL-3.0-only
 """Python-native keychain implementation.

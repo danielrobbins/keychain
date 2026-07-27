@@ -463,7 +463,7 @@ class TestKeychainAppCoordination:
             installed[sig] = handler
             return previous
 
-        def interrupt(*_args):
+        def interrupt(*_args, **_kwargs):
             installed[signal.SIGTERM](signal.SIGTERM, None)
 
         lock_was_held: list[bool] = []
@@ -475,11 +475,11 @@ class TestKeychainAppCoordination:
             finish_activation(status)
 
         monkeypatch.setattr(main.signal, "signal", fake_signal)
-        monkeypatch.setattr(app, "_wipe_before_activation", interrupt)
         monkeypatch.setattr(coord, "finish_activation", finish_while_locked)
+        app._kstate = SimpleNamespace(ssh=SimpleNamespace(prepare_load=interrupt))
 
         with pytest.raises(SystemExit):
-            app._try_activation(coord, None, main.keys.ResolvedKeys(), False)
+            app._try_activation(coord, None, main.keys.ResolvedKeys(ssh=["key"]), False)
 
         assert lock_was_held == [True]
         assert installed == originals
@@ -504,7 +504,7 @@ class TestKeychainAppCoordination:
         class _SSH:
             env = SshAgentRef(sock="/tmp/agent.sock", pid="123")
 
-            def start(self, _ssh_spawn_gpg, _ssh_allow_gpg):
+            def start(self):
                 return False
 
             def list_missing(self, ssh_keys, *, announce_known=True):
@@ -519,7 +519,7 @@ class TestKeychainAppCoordination:
                 raise AssertionError("wipe should not run")
 
         class _GPG:
-            def start(self, ssh_support):
+            def start(self):
                 raise AssertionError("gpg should not start")
 
         kstate = SimpleNamespace(
@@ -533,7 +533,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, out)
         app._kstate = kstate
 
-        assert app._do_add(main.keys.ResolvedKeys(ssh=["id_ed25519"]), False, False) == 0
+        assert app._do_add(main.keys.ResolvedKeys(ssh=["id_ed25519"])) == 0
 
         assert loaded == [([["ssh-add", "id_ed25519"]], {"SSH_AUTH_SOCK": "/tmp/agent.sock"})]
         assert not paths.lockf.exists()
@@ -579,7 +579,7 @@ class TestKeychainAppCoordination:
         class _SSH:
             env = SshAgentRef(sock="/tmp/agent.sock", pid="123")
 
-            def start(self, _ssh_spawn_gpg, _ssh_allow_gpg):
+            def start(self):
                 return False
 
             def list_missing(self, ssh_keys, *, announce_known=True):
@@ -606,7 +606,7 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(args, _visible_out())
         app._kstate = kstate
 
-        assert app._do_add(main.keys.ResolvedKeys(ssh=["id_ed25519"]), False, False) == 0
+        assert app._do_add(main.keys.ResolvedKeys(ssh=["id_ed25519"])) == 0
 
         assert owner_calls == [[["ssh-add", "id_ed25519"]]]
         assert wait_modes == [False]
@@ -614,34 +614,129 @@ class TestKeychainAppCoordination:
         assert "Key initialization is still needed" not in err
         assert "Keys initialized by another terminal." in err
 
-    def test_gpga_proves_decryption_even_when_signing_is_warm(self):
+    def test_gpg_capabilities_are_warmed_once_with_cross_mode_deduplication(self):
         calls: list[tuple[str, list[str]]] = []
 
-        class _SSH:
-            def list_missing(self, keys, *, announce_known=True):
-                return list(keys)
-
-            def list_missing_pkcs11(self, providers, *, announce_known=True):
-                return list(providers)
-
         class _GPG:
-            def list_missing(self, keys, *, mode="--sign", announce_known=True):
-                return []
+            def warm_signing(self, keys):
+                calls.append(("sign", list(keys)))
 
-            def load(self, keys, mode="--sign"):
-                calls.append((mode, list(keys)))
-                return True
-
-            def load_decryption(self, keys):
+            def warm_decryption(self, keys):
                 calls.append(("decrypt", list(keys)))
-                return True
 
         args = RuntimeConfig.resolve(["add"])
         app = main.KeychainApp(args, _out())
-        app._kstate = SimpleNamespace(ssh=_SSH(), gpg=_GPG())
+        app._kstate = SimpleNamespace(gpg=_GPG())
 
-        missing = app._missing_keys(main.keys.ResolvedKeys(gpg_a=["GPGKEY"]))
-        app._load_gpg_missing_keys(missing)
+        requested = main.keys.ResolvedKeys(
+            gpg=["A"],
+            gpg_s=["A", "B"],
+            gpg_e=["C", "D"],
+            gpg_a=["B", "C"],
+        )
+        app._warm_gpg_keys(requested, False)
 
-        assert missing.gpg_a == ["GPGKEY"]
-        assert calls == [("--sign", ["GPGKEY"]), ("decrypt", ["GPGKEY"])]
+        assert calls == [("sign", ["A", "B", "C"]), ("decrypt", ["C", "D", "B"])]
+
+    def test_bare_gpg_resolution_delegates_to_gnupg(self):
+        calls: list[tuple[str, bool]] = []
+
+        class _State:
+            def resolve_requested_keys(self, _out, *, gpg_lookup=True):
+                calls.append(("resolve", gpg_lookup))
+                return main.keys.ResolvedKeys(gpg=["KEY"])
+
+        app = main.KeychainApp(RuntimeConfig.resolve(["add", "KEY"]), _out())
+        app._kstate = _State()
+
+        resolved = app._resolve_add_keys()
+
+        assert resolved.gpg == ["KEY"]
+        assert calls == [("resolve", True)]
+
+    def test_quick_bare_key_resolution_does_not_probe_gpg(self):
+        class _State:
+            def resolve_requested_keys(self, _out, *, gpg_lookup=True):
+                assert gpg_lookup is False
+                return main.keys.ResolvedKeys(missing=["KEY"])
+
+        app = main.KeychainApp(RuntimeConfig.resolve(["add", "--quick", "KEY"]), _out())
+        app._kstate = _State()
+
+        assert app._resolve_add_keys().missing == ["KEY"]
+
+    def test_explicit_ssh_key_uses_single_resolution_pass(self):
+        class _State:
+            def resolve_requested_keys(self, _out, *, gpg_lookup=True):
+                assert gpg_lookup is True
+                return main.keys.ResolvedKeys(missing=["ghost-key"])
+
+        app = main.KeychainApp(RuntimeConfig.resolve(["add", "sshk:ghost-key"]), _out())
+        app._kstate = _State()
+
+        assert app._resolve_add_keys().missing == ["ghost-key"]
+
+    def test_gpg_warmup_wipes_cache_first(self):
+        calls: list[str] = []
+
+        class _GPG:
+            def wipe(self):
+                calls.append("wipe")
+
+            def warm_signing(self, _keys):
+                calls.append("sign")
+
+            def warm_decryption(self, _keys):
+                calls.append("decrypt")
+
+        app = main.KeychainApp(RuntimeConfig.resolve(["add"]), _out())
+        app._kstate = SimpleNamespace(gpg=_GPG())
+
+        app._warm_gpg_keys(main.keys.ResolvedKeys(gpg_a=["KEY"]), True)
+
+        assert calls == ["wipe", "sign", "decrypt"]
+
+    @pytest.mark.parametrize("quick_succeeded", [False, True])
+    def test_quick_gpg_add_is_ssh_only(self, tmp_path, quick_succeeded):
+        calls: list[str] = []
+
+        class _SSH:
+            env = SshAgentRef(sock="/tmp/agent.sock", pid="123")
+
+            def start(self):
+                calls.append("ssh.start")
+                return quick_succeeded
+
+            def list_missing(self, ssh_keys, *, announce_known=True):
+                assert ssh_keys == []
+                return []
+
+        app = main.KeychainApp(RuntimeConfig.resolve(["add", "--quick"]), _out())
+        app._kstate = SimpleNamespace(
+            paths=KeychainPaths(keydir=tmp_path, host="box"),
+            ssh=_SSH(),
+            gpg=object(),
+        )
+
+        assert app._do_add(main.keys.ResolvedKeys(gpg=["KEY"])) == 0
+        assert calls == ["ssh.start"]
+
+    def test_no_passphrase_starts_only_ssh_agent(self, tmp_path):
+        calls: list[str] = []
+
+        class _SSH:
+            env = SshAgentRef(sock="/tmp/agent.sock", pid="123")
+
+            def start(self):
+                calls.append("ssh.start")
+                return False
+
+        app = main.KeychainApp(RuntimeConfig.resolve(["add", "--no-passphrase"]), _out())
+        app._kstate = SimpleNamespace(
+            paths=KeychainPaths(keydir=tmp_path, host="box"),
+            ssh=_SSH(),
+            gpg=object(),
+        )
+
+        assert app._do_add(main.keys.ResolvedKeys(gpg=["KEY"])) == 0
+        assert calls == ["ssh.start"]

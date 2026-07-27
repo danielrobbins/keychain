@@ -226,10 +226,7 @@ def test_render_inspect_json_emits_valid_object(paths, capsys):
     assert payload["runtime"]["gpg"].keys() == {
         "version",
         "path",
-        "ssh_support",
-        "ssh_socket",
         "main_socket",
-        "primary_socket_is_ours",
     }
     assert payload["configuration"] == {}
     assert payload["keychain_state"]["keydir"]["path"] == str(paths.keydir)
@@ -297,94 +294,6 @@ def test_render_inspect_json_includes_resolved_keys_when_args(tmp_path, paths, c
 
 
 # ---------------------------------------------------------------------------
-# Foreign gpg-agent classification (issue #202)
-# ---------------------------------------------------------------------------
-
-
-class TestGpgPrimaryClassification:
-    def test_primary_socket_under_homedir_is_ours(self, paths, tmp_path):
-        gh = tmp_path / ".gnupg"
-        gh.mkdir()
-        sock = str(gh / "S.gpg-agent")
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=sock),
-            patch.object(agents, "gpg_user_homedirs", return_value=[gh.resolve()]),
-        ):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_primary_socket_is_ours is True
-
-    def test_foreign_socket_not_ours(self, paths, tmp_path):
-        gh = tmp_path / ".gnupg"
-        gh.mkdir()
-        foreign = tmp_path / "zypp.XYZ"
-        foreign.mkdir()
-        sock = str(foreign / "S.gpg-agent")
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=sock),
-            patch.object(agents, "gpg_user_homedirs", return_value=[gh.resolve()]),
-        ):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_primary_socket_is_ours is False
-
-    def test_no_socket_is_not_ours(self, paths):
-        with patch.object(agents, "gpg_main_socket", return_value=""):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_primary_socket_is_ours is False
-
-    def test_foreign_agents_present_when_pids_but_no_primary(self, paths, tmp_path):
-        # Simulates softmoth's #202: pids found, but socket not in our homedir.
-        foreign = tmp_path / "zypp.XYZ"
-        foreign.mkdir()
-        sock = str(foreign / "S.gpg-agent")
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=sock),
-            patch.object(agents, "gpg_user_homedirs", return_value=[tmp_path / ".gnupg"]),
-            patch.object(agents, "findpids", return_value=[4948]),
-            patch.object(state.KeychainState, "process_listing_supported", True),
-        ):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_foreign_agents_present is True
-
-    def test_no_foreign_agents_when_socket_is_ours(self, paths, tmp_path):
-        gh = tmp_path / ".gnupg"
-        gh.mkdir()
-        sock = str(gh / "S.gpg-agent")
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=sock),
-            patch.object(agents, "gpg_user_homedirs", return_value=[gh.resolve()]),
-            patch.object(agents, "findpids", return_value=[3855]),
-            patch.object(state.KeychainState, "process_listing_supported", True),
-        ):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_foreign_agents_present is False
-
-    def test_extras_alongside_ours_are_foreign(self, paths, tmp_path):
-        # Primary socket is ours, but a second gpg-agent pid exists --
-        # gpg-agent is single-instance per --homedir, so the extra
-        # must belong to a different homedir (e.g. zypp).
-        gh = tmp_path / ".gnupg"
-        gh.mkdir()
-        sock = str(gh / "S.gpg-agent")
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=sock),
-            patch.object(agents, "gpg_user_homedirs", return_value=[gh.resolve()]),
-            patch.object(agents, "findpids", return_value=[3855, 4948]),
-            patch.object(state.KeychainState, "process_listing_supported", True),
-        ):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_foreign_agents_present is True
-
-    def test_no_pids_means_no_foreign(self, paths):
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=""),
-            patch.object(agents, "findpids", return_value=[]),
-            patch.object(state.KeychainState, "process_listing_supported", True),
-        ):
-            st = state.KeychainState(paths=paths)
-            assert st.gpg_foreign_agents_present is False
-
-
-# ---------------------------------------------------------------------------
 # security_audit rows
 # ---------------------------------------------------------------------------
 
@@ -432,17 +341,7 @@ class TestSecurityAudit:
             assert "refusing to use" in row.message
             assert row.severity == "err"
 
-    def test_foreign_gpg_socket_not_in_security_audit(self, paths, tmp_path):
-        # GPG socket ownership is surfaced in the GPG panel (main socket hint),
-        # not in security_audit. Verify audit has no gpg rows.
-        foreign = tmp_path / "zypp.XYZ"
-        foreign.mkdir()
-        sock = str(foreign / "S.gpg-agent")
-        with (
-            patch.object(agents, "gpg_main_socket", return_value=sock),
-            patch.object(agents, "gpg_user_homedirs", return_value=[tmp_path / ".gnupg"]),
-        ):
-            ks = state.KeychainState(paths=paths)
-            labels = [check.label for check in ks.security_audit]
-            assert "gpg primary socket" not in labels
-            assert "foreign gpg-agents" not in labels
+    def test_gpg_state_not_in_security_audit(self, paths):
+        ks = state.KeychainState(paths=paths)
+        labels = [check.label for check in ks.security_audit]
+        assert not any("gpg" in label for label in labels)

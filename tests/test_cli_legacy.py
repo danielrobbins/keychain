@@ -38,6 +38,12 @@ class TestParseArgsLegacy:
         assert ns.get_value("wipe_ssh") is True
         assert ns.get_value("wipe_gpg") is False
 
+    def test_legacy_wipe_all(self):
+        ns = RuntimeConfig.resolve(["--wipe", "all"])
+        assert ns.action == "wipe"
+        assert ns.get_value("wipe_ssh") is True
+        assert ns.get_value("wipe_gpg") is True
+
     def test_legacy_keys_become_start(self):
         ns = RuntimeConfig.resolve(["id_rsa"])
         assert ns.action == "add"
@@ -70,7 +76,6 @@ class TestParseArgsLegacy:
             (["--gpg2"], "gpg2", True),
             (["--absolute"], "absolute", True),
             (["--extended"], "extended", True),
-            (["--ssh-allow-gpg"], "ssh_allow_gpg", True),
             (["--ssh-allow-forwarded"], "ssh_allow_forwarded", True),
         ],
     )
@@ -83,6 +88,32 @@ class TestParseArgsLegacy:
         ns = RuntimeConfig.resolve(argv)
         assert ns.action == "add"
         assert ns.get_value(varname) is expected
+
+    @pytest.mark.parametrize("flag", ["--ssh-allow-gpg", "--ssh-spawn-gpg"])
+    def test_gpg_ssh_agent_flags_are_ignored_with_warning(self, flag, capsys):
+        config = RuntimeConfig.resolve([flag])
+
+        assert config.action == "add"
+        assert config.parse_error is None
+        assert config.get_value(flag.lstrip("-").replace("-", "_")) is True
+
+        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+        assert KeychainApp(config, out)._resolve_action() == "add"
+        assert (
+            f"{flag} is deprecated and ignored; Keychain now uses ssh-agent exclusively for SSH keys."
+            in capsys.readouterr().err
+        )
+
+    @pytest.mark.parametrize("flag", ["--ssh-allow-gpg", "--ssh-spawn-gpg"])
+    def test_gpg_ssh_agent_flags_remain_noops_for_agent_start(self, flag, capsys):
+        config = RuntimeConfig.resolve(["agent", "start", flag])
+
+        assert config.action == "agent start"
+        assert config.parse_error is None
+
+        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+        assert KeychainApp(config, out)._resolve_action() == "agent_start"
+        assert "deprecated and ignored" in capsys.readouterr().err
 
     def test_legacy_298_ssh_agent_socket_still_takes_a_value(self):
         """Verify the legacy socket override spelling from 2.9.8 still parses unchanged."""

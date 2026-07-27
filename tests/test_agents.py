@@ -7,6 +7,7 @@ import os
 import socket
 import stat
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -94,16 +95,14 @@ class TestExtractFingerprints:
 
 
 class TestListSelection:
-    def test_ssh_agent_defaults_to_find_active_agent_env(self):
-        """Verify SshAgent starts from KeychainState.find_active_agent_env because that cached state is the single source of truth for live agent variables."""
-        kstate = SimpleNamespace(find_active_agent_env=SshAgentRef(sock="/tmp/live.sock", pid="1111"))
+    def test_ssh_agent_starts_without_an_unvalidated_reference(self):
+        kstate = SimpleNamespace()
 
         agent = agents.SshAgent(kstate, _out())
 
-        assert agent.env == kstate.find_active_agent_env
+        assert agent.env == SshAgentRef()
 
-    def test_render_list_table_uses_find_active_agent_env(self, monkeypatch, capsys):
-        """Verify modern list rendering shells out with find_active_agent_env because stale pidfile values must not override the selected live agent."""
+    def test_render_list_table_uses_policy_selected_agent(self, monkeypatch, capsys):
         seen = []
 
         def fake_run(cmd, env=None, **_kwargs):
@@ -112,7 +111,7 @@ class TestListSelection:
 
         monkeypatch.setattr(agents, "run", fake_run)
         kstate = SimpleNamespace(
-            find_active_agent_env=SshAgentRef(sock="/tmp/live.sock", pid="1111"),
+            selected_ssh_env=SshAgentRef(sock="/tmp/live.sock", pid="1111"),
             pidfile_env=SshAgentRef(sock="/tmp/stale.sock", pid="9999"),
             ssh=SimpleNamespace(passthrough=lambda _flag: 0),
         )
@@ -131,11 +130,11 @@ class TestSshAgentLoadOutput:
             return {"no_gui": True, "confirm": False, "timeout": None}.get(name, False)
 
         kstate = SimpleNamespace(
-            find_active_agent_env=SshAgentRef(sock="/tmp/agent.sock", pid="1111"),
             args=SimpleNamespace(get_value=get_value),
         )
         agent = agents.SshAgent(kstate, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
-        monkeypatch.setattr(agent, "envcheck", lambda *_args, **_kwargs: agent.env)
+        agent.env = SshAgentRef(sock="/tmp/agent.sock", pid="1111")
+        monkeypatch.setattr(agent, "_validate_candidate", lambda *_args, **_kwargs: agent.env)
         monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
         return agent
 
@@ -248,11 +247,11 @@ class TestSshAgentLoadOutput:
 
 
 # ---------------------------------------------------------------------------
-# gpg-agent wipe output
+# gpg-agent cache flush output
 # ---------------------------------------------------------------------------
 
 
-class TestGpgAgentEnvironment:
+class TestGpgOperationsEnvironment:
     def _agent(self, *, no_gui: bool):
         env = {
             "KEYCHAIN_TEST_MARKER": "preserved",
@@ -266,7 +265,7 @@ class TestGpgAgentEnvironment:
             args=SimpleNamespace(get_value=lambda name: no_gui if name == "no_gui" else None),
             gpg_prog="gpg",
         )
-        return agents.GpgAgent(state, Output.silent())
+        return agents.GpgOperations(state, Output.silent())
 
     def test_no_gui_removes_x11_wayland_and_askpass(self):
         env = self._agent(no_gui=True)._gpg_env()
@@ -279,20 +278,6 @@ class TestGpgAgentEnvironment:
 
         assert env["DISPLAY"] == ":0"
         assert env["WAYLAND_DISPLAY"] == "wayland-0"
-
-    def test_missing_probe_uses_resolved_no_gui_environment(self, monkeypatch):
-        captured: list[dict[str, str]] = []
-
-        def fake_run(_cmd, **kwargs):
-            captured.append(kwargs["env"])
-            return SimpleNamespace(returncode=1, stdout="", stderr="")
-
-        monkeypatch.setattr(agents, "run", fake_run)
-
-        assert self._agent(no_gui=True).list_missing(["KEY"]) == ["KEY"]
-        assert captured[0]["KEYCHAIN_TEST_MARKER"] == "preserved"
-        for key in ("DISPLAY", "WAYLAND_DISPLAY", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE"):
-            assert key not in captured[0]
 
     def test_gpg_subprocess_helper_uses_resolved_tty_environment(self, monkeypatch):
         captured: list[dict[str, str]] = []
@@ -312,14 +297,14 @@ class TestGpgAgentEnvironment:
             assert key not in captured[0]
 
 
-class TestGpgAgentLoad:
+class TestGpgOperationsWarmup:
     def test_cancelled_warmup_never_renders_binary_output(self, monkeypatch, capsys):
         state = SimpleNamespace(
             env={},
             args=SimpleNamespace(get_value=lambda _name: False),
             gpg_prog="gpg",
         )
-        agent = agents.GpgAgent(state, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
+        agent = agents.GpgOperations(state, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
         command: list[str] = []
 
         def fake_run(args, **_kwargs):
@@ -332,17 +317,65 @@ class TestGpgAgentLoad:
 
         monkeypatch.setattr(agent, "_run_gpg", fake_run)
 
-        assert agent.load(["KEYID"]) is False
+        with pytest.raises(KeychainError, match="Unable to warm GPG signing key KEYID:.*Operation cancelled") as exc:
+            agent.warm_signing(["KEYID"])
 
         err = capsys.readouterr().err
-        assert "Operation cancelled" in err
+        assert "\x1b" not in str(exc.value)
+        assert "\ufffd" not in str(exc.value)
         assert "\x1b" not in err
         assert "\ufffd" not in err
         assert "-o-" not in command
         assert "--output" in command
 
+    def test_decryption_stops_when_encryption_fails(self, monkeypatch):
+        agent = TestGpgOperationsEnvironment()._agent(no_gui=True)
+        calls = 0
 
-class TestGpgAgentWipe:
+        def fake_run(_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(returncode=2, stdout="", stderr="gpg: unusable public key")
+
+        monkeypatch.setattr(agent, "_run_gpg", fake_run)
+
+        with pytest.raises(
+            KeychainError,
+            match="Unable to prepare GPG decryption test for KEYID: gpg: unusable public key",
+        ):
+            agent.warm_decryption(["KEYID"])
+
+        assert calls == 1
+
+    def test_decryption_requires_matching_plaintext(self, monkeypatch):
+        agent = TestGpgOperationsEnvironment()._agent(no_gui=True)
+
+        def fake_run(args, **_kwargs):
+            output = Path(args[args.index("--output") + 1])
+            output.write_bytes(b"ciphertext" if "--encrypt" in args else b"wrong plaintext")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(agent, "_run_gpg", fake_run)
+
+        with pytest.raises(
+            KeychainError,
+            match="Unable to verify GPG decryption key KEYID: decrypted content did not match",
+        ):
+            agent.warm_decryption(["KEYID"])
+
+
+class TestPassiveGpgQuery:
+    def test_missing_connect_agent_is_tolerated(self, monkeypatch):
+        monkeypatch.setattr(
+            agents,
+            "run",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("gpg-connect-agent")),
+        )
+
+        assert agents.gpg_main_socket({}) == ""
+
+
+class TestGpgOperationsWipe:
     def _agent(self, monkeypatch, returncode=1, stdout="", stderr="", debug=False):
         def fake_run(cmd, **kwargs):
             assert cmd == ["gpg-connect-agent", "--no-autostart"]
@@ -357,30 +390,41 @@ class TestGpgAgentWipe:
             env={"KEYCHAIN_TEST_MARKER": "preserved"},
             args=SimpleNamespace(get_value=lambda _name: False),
         )
-        return agents.GpgAgent(state, out)
+        return agents.GpgOperations(state, out)
 
-    def test_blank_failure_is_quiet_by_default(self, monkeypatch, capsys):
-        """Verify a no-agent/no-output gpg wipe failure does not render a janky empty output detail."""
-        self._agent(monkeypatch, returncode=1).wipe()
+    def test_blank_failure_is_an_error(self, monkeypatch):
+        with pytest.raises(KeychainError, match="unconfirmed exit status 1"):
+            self._agent(monkeypatch, returncode=1).wipe()
 
-        err = capsys.readouterr().err
-        assert err == ""
-        assert "output:" not in err
+    def test_no_running_agent_is_an_idempotent_success(self, monkeypatch, capsys):
+        self._agent(monkeypatch, returncode=0, stderr="gpg-connect-agent: no gpg-agent running in this session").wipe()
 
-    def test_failure_details_are_debug_only(self, monkeypatch, capsys):
-        """Verify non-empty gpg wipe diagnostics are available in debug mode without polluting normal startup output."""
-        self._agent(monkeypatch, returncode=1, stderr="ERR 67108983 No agent running\n", debug=True).wipe()
+        assert "No gpg-agent found running." in capsys.readouterr().err
 
-        err = capsys.readouterr().err
-        assert "gpg-agent could not remove identities" in err
-        assert "No agent running" in err
-        assert "output:" not in err
+    def test_agent_error_is_reported(self, monkeypatch):
+        with pytest.raises(KeychainError, match="Unable to clear GPG passphrase cache: ERR 42 failure"):
+            self._agent(monkeypatch, returncode=1, stderr="ERR 42 failure\n").wipe()
 
     def test_success_stays_visible(self, monkeypatch, capsys):
-        """Verify a confirmed gpg-agent wipe still reports success to the user."""
+        """Verify a confirmed gpg-agent cache flush reports success."""
         self._agent(monkeypatch, returncode=0, stdout="OK\n").wipe()
 
-        assert "gpg-agent: All identities removed." in capsys.readouterr().err
+        assert "gpg-agent: Passphrase cache cleared." in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("error", "message"),
+        [
+            (FileNotFoundError(), "gpg-connect-agent not found"),
+            (subprocess.TimeoutExpired("gpg-connect-agent", 5), "gpg-connect-agent timed out"),
+            (OSError("transport failed"), "transport failed"),
+        ],
+    )
+    def test_subprocess_failures_are_reported(self, monkeypatch, error, message):
+        monkeypatch.setattr(agents, "run", lambda *_args, **_kwargs: (_ for _ in ()).throw(error))
+        state = SimpleNamespace(env={}, args=SimpleNamespace(get_value=lambda _name: False))
+
+        with pytest.raises(KeychainError, match=message):
+            agents.GpgOperations(state, Output.silent()).wipe()
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +475,6 @@ def test_findpids_matches_only_exact_agent_basename(monkeypatch):
 class TestSshAgentStop:
     def _agent(self, pid: str, cleared: list[bool]):
         state = SimpleNamespace(
-            find_active_agent_env=SshAgentRef(sock="/tmp/agent.sock", pid=pid),
             pidfile_env=SshAgentRef(sock="/tmp/agent.sock", pid=pid),
             user="tester",
             paths=SimpleNamespace(clear=lambda: cleared.append(True)),
@@ -462,7 +505,7 @@ class TestSshAgentStop:
 
 
 # ---------------------------------------------------------------------------
-# ssh_socket_valid (owner check) and gpg_socket_is_primary
+# ssh_socket_valid (owner check)
 # ---------------------------------------------------------------------------
 
 
@@ -534,47 +577,17 @@ class TestSshSocketValid:
             s.close()
 
 
-class TestGpgSocketIsPrimary:
-    def test_socket_under_gnupghome_is_primary(self, tmp_path):
-        """Verify a socket inside GNUPGHOME is treated as primary because that directory explicitly defines the active GnuPG home."""
-        gh = tmp_path / "gnupg"
-        gh.mkdir()
-        sock = gh / "S.gpg-agent"
-        env = {"GNUPGHOME": str(gh), "HOME": str(tmp_path)}
-        assert agents.gpg_socket_is_primary(str(sock), env=env, uid=1000)
-
-    def test_socket_under_home_dot_gnupg_is_primary(self, tmp_path):
-        """Verify a socket inside HOME/.gnupg is treated as primary because that is GnuPG's default home when GNUPGHOME is unset."""
-        (tmp_path / ".gnupg").mkdir()
-        sock = tmp_path / ".gnupg" / "S.gpg-agent"
-        env = {"HOME": str(tmp_path)}
-        assert agents.gpg_socket_is_primary(str(sock), env=env, uid=1000)
-
-    def test_foreign_homedir_rejected(self, tmp_path):
-        """Verify sockets under an unrelated homedir are rejected because package-manager scratch agents must not be mistaken for the user's primary agent."""
-        # Simulates package-manager: gpg-agent --homedir /var/tmp/zypp.X
-        foreign = tmp_path / "zypp.XXX"
-        foreign.mkdir()
-        sock = foreign / "S.gpg-agent"
-        env = {"HOME": str(tmp_path / "home"), "GNUPGHOME": str(tmp_path / "home" / ".gnupg")}
-        assert not agents.gpg_socket_is_primary(str(sock), env=env, uid=1000)
-
-    def test_empty_socket_rejected(self):
-        """Verify an empty socket path is rejected because there is no candidate GnuPG socket to classify as primary."""
-        assert not agents.gpg_socket_is_primary("", env={"HOME": "/x"}, uid=1000)
-
-
 # ---------------------------------------------------------------------------
 # Issue #181: don't claim "forwarded socket" when source is unknown
 # ---------------------------------------------------------------------------
 
 
-class TestSshEnvcheckUnknownSource:
+class TestSshCandidateValidation:
     """When SSH_AUTH_SOCK is valid but no SSH_AGENT_PID and not GnuPG,
     the message must be honest (path included, source called unknown)."""
 
     def test_unknown_source_message_includes_path_and_does_not_claim_forwarded(self, tmp_path, monkeypatch):
-        """Verify envcheck names an otherwise valid socket as unknown source because without PID or GnuPG evidence it must not claim the socket was forwarded."""
+        """An otherwise valid socket without a PID has an unknown source."""
         sock_path = tmp_path / "agent.sock"
         sock_path.write_text("")  # placeholder; validate_ssh_socket is mocked
         captured: list[str] = []
@@ -598,22 +611,126 @@ class TestSshEnvcheckUnknownSource:
         # Pretend the socket is valid and that GnuPG isn't supplying it,
         # so we hit the "unknown source" branch.
         monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
-        monkeypatch.setattr(agents, "gpg_ssh_socket", lambda: None)
+        monkeypatch.setattr(agents, "gpg_ssh_socket", lambda _env=None: None)
 
         env = SshAgentRef(str(sock_path))
-        # Build a minimal SshAgent: envcheck reads self._allow_gpg and
-        # self._allow_forwarded (latched by start()), self.out, and the host
-        # probes validate_ssh_socket / gpg_ssh_socket which we mocked above.
         from keychain import state
         from keychain.paths import KeychainPaths
 
         kstate = state.KeychainState(paths=KeychainPaths(keydir=tmp_path, host="h"))
         agent = agents.SshAgent(kstate, _Out())
-        ok = agent.envcheck("env", env, quick=False)
+        ok = agent._validate_candidate("env", env, announce=True)
         assert ok is None
         joined = " ".join(captured)
         assert str(sock_path) in joined
         assert "forwarded" not in joined.lower()
+
+    @pytest.mark.parametrize("pid", ["", "123"])
+    def test_gpg_ssh_socket_is_not_adopted(self, pid, tmp_path, monkeypatch):
+        sock_path = tmp_path / "S.gpg-agent.ssh"
+        captured: list[str] = []
+
+        class _Out:
+            debug = note = warn = lambda _self, msg: captured.append(msg)
+
+        monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
+        monkeypatch.setattr(agents, "gpg_ssh_socket", lambda _env=None: str(sock_path))
+
+        from keychain import state
+        from keychain.paths import KeychainPaths
+
+        kstate = state.KeychainState(paths=KeychainPaths(keydir=tmp_path, host="h"))
+        agent = agents.SshAgent(kstate, _Out())
+
+        assert agent._validate_candidate("env", SshAgentRef(str(sock_path), pid), announce=True) is None
+        assert "Keychain manages SSH keys with ssh-agent" in " ".join(captured)
+
+
+class TestSshAgentSelection:
+    @staticmethod
+    def _agent(
+        *,
+        pidfile: SshAgentRef = SshAgentRef(),
+        inherited: SshAgentRef = SshAgentRef(),
+        platform_name: str = "linux",
+        **options,
+    ):
+        args = SimpleNamespace(get_value=lambda name: options.get(name))
+        state = SimpleNamespace(
+            args=args,
+            env=inherited.as_dict(),
+            inherited_env=inherited,
+            pidfile_env=pidfile,
+            platform=SimpleNamespace(name=platform_name),
+        )
+        return agents.SshAgent(state, _out())
+
+    @staticmethod
+    def _valid_candidates(monkeypatch):
+        monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
+        monkeypatch.setattr(agents, "gpg_ssh_socket", lambda _env=None: "")
+        monkeypatch.setattr(agents, "pid_alive", lambda _pid: True)
+
+    def test_pidfile_precedes_inherited_agent(self, monkeypatch):
+        self._valid_candidates(monkeypatch)
+        pidfile = SshAgentRef("/tmp/pidfile.sock", "11")
+        inherited = SshAgentRef("/tmp/inherited.sock", "22")
+        agent = self._agent(pidfile=pidfile, inherited=inherited)
+
+        assert agent.select_existing() == pidfile
+        assert agent.env_source == "pidfile"
+
+    def test_rejected_pidfile_falls_back_to_inherited_agent(self, monkeypatch):
+        self._valid_candidates(monkeypatch)
+        monkeypatch.setattr(agents, "pid_alive", lambda pid: pid == 22)
+        inherited = SshAgentRef("/tmp/inherited.sock", "22")
+        agent = self._agent(pidfile=SshAgentRef("/tmp/stale.sock", "11"), inherited=inherited)
+
+        assert agent.select_existing() == inherited
+        assert agent.env_source == "env"
+
+    def test_gpg_pidfile_is_rejected_before_inherited_agent(self, monkeypatch):
+        self._valid_candidates(monkeypatch)
+        gpg = SshAgentRef("/tmp/S.gpg-agent.ssh", "11")
+        inherited = SshAgentRef("/tmp/inherited.sock", "22")
+        monkeypatch.setattr(agents, "gpg_ssh_socket", lambda _env=None: gpg.sock)
+        agent = self._agent(pidfile=gpg, inherited=inherited)
+
+        assert agent.select_existing() == inherited
+        assert agent.env_source == "env"
+
+    def test_wipe_uses_policy_selected_agent(self, monkeypatch):
+        self._valid_candidates(monkeypatch)
+        gpg = SshAgentRef("/tmp/S.gpg-agent.ssh", "11")
+        inherited = SshAgentRef("/tmp/inherited.sock", "22")
+        monkeypatch.setattr(agents, "gpg_ssh_socket", lambda _env=None: gpg.sock)
+        seen = []
+
+        def fake_run(cmd, *, env, **_kwargs):
+            seen.append((cmd, env))
+            return SimpleNamespace(returncode=0, stdout="All identities removed.", stderr="")
+
+        monkeypatch.setattr(agents, "run", fake_run)
+        self._agent(pidfile=gpg, inherited=inherited).wipe()
+
+        assert seen == [(["ssh-add", "-D"], inherited.as_dict())]
+
+    def test_forwarded_agent_requires_explicit_permission(self, monkeypatch):
+        self._valid_candidates(monkeypatch)
+        forwarded = SshAgentRef("/tmp/forwarded.sock")
+
+        assert not self._agent(inherited=forwarded).select_existing()
+        assert self._agent(inherited=forwarded, ssh_allow_forwarded=True).select_existing().forwarded
+
+    @pytest.mark.parametrize(
+        ("platform_name", "options"),
+        [("linux", {"no_inherit": True}), ("darwin", {"confirm": True})],
+    )
+    def test_inherited_agent_can_be_disabled_by_policy(self, monkeypatch, platform_name, options):
+        self._valid_candidates(monkeypatch)
+        inherited = SshAgentRef("/tmp/inherited.sock", "22")
+
+        assert not self._agent(inherited=inherited, platform_name=platform_name, **options).select_existing()
 
 
 class TestSshAgentStartupOutput:
@@ -646,7 +763,7 @@ class TestSshAgentStartupOutput:
         paths.write(SshAgentRef(sock=str(tmp_path / "missing-agent.sock"), pid="999999"), _out())
         self._fake_spawn(monkeypatch)
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         err = capsys.readouterr().err
         assert "Starting ssh-agent (previous pidfile stale: socket missing)..." in err
@@ -660,7 +777,7 @@ class TestSshAgentStartupOutput:
         paths.write(SshAgentRef(sock=str(bad_sock), pid="999999"), _out())
         self._fake_spawn(monkeypatch)
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         err = capsys.readouterr().err
         assert "SSH_AUTH_SOCK in pidfile points" in err
@@ -672,7 +789,7 @@ class TestSshAgentStartupOutput:
         agent, _paths = self._agent_with_args(short_keydir)
         self._fake_spawn(monkeypatch)
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         assert agent.env.sock == "/tmp/keychain-test-agent.sock"
         assert agent.env.pid == "12345"
@@ -690,7 +807,7 @@ class TestSshAgentStartupOutput:
         )
 
         with pytest.raises(agents.KeychainError, match="path too long for Unix domain socket"):
-            agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+            agent.start()
 
     def test_unparseable_spawn_output_is_rejected(self, short_keydir, monkeypatch):
         agent, _paths = self._agent_with_args(short_keydir)
@@ -701,14 +818,14 @@ class TestSshAgentStartupOutput:
         )
 
         with pytest.raises(agents.KeychainError, match="did not return its socket information"):
-            agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+            agent.start()
 
     def test_confirm_and_no_gui_are_rejected(self, short_keydir):
         """Confirmation must fail closed instead of silently loading an unconstrained key."""
         agent, _paths = self._agent_with_args(short_keydir, "--confirm", "--no-gui")
 
         with pytest.raises(agents.KeychainError, match="requires graphical confirmation"):
-            agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+            agent.start()
 
     def test_macos_confirm_configures_new_agent_with_native_askpass(self, short_keydir, monkeypatch):
         """A managed macOS agent must inherit the helper needed for later signing prompts."""
@@ -729,7 +846,7 @@ class TestSshAgentStartupOutput:
 
         monkeypatch.setattr(agents, "run", fake_run)
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         helper = paths.keydir / "ssh-askpass-macos"
         assert captured_env is not None
@@ -760,7 +877,7 @@ class TestSshAgentStartupOutput:
 
         monkeypatch.setattr(agents, "run", fake_run)
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         assert captured_env is not None
         assert captured_env["SSH_ASKPASS"] == "/custom/askpass"
@@ -774,14 +891,14 @@ class TestSshAgentStartupOutput:
         agent.keychain_state.env.update({"SSH_AUTH_SOCK": "/tmp/inherited.sock", "SSH_AGENT_PID": "42"})
         checked_sources: list[str] = []
 
-        def fake_envcheck(source, agent_env, quick):
+        def fake_validation(source, agent_env, *, announce=False):
             checked_sources.append(source)
             return agent_env
 
-        monkeypatch.setattr(agent, "envcheck", fake_envcheck)
+        monkeypatch.setattr(agent, "_validate_candidate", fake_validation)
         self._fake_spawn(monkeypatch)
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         assert "env" not in checked_sources
         assert agent.env.sock == "/tmp/keychain-test-agent.sock"
@@ -792,10 +909,10 @@ class TestSshAgentStartupOutput:
         monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
         pidfile_agent = SshAgentRef(sock="/tmp/pidfile.sock", pid="42")
         paths.write(pidfile_agent, _out())
-        monkeypatch.setattr(agent, "envcheck", lambda _source, agent_env, quick: agent_env)
+        monkeypatch.setattr(agent, "_validate_candidate", lambda _source, agent_env, **_kwargs: agent_env)
         monkeypatch.setattr(agents, "run", lambda *_args, **_kwargs: pytest.fail("must reuse pidfile agent"))
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         assert agent.env == pidfile_agent
 
@@ -806,10 +923,10 @@ class TestSshAgentStartupOutput:
         monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name=platform_name))
         inherited = SshAgentRef(sock="/tmp/inherited.sock", pid="42")
         agent.keychain_state.env.update(inherited.as_dict())
-        monkeypatch.setattr(agent, "envcheck", lambda _source, agent_env, quick: agent_env)
+        monkeypatch.setattr(agent, "_validate_candidate", lambda _source, agent_env, **_kwargs: agent_env)
         monkeypatch.setattr(agents, "run", lambda *_args, **_kwargs: pytest.fail("must reuse inherited agent"))
 
-        agent.start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        agent.start()
 
         assert agent.env == inherited
 
@@ -861,34 +978,12 @@ class TestAgentArgsPassthrough:
         # Force a "spawn new agent" path: empty pidfile, no inherited env.
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
         monkeypatch.delenv("SSH_AGENT_PID", raising=False)
-        self._build_ssh_agent(short_keydir).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        self._build_ssh_agent(short_keydir).start()
         # ssh-agent invocation is the last captured run.
         cmd = cap[-1]
         assert cmd[0] == "ssh-agent"
         assert "-O" in cmd and "no-restrict-websafe" in cmd
         assert "-t" in cmd and "7200" in cmd
-
-    def test_gpg_agent_args_appended(self, monkeypatch, tmp_path):
-        """Verify KEYCHAIN_GPG_AGENT_ARGS tokens are appended to gpg-agent because callers need a supported way to extend the spawned daemon command line."""
-        from keychain import state
-        from keychain.paths import KeychainPaths
-        from keychain.runtime.config import RuntimeConfig
-
-        cap = self._capture_run(monkeypatch)
-        monkeypatch.setenv("KEYCHAIN_GPG_AGENT_ARGS", "--allow-preset-passphrase --debug-level=basic")
-        # Pretend no existing gpg-agent so we go down the spawn path.
-        monkeypatch.setattr(agents, "gpg_main_socket", lambda *_args, **_kwargs: "")
-        args = RuntimeConfig.resolve(["add", "--no-gui"])
-        kstate = state.KeychainState(
-            paths=KeychainPaths(keydir=tmp_path, host="h"),
-            args=args,
-        )
-        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
-        agents.GpgAgent(kstate, out).start(ssh_support=False)
-        cmd = cap[-1]
-        assert cmd[0] == "gpg-agent"
-        assert "--allow-preset-passphrase" in cmd
-        assert "--debug-level=basic" in cmd
 
     def test_malformed_ssh_agent_args_are_user_error(self, monkeypatch, short_keydir):
         monkeypatch.setenv("KEYCHAIN_SSH_AGENT_ARGS", '"unterminated')
@@ -896,23 +991,7 @@ class TestAgentArgsPassthrough:
         monkeypatch.delenv("SSH_AGENT_PID", raising=False)
 
         with pytest.raises(KeychainError, match="Invalid SSH agent arguments: No closing quotation"):
-            self._build_ssh_agent(short_keydir).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
-
-    def test_malformed_gpg_agent_args_are_user_error(self, monkeypatch, tmp_path):
-        from keychain import state
-        from keychain.paths import KeychainPaths
-        from keychain.runtime.config import RuntimeConfig
-
-        monkeypatch.setenv("KEYCHAIN_GPG_AGENT_ARGS", '"unterminated')
-        monkeypatch.setattr(agents, "gpg_main_socket", lambda *_args, **_kwargs: "")
-        args = RuntimeConfig.resolve(["add", "--no-gui"])
-        kstate = state.KeychainState(
-            paths=KeychainPaths(keydir=tmp_path, host="h"),
-            args=args,
-        )
-
-        with pytest.raises(KeychainError, match="Invalid GPG agent arguments: No closing quotation"):
-            agents.GpgAgent(kstate, _out()).start(ssh_support=False)
+            self._build_ssh_agent(short_keydir).start()
 
     def test_no_args_when_env_unset(self, monkeypatch, short_keydir):
         """Verify no extra ssh-agent flags are added when the passthrough env var is unset because the default spawn command should stay minimal."""
@@ -920,6 +999,6 @@ class TestAgentArgsPassthrough:
         monkeypatch.delenv("KEYCHAIN_SSH_AGENT_ARGS", raising=False)
         monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
         monkeypatch.delenv("SSH_AGENT_PID", raising=False)
-        self._build_ssh_agent(short_keydir).start(ssh_spawn_gpg=False, ssh_allow_gpg=False)
+        self._build_ssh_agent(short_keydir).start()
         # Default invocation pins the socket under the keydir.
         assert cap[-1] == ["ssh-agent", "-s", "-a", str(short_keydir / "qqlAJmTx.s")]

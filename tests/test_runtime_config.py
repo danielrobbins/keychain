@@ -6,6 +6,8 @@ from __future__ import annotations
 import stat
 from types import SimpleNamespace
 
+import pytest
+
 from keychain.runtime import config
 from keychain.runtime.config import RuntimeConfig
 
@@ -188,13 +190,12 @@ def test_has_option_reflects_active_action(monkeypatch, tmp_path):
 def test_apply_keychainrc_injects_config_agent_args_without_allow_env(tmp_path):
     """Verify that .keychainrc agent args do not require the environment gate."""
     rc = tmp_path / ".keychainrc"
-    rc.write_text("[agent.env]\nssh_args = -t 3600\ngpg_args = --max-cache-ttl 7200\n")
+    rc.write_text("[agent.env]\nssh_args = -t 3600\n")
 
     args = RuntimeConfig.resolve(["add"])
     args.apply_keychainrc({"HOME": str(tmp_path)})
 
     assert args.env["KEYCHAIN_SSH_AGENT_ARGS"] == "-t 3600"
-    assert args.env["KEYCHAIN_GPG_AGENT_ARGS"] == "--max-cache-ttl 7200"
 
 
 def test_apply_keychainrc_ignores_agent_arg_env_without_allow_env():
@@ -214,9 +215,9 @@ def test_apply_keychainrc_ignores_agent_arg_env_without_allow_env():
 
 
 def test_apply_keychainrc_agent_arg_env_wins_over_config_with_allow_env(tmp_path):
-    """Verify that allowed KEYCHAIN_* agent args override .keychainrc values."""
+    """Verify the allowed SSH-agent variable overrides .keychainrc."""
     rc = tmp_path / ".keychainrc"
-    rc.write_text("[agent.env]\nssh_args = -t 3600\ngpg_args = --max-cache-ttl 7200\n")
+    rc.write_text("[agent.env]\nssh_args = -t 3600\n")
 
     args = RuntimeConfig.resolve(["add", "-E"])
     args.apply_keychainrc(
@@ -228,11 +229,21 @@ def test_apply_keychainrc_agent_arg_env_wins_over_config_with_allow_env(tmp_path
     )
 
     assert args.env["KEYCHAIN_SSH_AGENT_ARGS"] == "-d"
-    assert args.env["KEYCHAIN_GPG_AGENT_ARGS"] == "--debug-level guru"
+    assert "KEYCHAIN_GPG_AGENT_ARGS" not in args.env
+
+
+def test_removed_gpg_agent_config_is_rejected(tmp_path):
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[agent.env]\ngpg_args = --max-cache-ttl 7200\n")
+
+    args = RuntimeConfig.resolve(["add"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
+
+    assert args.rc_warnings == ["Ignoring unknown key 'gpg_args' in section [agent.env]"]
 
 
 def test_agent_arg_cli_options_are_not_public_surface():
-    """Verify that advanced agent args are config/env-only."""
+    """Verify SSH agent args are config/env-only and GPG agent args are absent."""
     args = RuntimeConfig.resolve(["add", "--ssh-agent-args", "-t 3600"])
     gpg_args = RuntimeConfig.resolve(["add", "--gpg-agent-args", "--debug-level guru"])
 
@@ -323,6 +334,19 @@ def test_apply_keychainrc_warns_on_unknown_key(tmp_path, monkeypatch):
     args = RuntimeConfig.resolve(["-E"])
 
     assert any("no_such_option" in warning for warning in args.rc_warnings)
+
+
+@pytest.mark.parametrize("key", ["ssh_allow_gpg", "ssh_spawn_gpg"])
+def test_apply_keychainrc_rejects_removed_gpg_ssh_settings(key, tmp_path, monkeypatch):
+    """Keep removed GPG SSH settings from silently changing agent selection."""
+    rc = tmp_path / ".keychainrc"
+    rc.write_text(f"[agent]\n{key} = true\n")
+    monkeypatch.setenv("KEYCHAIN_CONFIG", str(rc))
+
+    args = RuntimeConfig.resolve(["-E"])
+
+    assert any(key in warning for warning in args.rc_warnings)
+    assert args.get_value(key) is False
 
 
 def test_apply_keychainrc_cli_value_wins_over_rc(tmp_path, monkeypatch):

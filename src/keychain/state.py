@@ -104,7 +104,7 @@ class KeychainState:
         # it to read run-flag options (timeout, confirm, nogui, ...) without
         # threading every flag through their constructors. Tests that build
         # KeychainState directly (without args) rely on agent methods only
-        # via `getattr(args, X, default)` reads inside SshAgent / GpgAgent.
+        # via `getattr(args, X, default)` reads inside the operation façades.
         self.args = args
         self.out: Output | None = None  # set by build(); needed by ssh/gpg
 
@@ -167,19 +167,17 @@ class KeychainState:
     def config_diagnostics(self) -> dict[str, Any]:
         return self.args.diagnostics() if self.args is not None else {}
 
-    # ---- agent façades (lazy; require out, which build() supplies) ----
+    # ---- agent façades ------------------------------------------------
 
     @cached_property
     def ssh(self) -> agents.SshAgent:
-        if self.out is None:
-            raise RuntimeError("KeychainState.ssh requires build() with out=")
-        return agents.SshAgent(self, self.out)
+        return agents.SshAgent(self, self.out or Output.silent())
 
     @cached_property
-    def gpg(self) -> agents.GpgAgent:
+    def gpg(self) -> agents.GpgOperations:
         if self.out is None:
             raise RuntimeError("KeychainState.gpg requires build() with out=")
-        return agents.GpgAgent(self, self.out)
+        return agents.GpgOperations(self, self.out)
 
     # ---- platform ------------------------------------------------------
 
@@ -208,10 +206,6 @@ class KeychainState:
         return shutil.which("ssh") or ""
 
     @cached_property
-    def gpg_has_ssh_support(self) -> bool:
-        return agents.gpg_has_ssh_support()
-
-    @cached_property
     def gpg_prog(self) -> str:
         return agents.choose_gpg_prog(bool(self.args.get_value("gpg2")) if self.args is not None else False)
 
@@ -222,10 +216,6 @@ class KeychainState:
     @cached_property
     def gpg_path(self) -> str:
         return shutil.which(self.gpg_prog) or ""
-
-    @cached_property
-    def gpg_ssh_socket(self) -> str:
-        return agents.gpg_ssh_socket(self.env)
 
     @cached_property
     def gpg_main_socket(self) -> str:
@@ -248,38 +238,6 @@ class KeychainState:
         if not self.process_listing_supported:
             return []
         return agents.findpids("gpg")
-
-    @property
-    def gpg_primary_socket_is_ours(self) -> bool:
-        """True if the gpg-agent socket reported by ``GETINFO socket_name``
-        lives under one of the user's gpg homedirs (``$GNUPGHOME``,
-        ``$HOME/.gnupg`` or ``/run/user/<uid>/gnupg``). When False, any
-        running gpg-agents owned by us were started by a third party
-        (typically a package manager via ``--homedir /var/tmp/…``) and
-        must not be adopted as a keychain agent.
-        """
-        sock = self.gpg_main_socket
-        return bool(sock) and agents.gpg_socket_is_primary(sock, self.env)
-
-    @property
-    def gpg_foreign_agents_present(self) -> bool:
-        """True when there is at least one gpg-agent we wouldn't adopt.
-
-        Two scenarios trigger this:
-
-        * The primary socket isn't ours -- every running gpg-agent is
-          foreign (package-manager / sandbox).
-        * The primary socket is ours, but there are *extra* gpg-agent
-          pids besides the one backing it. gpg-agent is single-instance
-          per homedir, so any extras necessarily live under a different
-          ``--homedir`` and are foreign.
-        """
-        pids = self.gpg_agent_pids
-        if not pids:
-            return False
-        if not self.gpg_primary_socket_is_ours:
-            return True
-        return len(pids) > 1
 
     # ---- pidfile ------------------------------------------------------
     # NOTE: These properties are specific to the "canonical" pidfile at
@@ -361,30 +319,18 @@ class KeychainState:
 
     # ---- agent contents (loaded keys) ---------------------------------
 
-    @property
-    def find_active_agent_env(self) -> SshAgentRef:
-        """The single source of truth for which SSH agent keychain should talk to right now.
-
-        It performs a prioritized fallback: it first uses the agent tracked in
-        Keychain's own pidfile if alive (the managed agent), then falls back to
-        an inherited agent from the invoking shell if valid (e.g. from X11 forwarding).
-        If neither is reachable, it returns an empty environment to signal a new
-        agent needs to be spawned.
-        """
-        if self.pidfile_socket_valid:
-            return self.pidfile_env
-        if self.inherited_socket_valid:
-            return self.inherited_env
-        return SshAgentRef()
+    @cached_property
+    def selected_ssh_env(self) -> SshAgentRef:
+        """Existing SSH agent selected by :class:`~keychain.agents.SshAgent` policy."""
+        return self.ssh.select_existing()
 
     @property
-    def has_reachable_agent(self) -> bool:
-        """True if a live ssh-agent socket is reachable (pidfile or inherited)."""
-        return bool(self.find_active_agent_env)
+    def has_selected_ssh_agent(self) -> bool:
+        return bool(self.selected_ssh_env)
 
     @cached_property
     def loaded_ssh_fingerprints(self) -> list[str]:
-        env = self.find_active_agent_env
+        env = self.selected_ssh_env
         if not env:
             return []
         fps, _ = agents.ssh_l(env.as_dict())

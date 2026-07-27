@@ -160,7 +160,7 @@ def extkey_expand(extkeys: list[str], out: Output) -> ResolvedKeys:
     return result
 
 
-def _is_extkey(key: str) -> bool:
+def is_extended(key: str) -> bool:
     return key.startswith(("sshk:", "gpgk:", "gpgs:", "gpge:", "gpga:", "pkcs11:", "host:"))
 
 
@@ -178,6 +178,6 @@ def resolve_requested_keys(
         result.extend(all_host_identities(out))
     # ``--extended`` is a compatibility no-op. Prefixes are always accepted,
     # and bare keys keep their normal SSH/GPG lookup behaviour even when mixed.
-    result.extend(extkey_expand([k for k in cmdline_keys if _is_extkey(k)], out))
-    result.extend(_resolve_bare_keys([k for k in cmdline_keys if not _is_extkey(k)], gpg_prog, gpg_lookup))
+    result.extend(extkey_expand([k for k in cmdline_keys if is_extended(k)], out))
+    result.extend(_resolve_bare_keys([k for k in cmdline_keys if not is_extended(k)], gpg_prog, gpg_lookup))
     return result.deduped()

@@ -62,6 +62,7 @@ class TestEnvAction:
         pidfile.chmod(0o600)
         monkeypatch.setattr("socket.gethostname", lambda: "myhost")
         monkeypatch.setattr("keychain.agents.validate_ssh_socket", lambda path: SocketValidation(path, True))
+        monkeypatch.setattr("keychain.agents.pid_alive", lambda pid: pid == 99999)
         # Skip ssh-add probing (no real agent).
         monkeypatch.setattr(
             "keychain.agents.SshAgent.list_loaded",

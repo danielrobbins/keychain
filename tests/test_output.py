@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Smoke tests for the role-based output API in ``keychain.output``.
 
-The migration plan in ``docs/output-api.md`` lists a handful of acceptance
-criteria for the new surface. This file covers:
+The contract in ``docs/output-design.md`` defines the acceptance criteria for
+the surface. This file covers:
 
 * every theme resolves every role to a string (round-trip)
 * ``Span`` interpolation respects the active theme

@@ -125,7 +125,6 @@ class TestDefaultStartupPermissions:
             "_resolve_requested_keys",
             lambda *_a, **_k: main.keys.ResolvedKeys([], [], [], [], [], [], []),
         )
-        monkeypatch.setattr(main.KeychainApp, "_agent_settings", lambda *_a, **_k: (False, False))
         monkeypatch.setattr(main.KeychainApp, "_do_add", lambda *_a, **_k: 0)
 
     def test_default_startup_no_lax_warning_when_home_keydir_is_tight(self, tmp_path, monkeypatch, capsys):

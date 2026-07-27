@@ -1,12 +1,48 @@
 # ChangeLog
 
+## 3.0.1
+
+Keychain 3.0.1 continues to improve macOS `--confirm` UI dialog support. When `--confirm` is used on macOS, it now implies `--no-inherit`, to ensure that Keychain is able to initialize its own `ssh-agent` that is properly configured to use the macOS native confirm dialog (addresses #227).
+
+In addition, cancelling GPG signing key warming no longer results in control characters being displayed on the terminal (fixes #228).
+
+Keychain 3.0.1 also includes an important change -- deliberately narrowing the scope of its GnuPG integration, and removing support for using `gpg-agent` as a drop-in replacement for `ssh-agent` (addresses #164).
+
+While this may seem counterintuitive, this decision was made to improve security. Previously, when loading an encrypted SSH key with this feature enabled, `ssh-add`, invoked by Keychain, prompted for the key's original passphrase. If the key was not already present in GnuPG's private-key store, GnuPG then requested a new passphrase through Pinentry and stored a persistent copy. A user unfamiliar with this behavior who simply wanted to use `gpg-agent` in place of `ssh-agent` may not have understood why GnuPG was requesting another passphrase, and not realize that this new passphrase would be used to re-encrypt their private key in GnuPG's on-disk persistent key store.
+
+Even more unfortunate, the GnuPG passphrase request for the re-encryption happened right after the user supplied a passphrase for decryption, not as a separate flow, adding to the potential confusion. It's very possible that the user might hit Enter and submit an empty passphrase for the second unexpected prompt, potentially leaving the imported GnuPG copy without passphrase protection on disk.
+
+The conclusion I came to is that GnuPG's `ssh-agent` protocol compatibility functions are more of an SSH private key importer/bridge which exclusively uses GnuPG's own key store, rather than a drop-in replacement for `ssh-agent` -- so we shouldn't treat it as if it is a drop-in replacement. While I could instead have tried to smooth over the rough edges with GnuPG, I would be fighting against GnuPG's intended architecture too much, so it's best to simply define a clear boundary of what it makes sense to support and not support.
+
+Keychain will continue to support `gpgs:`, `gpge:`, and `gpga:` for proving and warming native GPG signing and decryption capabilities. You can still use `keychain wipe --gpg` to flush its in-memory secret cache. This remains supported and does not remove persistent key material. Keychain will invoke GnuPG for those operations, but it will no longer start, configure, adopt, or otherwise manage the `gpg-agent` lifecycle. Consider Keychain an orchestrator of `ssh-agent`'s lifecycle, and *a helpful utility* for GnuPG key warming, **but no longer responsible for `gpg-agent`'s lifecycle**.
+
+This gives Keychain a clear boundary:
+
+- Keychain manages `ssh-agent` and SSH keys.
+- Keychain supports warming native GPG signing and decryption capabilities.
+- GnuPG remains responsible for `gpg-agent`, Pinentry, configuration, and lifecycle.
+- `gpg-agent` is not supported as a substitute for `ssh-agent`.
+
+Upgrading will not remove any SSH private keys that were previously imported into GnuPG's persistent key store. Users who previously enabled this behavior should review their GnuPG key storage separately. You can do this by looking in `~/.gnupg/sshcontrol` for imported keygrips (40 character hex), and then looking for equivalent `~/.gnupg/private-keys-v1.d/<keygrip>.key` files. If `gpg-connect-agent 'KEYINFO --ssh-list --ssh-fpr=sha256' /bye` lists any keys with "C" in the protection field, it means the key is not protected with a passphrase. It is recommended that you remove these keys via `gpg-connect-agent "DELETE_KEY <keygrip>" /bye` and then remove the corresponding entry in `~/.gnupg/sshcontrol`, making sure you are not deleting any private keys that might be associated with a native OpenPGP key.
+
+The following GnuPG-related changes were made:
+
+- Removed the behavior previously selected by `--ssh-allow-gpg` and `--ssh-spawn-gpg`. The command-line spellings remain accepted as deprecated, warning no-ops so existing scripts continue to run. Inherited GnuPG SSH sockets are ignored, and conventional SSH keys are handled only by `ssh-agent`.
+- Left `gpg-agent` startup, configuration, pinentry, and lifecycle entirely to GnuPG. Keychain no longer launches or validates the daemon and no longer exposes `gpg_args` or `KEYCHAIN_GPG_AGENT_ARGS`.
+- Changed bare `keychain wipe` to clear SSH-agent identities only. Flushing `gpg-agent`'s entire in-memory secret cache now requires an explicit `--gpg`; legacy `--wipe all` retains its original both-target behavior. No persistent key material is removed.
+- Separated GPG credential warm-up from SSH multi-terminal coordination. Keychain now performs each requested signing or decryption proof exactly once instead of using real signing operations as repeated status probes.
+- Restored `--quick` as a deterministic SSH-only compatibility shortcut. GPG key arguments are ignored under `--quick`; Keychain does not invoke GnuPG, while still establishing the SSH-agent environment.
+- Made `wipe --gpg` authoritative and idempotent. An absent agent is a successful no-op, while missing tooling, timeouts, transport failures, agent errors, and unconfirmed responses now fail with actionable diagnostics.
+- Made GPG credential warm-up authoritative. Signing and decryption failures now identify the affected key and operation, decryption stops immediately when its encryption proof cannot be prepared, and successful decryption is verified against the original plaintext.
+
 ## 3.0.0
 
 First stable release of Keychain 3.
 
 Keychain 3 is a ground-up Python 3 evolution of Daniel Robbins' long-running
-SSH and GPG agent orchestrator. It preserves Keychain's single-file deployment
-model as a single-file, self-contained `keychain.pyz` (see
+SSH-agent orchestrator with native GPG credential support. It preserves
+Keychain's single-file deployment model as a single-file, self-contained
+`keychain.pyz` (see
 [Python Rationale](/docs/python-rationale.md)), while replacing the historical
 Bourne shell implementation with a tested, auditable Python package. It
 requires Python 3.9 or newer and has no third-party runtime dependencies.
@@ -33,9 +69,9 @@ betas. Highlights include:
   `keychain man topic:compat`.
 
 - **Broader SSH and GPG workflows.** Keychain can load PKCS#11 providers for
-  smartcards and hardware tokens, use or start `gpg-agent` with SSH support,
-  and explicitly warm GPG signing, encryption, and decryption credentials.
-  Verification failures are reported instead of being mistaken for success.
+  smartcards and hardware tokens, and explicitly warm GPG signing, encryption,
+  and decryption credentials. Verification failures are reported instead of
+  being mistaken for success.
 
 - **Native macOS confirmation support.** When `--confirm` is used with a new
   Keychain-managed `ssh-agent`, Keychain installs a private, confirmation-only
@@ -208,9 +244,10 @@ Beta notes:
 Initial public beta of Keychain 3.x.
 
 Keychain 3 is a ground-up Python 3 rewrite of Daniel Robbins' long-running
-SSH/GPG agent manager. The release preserves the traditional single-file
-deployment model through `keychain.pyz`, while replacing the historical
-Bourne shell implementation with a tested, auditable Python package.
+SSH-agent manager with native GPG credential support. The release preserves
+the traditional single-file deployment model through `keychain.pyz`, while
+replacing the historical Bourne shell implementation with a tested, auditable
+Python package.
 
 Highlights:
 

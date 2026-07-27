@@ -1,8 +1,8 @@
 # Keychain 3
 
-Keychain is an agent orchestrator for `ssh-agent` and `gpg-agent`. It gives you one coordinated, long-running agent experience per user and host, so terminals, scripts, cron jobs, and login sessions can share encrypted keys without repeatedly prompting for passphrases.
+Keychain orchestrates `ssh-agent` and gives you one coordinated, long-running SSH agent per user and host. For GnuPG, Keychain can also auto-warm your signing and encryption keys so they are ready for use.
 
-Keychain 3 is the evolution of the original Bourne shell-based tool created by Daniel Robbins in 2001. It preserves the single-file deployment model that made Keychain useful for over two decades, while adding modern capabilities: coordinated multi-terminal initialization, stable agent sockets, seamless cron and script integration, PKCS#11 hardware key support, GPG agent consolidation, hardened security defaults, and a comprehensive test suite of 450+ unit and integration tests — now written in Python and distributed as a self-contained executable zipapp with no third-party Python dependencies.
+Keychain 3 is the evolution of the original Bourne shell-based tool created by Daniel Robbins in 2001. It preserves the single-file deployment model that made Keychain useful for over two decades, while adding modern capabilities: coordinated multi-terminal initialization, stable agent sockets, seamless cron and script integration, PKCS#11 hardware key support, explicit GPG credential warm-up, hardened security defaults, and a comprehensive test suite of 450+ unit and integration tests — now written in Python and distributed as a self-contained executable zipapp with no third-party Python dependencies.
 
 For background on the decision to rewrite Keychain in Python, see [Why Keychain 3 Uses Python](https://kernel-seeds.org/projects/keychain/why-python/).
 
@@ -38,7 +38,11 @@ Your private key is stored in `~/.ssh/id_ed25519` (or similar). If someone steal
 
 **The next problem:** `ssh-agent` is just a process with a socket. You still need to start it at the right time, publish its environment to future shells, keep scripts and cron jobs pointed at it, and avoid races when several terminals initialize at once.
 
-**Enter Keychain:** Keychain is an agent orchestrator for `ssh-agent` and `gpg-agent`. Keychain makes that agent experience reliable in real life by handling startup, reuse, stable sockets, shell exports, cron access, and coordinated initialization across terminals.
+**Enter Keychain:** Keychain turns `ssh-agent` into a reliable shared service
+by handling startup, reuse, stable sockets, shell exports, cron access, and
+coordinated initialization across terminals. It also integrates native
+GnuPG signing and decryption workflows without managing `gpg-agent` or using
+GnuPG as an SSH-agent replacement.
 
 ---
 
@@ -254,16 +258,20 @@ For machine-readable output:
 keychain list --json
 ```
 
-### Clearing All Keys
+### Clearing Cached Credentials
 
-Want to flush everything from memory (agent keeps running)?
+To remove all identities from `ssh-agent` while leaving the agent running:
 
 ```bash
 keychain wipe
 ```
 
-To wipe only SSH keys: `keychain wipe --ssh`
-To wipe only GPG keys: `keychain wipe --gpg`
+The equivalent explicit form is `keychain wipe --ssh`.
+
+To flush only `gpg-agent`'s entire in-memory secret cache:
+`keychain wipe --gpg`
+
+To perform both operations: `keychain wipe --ssh --gpg`
 
 ### Using with Cron
 
@@ -327,22 +335,6 @@ keychain man --list
 ---
 
 ## Advanced Features
-
-### GPG Agent Integration
-
-Keychain can use `gpg-agent` as your SSH agent, consolidating to one process:
-
-```bash
-# In ~/.keychainrc
-[agent]
-ssh_spawn_gpg = true
-```
-
-Or on the command line:
-
-```bash
-keychain add --ssh-spawn-gpg ~/.ssh/id_ed25519
-```
 
 ### Hardware-Backed SSH Keys (PKCS#11)
 

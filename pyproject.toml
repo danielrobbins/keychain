@@ -7,7 +7,7 @@ backend-path = ["scripts"]
 [project]
 name = "keychain"
 dynamic = ["version"]
-description = "Manager for ssh-agent, gpg-agent and private keys"
+description = "Manager for ssh-agent and private keys, with native GnuPG support"
 readme = "README.md"
 license = { text = "GPL-3.0-only" }
 requires-python = ">=3.9"
