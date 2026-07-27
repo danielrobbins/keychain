@@ -12,7 +12,7 @@ Corrected `keychain man` pager integration (addresses #231). Color will be enabl
 
 ### GnuPG Scope Adjustment
 
-Keychain 3.0.1 also includes an important change -- the scope of its GnuPG integration has been deliberately narrowed, for using `gpg-agent` as a drop-in replacement for `ssh-agent` has been remmoved (addresses #164).
+Keychain 3.0.1 also includes an important change -- the scope of its GnuPG integration has been deliberately narrowed, for using `gpg-agent` as a drop-in replacement for `ssh-agent` has been removed (addresses #164).
 
 While this may seem counterintuitive, this decision was made to improve security. When loading an encrypted SSH key with this feature enabled, `ssh-add`, invoked by Keychain, prompted for the key's original passphrase. If the key was not already present in GnuPG's private-key store, GnuPG *then requested a new passphrase through Pinentry and stored a persistent copy*. A user unfamiliar with this behavior who simply wanted to use `gpg-agent` in place of `ssh-agent` may not have understood why GnuPG was requesting another passphrase, and not realize that this new passphrase would be used to re-encrypt their private key in GnuPG's on-disk persistent key store, thus duplicating it.
 
