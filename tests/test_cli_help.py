@@ -31,6 +31,16 @@ class TestHelpVersionOutput:
         assert "keychain" in captured
         assert ns.action == "version"
 
+    def test_banner_url_uses_soft_amber(self, capfd, monkeypatch):
+        monkeypatch.setattr("os.isatty", lambda _fd: True)
+        out = Output.build(quiet=False, debug=False, eval_mode=False, color=True)
+        main.banner(out)
+        captured = capfd.readouterr().err
+
+        assert main._HELP_PROJECT_URL in captured
+        assert out.format_doc(f"`{main._HELP_PROJECT_URL}`") in captured
+        assert str(out.dim(main._HELP_PROJECT_URL)) not in captured
+
     def test_help_lists_every_visible_action(self, capsys):
         helpinfo(None)
         captured = capsys.readouterr().out

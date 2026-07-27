@@ -26,7 +26,7 @@ import sys
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Union
+from typing import TextIO, Union
 
 # ---------------------------------------------------------------------------
 # Roles
@@ -92,6 +92,10 @@ _NO_ANSI: dict[str, str] = {k: "" for k in _LEGACY_PALETTE}
 
 _DOC_INLINE_MARKUP_RE = re.compile(r"`([^`\n]+)`|(?<!\*)\*([^*\n]+)\*(?!\*)")
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
 
 
 def _roles_for(palette: Mapping[str, str]) -> dict[str, str]:
@@ -299,7 +303,7 @@ def _strip_doc_inline(text: str) -> str:
 
 
 def _visible_width(text: str) -> int:
-    return len(_ANSI_RE.sub("", text))
+    return len(strip_ansi(text))
 
 
 @dataclass(frozen=True)
@@ -334,12 +338,14 @@ class Output:
         color: bool,
         theme: str | None = None,
         json: bool = False,
+        color_stream: TextIO | None = None,
     ) -> Output:
         # Theme is set exclusively via --theme CLI flag; no env var override.
         chosen = resolve_theme_name(theme)
         if color:
             try:
-                color = bool(os.isatty(sys.stderr.fileno()))
+                stream = color_stream if color_stream is not None else sys.stderr
+                color = bool(os.isatty(stream.fileno()))
             except (OSError, ValueError):
                 color = False
         # JSON mode is silent on stderr -- the only useful output is the JSON

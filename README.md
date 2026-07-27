@@ -174,6 +174,14 @@ Terminal 3:  Keys initialized by another terminal.
 
 **Stuck prompt?** Type `takeover` in any waiting terminal to cancel the stuck process and take over.
 
+For automatic shell startup without Keychain's preliminary Enter prompt, add
+`--immediate`. Coordination remains active and exactly one terminal runs
+`ssh-add`; any required passphrase prompt still appears in the elected terminal:
+
+```bash
+eval "$(keychain add --eval --quiet --immediate ~/.ssh/id_ed25519)"
+```
+
 ### 2. Embedded Documentation
 
 No more hunting for man pages or browsing outdated wikis. You deserve complete reference documentation that:

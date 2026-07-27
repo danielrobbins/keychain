@@ -380,6 +380,16 @@ def test_apply_keychainrc_coerces_bool_and_int_values(tmp_path, monkeypatch):
     assert args.get_value("timeout") == 15
 
 
+def test_apply_keychainrc_enables_immediate_activation(tmp_path):
+    rc = tmp_path / ".keychainrc"
+    rc.write_text("[agent]\nimmediate = true\n", encoding="utf-8")
+
+    args = RuntimeConfig.resolve(["add"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
+
+    assert args.get_value("immediate") is True
+
+
 def test_diagnostics_report_normalized_config_and_only_relevant_environment(tmp_path):
     rc = tmp_path / ".keychainrc"
     rc.write_text("[output]\nquiet = true\ncolor = false\n")

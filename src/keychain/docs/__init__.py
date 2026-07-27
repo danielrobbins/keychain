@@ -19,8 +19,9 @@ from functools import cache
 from importlib.resources import files
 from typing import Any
 
-from ..output.core import Output, Span
+from ..output.core import Output, Span, strip_ansi
 from ..output.tables import render_panel, visible_width
+from ..util import KeychainError
 
 
 @cache
@@ -1119,7 +1120,8 @@ def _render_explain_panels(panels: list[ExplainPanelSpec], out, box_inner: int) 
 def _pager_command() -> list[str] | None:
     """Return a pager command if stdout is a TTY and not piped.
 
-    Checks ``$PAGER`` first, then falls back to ``less -R`` (ANSI passthrough),
+    Checks ``$PAGER`` first, then falls back to ``less`` (ANSI passthrough
+    is supplied through ``$LESS`` when needed),
     then ``more``.  Returns ``None`` when output is not a TTY so callers can
     skip the pager entirely.
     """
@@ -1129,29 +1131,48 @@ def _pager_command() -> list[str] | None:
     if env_pager:
         try:
             return shlex.split(env_pager) or None
-        except ValueError:
-            return None
+        except ValueError as exc:
+            raise KeychainError(f"invalid PAGER value: {exc}") from exc
     if shutil.which("less"):
-        return ["less", "-R"]
+        return ["less"]
     if shutil.which("more"):
         return ["more"]
     return None
 
 
-def _run_pager(text: str) -> None:
+def _pager_is_less(command: str) -> bool:
+    pager_path = shutil.which(command)
+    less_path = shutil.which("less")
+    if not pager_path or not less_path:
+        return False
+    try:
+        return os.path.samefile(pager_path, less_path)
+    except OSError:
+        return False
+
+
+def _run_pager(text: str) -> int:
     """Pipe *text* through the configured pager, or write directly."""
     pager = _pager_command()
     if pager is None:
         sys.stdout.write(text)
-        return
+        return 0
     import subprocess
 
+    env = None
+    if _pager_is_less(pager[0]):
+        if not os.environ.get("LESS"):
+            env = {**os.environ, "LESS": "-R"}
+    else:
+        text = strip_ansi(text)
     try:
-        proc = subprocess.Popen(pager, stdin=subprocess.PIPE, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer)
-    except OSError:
-        sys.stdout.write(text)
-        return
+        proc = subprocess.Popen(
+            pager, stdin=subprocess.PIPE, stdout=sys.stdout.buffer, stderr=sys.stderr.buffer, env=env
+        )
+    except OSError as exc:
+        raise KeychainError(f"cannot run pager {pager[0]!r}: {exc}") from exc
     proc.communicate(input=text.encode("utf-8"))
+    return proc.returncode
 
 
 def run_man(args, out) -> int:
@@ -1171,7 +1192,10 @@ def run_man(args, out) -> int:
 
     # Pipe through pager when on a TTY (unless --no-pager was given).
     if not bool(args.get_value("no_pager")):
-        _run_pager(full_text)
+        status = _run_pager(full_text)
+        if status:
+            out.error(f"Pager exited with status {status}")
+        return status
     else:
         out.write(full_text)
     return 0
@@ -1184,7 +1208,7 @@ def run_explain(argv: list[str]) -> int:
     if "--nocolor" in argv or "--no-color" in argv:
         color = False
 
-    out = Output.build(quiet=False, debug=False, eval_mode=False, color=color)
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=color, color_stream=sys.stdout)
     box_inner = max(40, min(shutil.get_terminal_size((96, 24)).columns - 6, 80))
 
     analysis = _analyze_explain_argv(argv)

@@ -2,6 +2,7 @@
 """CLI startup behavior tests."""
 
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -54,6 +55,28 @@ def test_main_resolves_no_color_through_option_policy(monkeypatch, argv, no_colo
         main.main(argv)
 
     assert seen["color"] is False
+
+
+def test_main_uses_stdout_for_man_color_detection(monkeypatch):
+    seen = {}
+    build = main.Output.build
+
+    def capture_output(**kwargs):
+        seen.update(kwargs)
+        return build(**kwargs)
+
+    monkeypatch.setattr(main.Output, "build", staticmethod(capture_output))
+    monkeypatch.setattr(
+        main.platform,
+        "detect",
+        lambda: SimpleNamespace(supported=True, name="linux", reason=""),
+    )
+    monkeypatch.setattr(main.KeychainApp, "run", lambda _app: 0)
+
+    with pytest.raises(SystemExit):
+        main.main(["man"])
+
+    assert seen["color_stream"] is sys.stdout
 
 
 class TestKeychainErrorHandling:

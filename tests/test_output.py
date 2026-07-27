@@ -119,6 +119,24 @@ def test_style_with_no_color_is_empty():
     assert out.style("heading", "dim") == ""
 
 
+def test_color_detection_follows_explicit_output_stream(monkeypatch):
+    class Stream:
+        def fileno(self):
+            return 42
+
+    monkeypatch.setattr(os, "isatty", lambda fd: fd != 42)
+    out = Output.build(
+        quiet=False,
+        debug=False,
+        eval_mode=False,
+        color=True,
+        theme="modern",
+        color_stream=Stream(),
+    )
+
+    assert out.style("doc_code") == ""
+
+
 def test_doc_inline_code_uses_soft_amber_not_heading_cyan(monkeypatch):
     monkeypatch.setattr(os, "isatty", lambda fd: True)
     out = Output.build(quiet=False, debug=False, eval_mode=False, color=True, theme="modern")

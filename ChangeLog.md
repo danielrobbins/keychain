@@ -2,15 +2,21 @@
 
 ## 3.0.1
 
-Keychain 3.0.1 continues to improve macOS `--confirm` UI dialog support. When `--confirm` is used on macOS, it now implies `--no-inherit`, to ensure that Keychain is able to initialize its own `ssh-agent` that is properly configured to use the macOS native confirm dialog (addresses #227).
+Keychain 3.0.1 continues to improve macOS `--confirm` UI dialog support. When `--confirm` is used on macOS, it now implies `--no-inherit`, to ensure that Keychain is able to initialize its own `ssh-agent` that is properly configured to use the macOS native Keychain confirm dialog (addresses #227).
 
 In addition, cancelling GPG signing key warming no longer results in control characters being displayed on the terminal (fixes #228).
 
-Keychain 3.0.1 also includes an important change -- deliberately narrowing the scope of its GnuPG integration, and removing support for using `gpg-agent` as a drop-in replacement for `ssh-agent` (addresses #164).
+Added `--immediate` to skip "Press Enter to initialize keys" prompt (addresses #230). When requested keys are missing, the first Keychain to acquire the lock will run `ssh-add` immediately instead of first requiring Enter. This is technically safe, but no longer Keychain's default behavior since it's sub-optimal for some user scenarios. This can be enabled persistently via the `[agent] immediate = true` `~/.keychainrc` configuration option.
 
-While this may seem counterintuitive, this decision was made to improve security. Previously, when loading an encrypted SSH key with this feature enabled, `ssh-add`, invoked by Keychain, prompted for the key's original passphrase. If the key was not already present in GnuPG's private-key store, GnuPG then requested a new passphrase through Pinentry and stored a persistent copy. A user unfamiliar with this behavior who simply wanted to use `gpg-agent` in place of `ssh-agent` may not have understood why GnuPG was requesting another passphrase, and not realize that this new passphrase would be used to re-encrypt their private key in GnuPG's on-disk persistent key store.
+Corrected `keychain man` pager integration (addresses #231). Color will be enabled when `less` is specifically detected, and `-R` will be enabled when not the default. Otherwise, `keychain man` output will not have color sequences. This fixes man page output on several systems.
 
-Even more unfortunate, the GnuPG passphrase request for the re-encryption happened right after the user supplied a passphrase for decryption, not as a separate flow, adding to the potential confusion. It's very possible that the user might hit Enter and submit an empty passphrase for the second unexpected prompt, potentially leaving the imported GnuPG copy without passphrase protection on disk.
+### GnuPG Scope Adjustment
+
+Keychain 3.0.1 also includes an important change -- the scope of its GnuPG integration has been deliberately narrowed, for using `gpg-agent` as a drop-in replacement for `ssh-agent` has been remmoved (addresses #164).
+
+While this may seem counterintuitive, this decision was made to improve security. When loading an encrypted SSH key with this feature enabled, `ssh-add`, invoked by Keychain, prompted for the key's original passphrase. If the key was not already present in GnuPG's private-key store, GnuPG *then requested a new passphrase through Pinentry and stored a persistent copy*. A user unfamiliar with this behavior who simply wanted to use `gpg-agent` in place of `ssh-agent` may not have understood why GnuPG was requesting another passphrase, and not realize that this new passphrase would be used to re-encrypt their private key in GnuPG's on-disk persistent key store, thus duplicating it.
+
+Even more unfortunate, the GnuPG passphrase request for the **re-encryption** happens right after the user supplied a passphrase for **decryption**, not as a separate flow, adding to the potential confusion. It's very possible that the user might hit Enter and submit an empty passphrase for the second unexpected prompt, potentially leaving the imported GnuPG copy without passphrase protection on disk.
 
 The conclusion I came to is that GnuPG's `ssh-agent` protocol compatibility functions are more of an SSH private key importer/bridge which exclusively uses GnuPG's own key store, rather than a drop-in replacement for `ssh-agent` -- so we shouldn't treat it as if it is a drop-in replacement. While I could instead have tried to smooth over the rough edges with GnuPG, I would be fighting against GnuPG's intended architecture too much, so it's best to simply define a clear boundary of what it makes sense to support and not support.
 

@@ -168,6 +168,7 @@ Print the full embedded documentation in a pager-friendly form. Targets:
     keychain man --no-pager       skip $PAGER even on TTY
     keychain man --width 100      explicit wrap width
 
+On a terminal, Keychain uses `$PAGER`, then `less`, then `more`. Color is retained only when the selected executable is verified as `less`, including aliases such as macOS `more`; when `$LESS` is unset or empty, Keychain supplies `LESS=-R` to that child process without changing the caller's environment. Other pagers receive plain text.
 
 == @option eval: emit shell env for `eval $(keychain ...)`
 
@@ -200,6 +201,23 @@ The `--systemd` flag is a side-effecting operation that runs `systemctl` directl
 If a reachable ssh-agent already holds at least one key, exit immediately without prompting or loading anything new. Intended for shell-startup snippets where the agent is reused across many shells: the shell pays only the cost of a single `ssh-add -l` on subsequent invocations.
 
 This is intentionally an SSH-only compatibility option. GPG key arguments are ignored and Keychain does not invoke GnuPG when `--quick` is present. Use normal `keychain add` for GPG workflows.
+
+== @option immediate: begin coordinated SSH key activation without waiting for Enter
+
+When requested SSH keys are missing, immediately contend for the activation lock instead of displaying `Press Enter to initialize keys`. The activation lock still elects exactly one terminal to run `ssh-add`; other immediate terminals wait for its result and verify that their requested keys became available.
+
+This option does not suppress an `ssh-add` passphrase prompt, hide errors, disable coordination, or imply `--quiet`. For quiet automatic shell startup, use:
+
+```
+eval "$(keychain add --eval --quiet --immediate id_ed25519)"
+```
+
+When several terminals use `--immediate`, the terminal that wins the activation lock is nondeterministic. If its `ssh-add` invocation fails, other immediate terminals fail rather than launching successive activation attempts. Regular terminals retain their interactive retry and takeover behavior. To make automatic activation persistent:
+
+```
+[agent]
+immediate = true
+```
 
 == @option no-passphrase: set up ssh-agent without loading keys
 
@@ -439,6 +457,8 @@ When initialization completes, waiting terminals wake automatically and print:
 ```
 Keys initialized by another terminal.
 ```
+
+*Automatic activation.* `--immediate` skips Keychain's initial Enter prompt and immediately lets the invoking terminal contend for the same activation lock. It does not bypass coordination: one terminal still runs `ssh-add`, other terminals wait through their FIFO endpoints, and every waiter verifies the resulting agent state. This is useful for unencrypted keys and other shell-startup workflows where Keychain's preliminary Enter prompt is unnecessary. If `ssh-add` requires a passphrase, that interaction appears in whichever terminal won the activation lock.
 
 *Implementation details.* Coordination state is stored in `~/.keychain/<host>.state.json` under the state lock. Waiter FIFOs live in `~/.keychain/<host>-waiters/` with per-process unique names. The activation lock is `~/.keychain/<host>.activation.lock`. Runtime files are private to the current user and are checked before use.
 

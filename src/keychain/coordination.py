@@ -451,6 +451,9 @@ class ActivationCoordinator:
             return WaitResult("takeover" if line == "takeover" else "wait")
         return WaitResult("activate")
 
+    def wait_for_notification(self, waiter: WaiterEndpoint) -> WaitResult:
+        return WaitResult("notified", waiter.wait_for_message())
+
     def wait_for_handoff(self, waiter: WaiterEndpoint, timeout: float = 1.0) -> WaitResult:
         if message := waiter.wait_for_message(timeout):
             return WaitResult("notified", message)

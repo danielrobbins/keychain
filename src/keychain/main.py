@@ -21,7 +21,7 @@ import time
 from contextlib import contextmanager
 
 from . import __version__, agents, keys, state
-from .coordination import ActivationCoordinator, ActivationOwner, WaiterEndpoint
+from .coordination import ActivationCoordinator, ActivationOwner, WaiterEndpoint, WaitResult
 from .env import SshAgentRef
 from .output.core import Output
 from .runtime import platform
@@ -47,7 +47,8 @@ def banner(out: Output) -> None:
     # Mid-dot when stderr is utf-capable (matches the unicode bar glyph);
     # plain hyphen otherwise so legacy/ascii consoles still align cleanly.
     sep = "·" if out.theme == "modern" else "-"
-    out.banner(f"{out.id('keychain')} {out.id(__version__)}  {sep}  {out.dim(_HELP_PROJECT_URL)}")
+    project_url = out.format_doc(f"`{_HELP_PROJECT_URL}`")
+    out.banner(f"{out.id('keychain')} {out.id(__version__)}  {sep}  {project_url}")
 
 
 def versinfo(out: Output) -> None:
@@ -331,6 +332,8 @@ class KeychainApp:
                 coord.save_state(state_snapshot)
             self.kstate.ssh.announce_load(missing.ssh, missing.pkcs11)
 
+            immediate = bool(self.args.get_value("immediate"))
+            immediate_pending = immediate
             handoff_wait = False
             quiet_handoff_wait = False
             while True:
@@ -339,10 +342,18 @@ class KeychainApp:
                     wait_result = coord.wait_for_handoff(waiter)
                 else:
                     state_snapshot = coord.load_state()
-                    wait_result = coord.wait_for_activation_signal(
-                        waiter,
-                        activation_active=state_snapshot.activation.in_progress or handoff_wait,
-                    )
+                    activation_active = state_snapshot.activation.in_progress or handoff_wait
+                    if immediate_pending and not activation_active:
+                        immediate_pending = False
+                        wait_result = WaitResult("activate")
+                    elif immediate:
+                        immediate_pending = False
+                        wait_result = coord.wait_for_notification(waiter)
+                    else:
+                        wait_result = coord.wait_for_activation_signal(
+                            waiter,
+                            activation_active=activation_active,
+                        )
                 if wait_result.action == "notified":
                     handoff_wait = False
                     status = str(wait_result.message.get("status", ""))
@@ -357,6 +368,8 @@ class KeychainApp:
                     if status == "canceled":
                         handoff_wait = True
                         quiet_handoff_wait = True
+                    elif immediate:
+                        raise KeychainError("Requested SSH keys remain unavailable after activation in another terminal")
                     elif status == "failed":
                         self.out.note("Key initialization failed in another terminal.")
                     else:
@@ -371,7 +384,7 @@ class KeychainApp:
                     continue
 
                 if wait_result.action == "takeover":
-                    handoff_wait = False
+                    handoff_wait = True
                     takeover = coord.request_takeover(waiter)
                     if takeover.get("status") in ("canceled", "inactive"):
                         missing = self._missing_ssh_keys(requested)
@@ -385,7 +398,9 @@ class KeychainApp:
                 activation_result = self._try_activation(coord, waiter, missing, wipe_pending)
                 if activation_result == "success":
                     return
-                handoff_wait = activation_result == "canceled"
+                handoff_wait = activation_result == "canceled" or (
+                    handoff_wait and activation_result == "busy"
+                )
                 quiet_handoff_wait = handoff_wait
 
                 with coord.state_lock():
@@ -462,6 +477,10 @@ class KeychainApp:
                 self.out.info("Another terminal is initializing keys; waiting for completion.")
                 return "busy"
 
+            missing = self._missing_ssh_keys(missing, announce_known=False)
+            if not missing.any:
+                return "success"
+
             status = "failed"
             with _activation_signals():
                 try:
@@ -518,6 +537,7 @@ def main(argv: list[str] | None = None) -> None:
         color=not bool(args.get_value("nocolor")),
         theme=args.get_value("theme"),
         json=bool(args.get_value("json")),
+        color_stream=sys.stdout if args.action == "man" else None,
     )
 
     if out.debug_on:

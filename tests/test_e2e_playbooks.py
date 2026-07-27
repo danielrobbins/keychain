@@ -1,12 +1,14 @@
 import json
 import os
+import signal
 import socket
 import sys
 from pathlib import Path
 
 import pytest
 
-from keychain import main
+from keychain import agents, main
+from keychain.env import SshAgentRef
 from keychain.paths import _PID_FACTORIES
 from keychain.runtime import platform
 from tests.support import set_home
@@ -37,12 +39,23 @@ class PlaybookRunner:
         self.monkeypatch.delenv("SSH_AGENT_PID", raising=False)
         self.monkeypatch.delenv("HOSTNAME", raising=False)
 
-        # Ensure tests don't randomly kill background user agents by accident.
-        # `agent stop` in the tests relies on isolated mock pidfiles and mocked PIDs!
-        # But, subprocess to `ssh-agent -k` relies on SSH_AGENT_PID and `kill` PID.
-        # Wait, if we run in-process, keychain uses subprocess to spawn `ssh-agent`.
-        # `ssh-agent` will be spawned locally on the host. We SHOULD clean it up properly.
-        # It's actually good if it spawns a real `ssh-agent` and sets up the socket!
+    def cleanup_agents(self) -> None:
+        """Stop only agents recorded beneath this test's isolated home."""
+        if not platform.detect().supported:
+            return
+        live_agents = set(agents.findpids("ssh"))
+        for pidfile in self.home.rglob("*-sh"):
+            try:
+                pid = SshAgentRef.from_text(pidfile.read_text(encoding="utf-8")).pid_int
+            except OSError:
+                continue
+            if pid not in live_agents:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            live_agents.discard(pid)
 
     def set_host(self, name: str, export_env: bool = False):
         """Mock the system hostname."""
@@ -95,8 +108,22 @@ def playbook(tmp_path, monkeypatch, capsys):
     """Yields a PlaybookRunner configured with a sandboxed tmp_path HOME."""
     runner = PlaybookRunner(tmp_path, monkeypatch, capsys)
     yield runner
-    # We should probably run `agent stop --mine` just in case to clean up spawned agents!
-    runner.run("agent", "stop", "--mine", expect_exit=None)
+    runner.cleanup_agents()
+
+
+def test_playbook_cleanup_preserves_agents_outside_isolated_home(playbook, monkeypatch) -> None:
+    playbook.keydir.mkdir()
+    pidfile = playbook.keydir / "testhost-sh"
+    pidfile.write_text("SSH_AUTH_SOCK=/tmp/test.sock\nSSH_AGENT_PID=111\n", encoding="utf-8")
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(platform, "detect", lambda: platform._classify("linux", has_ps=True))
+    monkeypatch.setattr(agents, "findpids", lambda _prog: [111, 222])
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    playbook.cleanup_agents()
+
+    assert killed == [(111, signal.SIGTERM)]
+    pidfile.unlink()
 
 
 @LINUX_AGENT_ONLY
@@ -124,7 +151,7 @@ def test_basic_agent_lifecycle(playbook: PlaybookRunner):
     playbook.monkeypatch.setenv("SSH_AGENT_PID", str(pidfile["process"]["pid"]))
 
     # 3. Stop the agent specifically for this host
-    playbook.run("--quiet", "agent", "stop", "--mine")
+    playbook.run("--quiet", "agent", "stop")
 
     # 4. Inspect should reveal NO running agents
     out_after, err_after = playbook.run("inspect", "--json")
@@ -175,7 +202,7 @@ def test_stale_pidfile_cleanup(playbook: PlaybookRunner):
         (playbook.keydir / f"testhost-{ext}").write_text("stale data")
 
     playbook.run("agent", "start", "--quiet")
-    playbook.run("agent", "stop", "--quiet", "--mine")
+    playbook.run("agent", "stop", "--quiet")
 
     for ext in variants:
         stale_file = playbook.keydir / f"testhost-{ext}"

@@ -239,6 +239,13 @@ class TestResolveAction:
         with pytest.raises(KeychainError):
             KeychainApp(ns, out)._resolve_action()
 
+    def test_immediate_is_an_add_option(self):
+        ns = RuntimeConfig.resolve(["add", "--immediate", "id_ed25519"])
+
+        assert ns.action == "add"
+        assert ns.get_value("immediate") is True
+        assert ns.get_value("keys") == ["id_ed25519"]
+
     def test_confhost_raises(self):
         ns = RuntimeConfig.resolve(["add", "--confhost", "remote"])
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)

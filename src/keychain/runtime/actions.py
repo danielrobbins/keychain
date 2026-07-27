@@ -583,6 +583,7 @@ Option(option="--eval", actions={cmd_add, agent_start}, see_also=("--systemd",))
 Option(option="--systemd", actions={cmd_add, agent_start}, config_section="agent", see_also=("--eval",))
 
 cmd_add.add_option(option="--quick", cli_aliases=("-Q",))
+cmd_add.add_option(option="--immediate", config_section="agent", doc_tag="option:immediate")
 cmd_add.add_option(varname="noask", option="--no-passphrase", cli_aliases=("--noask",))
 cmd_add.add_option(option="--confirm", config_section="agent", doc_tag="option:confirm")
 cmd_add.add_option(

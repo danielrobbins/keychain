@@ -476,7 +476,12 @@ class TestKeychainAppCoordination:
 
         monkeypatch.setattr(main.signal, "signal", fake_signal)
         monkeypatch.setattr(coord, "finish_activation", finish_while_locked)
-        app._kstate = SimpleNamespace(ssh=SimpleNamespace(prepare_load=interrupt))
+        app._kstate = SimpleNamespace(
+            ssh=SimpleNamespace(
+                list_missing=lambda requested, **_kwargs: list(requested),
+                prepare_load=interrupt,
+            )
+        )
 
         with pytest.raises(SystemExit):
             app._try_activation(coord, None, main.keys.ResolvedKeys(ssh=["key"]), False)
