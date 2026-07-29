@@ -42,18 +42,30 @@ class Compat:
         "-k": (("agent", "stop"), "-k/--stop expects one of: all, mine, others."),
     }
 
-    def __init__(self, actions: tuple[str, ...]) -> None:
+    def __init__(self, actions: tuple[str, ...], value_flags: set[str] | None = None) -> None:
         """Pass the tuple of known action verbs (e.g. ``('add', 'list', 'wipe', ...)``).
         Only tokens in this set are treated as action names during translation."""
         self.actions = actions
         self.short_actions = frozenset(flag[1:] for flag in self.bool_actions if len(flag) == 2)
         self.short_actions |= frozenset(flag[1:] for flag in self.value_actions if len(flag) == 2)
+        self._value_flags = value_flags or set()
 
     @classmethod
     def build(cls) -> Compat:
         """Create a ``Compat`` instance pre-loaded with the actions defined in ``actions.py``.
         This is the normal entry point; use ``__init__`` directly only in tests."""
-        return cls(tuple(ROOT_ACTION.sub_actions.keys()))
+
+        def _collect_value_flags(node, out):
+            for opt in node.options.values():
+                if opt.takes_value:
+                    for flag in opt.argparse_flags:
+                        out.add(flag)
+            for child in node.sub_actions.values():
+                _collect_value_flags(child, out)
+
+        value_flags: set[str] = set()
+        _collect_value_flags(ROOT_ACTION, value_flags)
+        return cls(tuple(ROOT_ACTION.sub_actions.keys()), value_flags=value_flags)
 
     def split_eq(self, token: str) -> tuple[str, str | None]:
         """Split ``--flag=value`` into ``("--flag", "value")``, or return ``(token, None)`` unchanged.
@@ -214,7 +226,15 @@ class Compat:
                             out_opts.append(value)
                 continue
             if token.startswith("-"):
-                out_opts.append(token)
+                if key in self._value_flags and eq_value is None:
+                    if i + 1 < len(expanded) and not expanded[i + 1].startswith("-"):
+                        out_opts.append(token)
+                        out_opts.append(expanded[i + 1])
+                        i += 1
+                    else:
+                        out_opts.append(token)
+                else:
+                    out_opts.append(token)
             else:
                 out_keys.append(token)
             i += 1
