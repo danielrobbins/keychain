@@ -55,6 +55,22 @@ class TestParseArgsActions:
         assert "Unrecognized option '--not-a-real-flag'." in err
         assert "keychain help list" in err
 
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["env", "--shell", "xxx"],
+            ["env", "--shell=xxx"],
+            ["env", "--target", "xxx"],
+        ],
+    )
+    def test_env_rejects_unknown_shell_format(self, argv, capsys):
+        with pytest.raises(SystemExit) as ex:
+            main.main(argv)
+        assert ex.value.code == 1
+        assert "--shell does not support 'xxx'; choose from: env, sh, csh, fish, systemd, json, eval" in (
+            capsys.readouterr().err
+        )
+
     @pytest.mark.skip(
         reason="The parser does not currently enforce exclusive target flags for agent stop; discuss whether this belongs in parsing or action validation."
     )

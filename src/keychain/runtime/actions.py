@@ -105,7 +105,7 @@ class Option(Element):
     actions: set[Action] = field(default_factory=set)  # action(s) this option belongs to
     type: str = "bool"  # value type: "bool" (store_true), "int", or "str"
     default: object = None  # default value injected into the args Namespace
-    choices: tuple[str, ...] = ()  # restricts argparse to this set of values
+    choices: tuple[str, ...] = ()  # restricts accepted values to this set
     metavar: str | None = None  # display name for the value in usage output
     argparse_action: str | None = None  # explicit argparse action= override (e.g. "store_true", "append")
     exclusive_group: str | None = None  # bucket key for add_mutually_exclusive_group()
@@ -248,6 +248,8 @@ class Option(Element):
         a predicate plus message keeps validation lightweight and declarative
         without inventing a larger schema or type system.
         """
+        if self.choices and value not in self.choices:
+            return f"{self.option} does not support {value!r}; choose from: {', '.join(self.choices)}"
         if self.validator is None:
             return None
         predicate, message = self.validator
