@@ -2,6 +2,28 @@
 
 Keychain orchestrates `ssh-agent` and gives you one coordinated, long-running SSH agent per user and host. It is a frontend to `ssh-agent` and `ssh-add` that lets you keep one long-running ssh-agent process per user per host -- rather than the default of one per login session -- so you only need to enter each key's passphrase once per boot.
 
+*The Keychain difference:*
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Without Keychain:                                          │
+│                                                             │
+│  Terminal 1 → ssh-agent (prompt)                            │
+│  Terminal 2 → ssh-agent (prompt again)                      │
+│  Terminal 3 → ssh-agent (prompt again)                      │
+│  Cron job → no agent (fails)                                │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  With Keychain:                                             │
+│                                                             │
+│  Terminal 1 ─┐                                              │
+│  Terminal 2 ─┼→ single ssh-agent (prompt once)              │
+│  Terminal 3 ─┤    ↓                                         │
+│  Cron job ───┘    all terminals reconnect automatically     │
+└─────────────────────────────────────────────────────────────┘
+```
+
 This dramatically reduces the number of times you need to enter your passphrase. With `keychain`, you only need to enter a passphrase once every time your local machine is rebooted. Keychain also makes it easy for remote cron jobs to securely "hook in" to a long running `ssh-agent` process, allowing your scripts to take advantage of key-based logins.
 
 Keychain also supports the ability to auto-warm GnuPG signing and encryption keys so they are ready for use, and allows you to easily wipe cached GnuPG secrets using the `keychain wipe --gpg` command. GnuPG features require *GnuPG 2.1 or later*. When a GPG key is requested, Keychain asks GnuPG to prove the requested signing or decryption capability so any required passphrase is cached in memory. While Keychain manages the lifecycle of `ssh-agent` for you, GnuPG retains complete ownership of `gpg-agent` startup, configuration, and lifecycle.

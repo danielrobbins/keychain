@@ -369,7 +369,9 @@ class KeychainApp:
                         handoff_wait = True
                         quiet_handoff_wait = True
                     elif immediate:
-                        raise KeychainError("Requested SSH keys remain unavailable after activation in another terminal")
+                        raise KeychainError(
+                            "Requested SSH keys remain unavailable after activation in another terminal"
+                        )
                     elif status == "failed":
                         self.out.note("Key initialization failed in another terminal.")
                     else:
@@ -398,9 +400,7 @@ class KeychainApp:
                 activation_result = self._try_activation(coord, waiter, missing, wipe_pending)
                 if activation_result == "success":
                     return
-                handoff_wait = activation_result == "canceled" or (
-                    handoff_wait and activation_result == "busy"
-                )
+                handoff_wait = activation_result == "canceled" or (handoff_wait and activation_result == "busy")
                 quiet_handoff_wait = handoff_wait
 
                 with coord.state_lock():

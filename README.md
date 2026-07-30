@@ -6,11 +6,102 @@ Keychain 3 is the evolution of the original Bourne shell-based tool created by D
 
 For background on the decision to rewrite Keychain in Python, see [Why Keychain 3 Uses Python](https://kernel-seeds.org/projects/keychain/why-python/).
 
+## The Agent Problem Keychain Solves
+
+SSH is amazing, but entering your passphrase every time you open a terminal gets old fast. The standard `ssh-agent` helps, but it has limitations:
+
+- **One agent per login session** — open a new terminal, get a new agent, enter your passphrase again
+- **Cron jobs can't find your agent** — background processes run in a different session
+- **No ssh-agent coordination** — individual ssh-agent processes are not aware of each other.
+
+**Keychain fixes all of this:**
+
+- **One agent per host** — all terminals share the same long-running agent
+- **Persistent state** — cron jobs, remote sessions, and background tasks can all reconnect
+- **Multi-terminal coordination** — when VS Code restores 5 login terminals at once, they cooperate instead of duplicating effort or competing
+
+## The Keychain Difference
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Without Keychain:                                          │
+│                                                             │
+│  Terminal 1 → ssh-agent (prompt)                            │
+│  Terminal 2 → ssh-agent (prompt again)                      │
+│  Terminal 3 → ssh-agent (prompt again)                      │
+│  Cron job → no agent (fails)                                │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  With Keychain:                                             │
+│                                                             │
+│  Terminal 1 ─┐                                              │
+│  Terminal 2 ─┼→ single ssh-agent (prompt once)              │
+│  Terminal 3 ─┤    ↓                                         │
+│  Cron job ───┘    all terminals reconnect automatically     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Installation
+
+Keychain 3 ships as a **Python zipapp** — a single executable file with no third-party Python dependencies. It needs Python 3.9 or newer and the standard OpenSSH tools (`ssh-agent` and `ssh-add`); GPG features also require GnuPG.
+
+### Install System-Wide
+
+```bash
+# Download from https://github.com/danielrobbins/keychain/releases
+chmod +x keychain-3.0.0.pyz
+sudo cp keychain-3.0.0.pyz /usr/local/bin/keychain
+sudo chmod 755 /usr/local/bin/keychain
+
+# Verify installation
+keychain version
+```
+### Verify It's Auditable
+
+Want to inspect the source? The zipapp is just a zip file:
+
+```bash
+unzip -l /usr/local/bin/keychain
+```
+
+No hidden dependencies, no mystery code — everything is right there.
+
+### Platform Support
+
+Keychain 3 is designed for POSIX-like systems with Python 3.9+ and OpenSSH, and optionally GnuPG. That includes Linux, macOS, WSL, Git Bash, the BSDs, Solaris-derived systems, and similar UNIX-like environments. Native Windows is not a supported target yet, but Windows users can run Keychain through WSL or Git Bash.
+
+## 60-Second Quick Start
+
+Here's the fastest way to get started. Add this line to your `~/.bash_profile`, `~/.zshrc`, or equivalent:
+
+```bash
+eval "$(keychain add --eval ~/.ssh/id_ed25519)"
+```
+
+**What just happened?**
+
+1. Keychain checks if an `ssh-agent` is already running
+2. If not, it starts one for you
+3. It loads your private key (prompting for the passphrase once)
+4. It writes the agent's connection info to `~/.keychain/`
+5. Every new shell after that reconnects automatically — **no more prompts**
+
+**Verify it worked:**
+
+```bash
+keychain list
+```
+
+You should see your key listed. Open a new terminal and run it again — still there, no passphrase needed. Use your SSH keypair to access a remote system. No passphrase is required.
+
+> **Note:** No configuration file needed. Keychain works perfectly with zero setup. The optional `.keychainrc` file is for advanced customization only.
+
 ---
 
 ## Why Keychain Exists
 
-Before diving into Keychain, it's worth understanding **why** we're doing this. The concepts come from Daniel's original IBM developerWorks articles on OpenSSH key management.
+For those who may not be familiar with `ssh-agent`, it's worth understanding **why** we're doing this. The concepts come from Daniel's original IBM developerWorks articles on OpenSSH key management.
 
 ### From Passwords to SSH Keys
 
@@ -43,104 +134,6 @@ by handling startup, reuse, stable sockets, shell exports, cron access, and
 coordinated initialization across terminals. It also integrates native
 GnuPG signing and decryption workflows without managing `gpg-agent` or using
 GnuPG as an SSH-agent replacement.
-
----
-
-## 60-Second Quick Start
-
-Here's the fastest way to get started. Add this line to your `~/.bash_profile`, `~/.zshrc`, or equivalent:
-
-```bash
-eval "$(keychain add --eval ~/.ssh/id_ed25519)"
-```
-
-**What just happened?**
-
-1. Keychain checks if an `ssh-agent` is already running
-2. If not, it starts one for you
-3. It loads your private key (prompting for the passphrase once)
-4. It writes the agent's connection info to `~/.keychain/`
-5. Every new shell after that reconnects automatically — **no more prompts**
-
-**Verify it worked:**
-
-```bash
-keychain list
-```
-
-You should see your key listed. Open a new terminal and run it again — still there, no passphrase needed. Use your SSH keypair to access a remote system. No passphrase is required.
-
-> **Note:** No configuration file needed. Keychain works perfectly with zero setup. The optional `.keychainrc` file is for advanced customization only.
-
----
-
-## The Agent Problem Keychain Solves
-
-SSH is amazing, but entering your passphrase every time you open a terminal gets old fast. The standard `ssh-agent` helps, but it has limitations:
-
-- **One agent per login session** — open a new terminal, get a new agent, enter your passphrase again
-- **Cron jobs can't find your agent** — background processes run in a different session
-- **No ssh-agent coordination** — individual ssh-agent processes are not aware of each other.
-
-**Keychain fixes all of this:**
-
-- **One agent per host** — all terminals share the same long-running agent
-- **Persistent state** — cron jobs, remote sessions, and background tasks can all reconnect
-- **Multi-terminal coordination** — when VS Code restores 5 login terminals at once, they cooperate instead of duplicating effort or competing
-
-### The Keychain Difference
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  Without Keychain:                                          │
-│                                                             │
-│  Terminal 1 → ssh-agent (prompt)                            │
-│  Terminal 2 → ssh-agent (prompt again)                      │
-│  Terminal 3 → ssh-agent (prompt again)                      │
-│  Cron job → no agent (fails)                                │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│  With Keychain:                                             │
-│                                                             │
-│  Terminal 1 ─┐                                              │
-│  Terminal 2 ─┼→ single ssh-agent (prompt once)              │
-│  Terminal 3 ─┤    ↓                                         │
-│  Cron job ───┘    all terminals reconnect automatically     │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Installation
-
-Keychain 3 ships as a **Python zipapp** — a single executable file with no third-party Python dependencies. It needs Python 3.9 or newer and the standard OpenSSH tools (`ssh-agent` and `ssh-add`); GPG features also require GnuPG.
-
-### Install System-Wide
-
-```bash
-# Download from https://github.com/danielrobbins/keychain/releases
-chmod +x keychain-3.0.0.pyz
-sudo cp keychain-3.0.0.pyz /usr/local/bin/keychain
-sudo chmod 755 /usr/local/bin/keychain
-
-# Verify installation
-keychain version
-```
-
-### Verify It's Auditable
-
-Want to inspect the source? The zipapp is just a zip file:
-
-```bash
-unzip -l /usr/local/bin/keychain
-```
-
-No hidden dependencies, no mystery code — everything is right there.
-
-### Platform Support
-
-Keychain 3 is designed for POSIX-like systems with Python 3.9+ and OpenSSH, and optionally GnuPG. That includes Linux, macOS, WSL, Git Bash, the BSDs, Solaris-derived systems, and similar UNIX-like environments. Native Windows is not a supported target yet, but Windows users can run Keychain through WSL or Git Bash.
 
 ---
 
@@ -294,8 +287,6 @@ rsync -avz /path/to/data user@remote:/backup/
 ```
 
 If a cron job invokes Keychain directly, use `--noask` so Keychain will not try to prompt in the cron context.
-
-
 
 ---
 

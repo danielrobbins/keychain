@@ -1,5 +1,14 @@
 # ChangeLog
 
+## 3.0.2
+
+Keychain 3.0.2 is a focused maintenance release that improves command-line compatibility and validation, quiet startup behavior, and the visibility of Keychain's core value proposition.
+
+- Corrected legacy command-line translation so options and their values remain in their original order. This prevents value-taking options such as `--timeout 180` from being regrouped and misinterpreted when used with traditional Keychain 2.x-style invocations (PR #236).
+- Implemented missing validation for fixed lists of values. For example, `keychain env --shell` now rejects unsupported output formats and lists the valid choices instead of silently falling back to another format (fixes #234).
+- Made `--quiet` pass OpenSSH's native `-q` option to `ssh-add`, suppressing successful `Identity added` reports while preserving passphrase prompts and errors (fixes #237).
+- Copied the visual "Keychain Difference" into the built-in manual, and optimized ordering of sections in the README (Discussion #218).
+
 ## 3.0.1
 
 Keychain 3.0.1 continues to improve macOS `--confirm` UI dialog support. When `--confirm` is used on macOS, it now implies `--no-inherit`, to ensure that Keychain is able to initialize its own `ssh-agent` that is properly configured to use the macOS native Keychain confirm dialog (addresses #227).
@@ -9,6 +18,8 @@ In addition, cancelling GPG signing key warming no longer results in control cha
 Added `--immediate` to skip "Press Enter to initialize keys" prompt (addresses #230). When requested keys are missing, the first Keychain to acquire the lock will run `ssh-add` immediately instead of first requiring Enter. This is technically safe, but no longer Keychain's default behavior since it's sub-optimal for some user scenarios. This can be enabled persistently via the `[agent] immediate = true` `~/.keychainrc` configuration option.
 
 Corrected `keychain man` pager integration (addresses #231). Color will be enabled when `less` is specifically detected, and `-R` will be enabled when not the default. Otherwise, `keychain man` output will not have color sequences. This fixes man page output on several systems.
+
+`--quiet` now passes OpenSSH's native `-q` option to `ssh-add`, suppressing successful `Identity added` reports while preserving passphrase prompts and errors (fixes #237).
 
 ### GnuPG Scope Adjustment
 
