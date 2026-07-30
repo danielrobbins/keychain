@@ -149,8 +149,7 @@ class Compat:
         ``['--stop', 'mine']`` -> ``['agent', 'stop', '--mine']``,
         ``['id_ed25519']`` -> ``['add', 'id_ed25519']``.
         Unrecognised tokens are passed through so argparse can reject them."""
-        out_opts: list[str] = []
-        out_keys: list[str] = []
+        out_args: list[str] = []
         subcmd: str | None = None
         sub_args: list[str] = []
         expanded = self._expand_argv(argv)
@@ -159,12 +158,12 @@ class Compat:
         while i < len(expanded):
             token = expanded[i]
             if after_dashdash:
-                out_keys.append(token)
+                out_args.append(token)
                 i += 1
                 continue
             if token == "--":
                 after_dashdash = True
-                out_opts.append(token)
+                out_args.append(token)
                 i += 1
                 continue
             key, eq_value = self.split_eq(token)
@@ -172,14 +171,14 @@ class Compat:
                 if subcmd is None:
                     subcmd = self.bool_actions[key]
                 else:
-                    out_opts.append(token)
+                    out_args.append(token)
                 i += 1
                 continue
             if key in self.value_actions:
                 value = eq_value
                 if value is None:
                     if i + 1 >= len(expanded):
-                        out_opts.append(token)
+                        out_args.append(token)
                         i += 1
                         continue
                     value = expanded[i + 1]
@@ -196,9 +195,9 @@ class Compat:
                         else:
                             sub_args = ["stop", value]
                     else:
-                        out_opts.append(token)
+                        out_args.append(token)
                         if eq_value is None:
-                            out_opts.append(value)
+                            out_args.append(value)
                 else:
                     if subcmd is None:
                         subcmd = "wipe"
@@ -209,19 +208,13 @@ class Compat:
                         else:
                             sub_args = [value]
                     else:
-                        out_opts.append(token)
+                        out_args.append(token)
                         if eq_value is None:
-                            out_opts.append(value)
+                            out_args.append(value)
                 continue
-            if token.startswith("-"):
-                out_opts.append(token)
-            else:
-                out_keys.append(token)
+            out_args.append(token)
             i += 1
-        result = [subcmd or "add", *sub_args, *out_opts]
-        if out_keys:
-            result.extend(out_keys)
-        return result
+        return [subcmd or "add", *sub_args, *out_args]
 
     def equivalent_command(self, translated_argv: list[str]) -> str:
         """Format a translated argv list as a shell-safe ``keychain <args>`` string.

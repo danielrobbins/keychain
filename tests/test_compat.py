@@ -124,6 +124,18 @@ class TestTranslate:
         assert "--quiet" in out
         assert out[-2:] == ["id_rsa", "id_ed25519"]
 
+    def test_value_options_remain_paired(self):
+        argv = ["--eval", "--timeout", "180", "--agents", "ssh,gpg", "id_rsa"]
+        assert translate(argv) == ["add", *argv]
+
+    def test_value_option_after_key_preserves_order(self):
+        argv = ["id_rsa", "--timeout", "180"]
+        assert translate(argv) == ["add", *argv]
+
+    def test_global_value_option_after_key_preserves_order(self):
+        argv = ["id_rsa", "--host", "work"]
+        assert translate(argv) == ["add", *argv]
+
     def test_double_dash_passes_through(self):
         out = translate(["--", "--weird-key-name"])
         # Implicit ``add``; ``--`` and the literal arg are preserved.
