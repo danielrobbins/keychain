@@ -617,7 +617,7 @@ class SshAgent:
         )
         if bool(a.get_value("no_gui")) or not askpass_allowed:
             _suppress_gui(run_env)
-        base_cmd = ["ssh-add"]
+        base_cmd = ["ssh-add", *(["-q"] if out.quiet else [])]
         timeout = a.get_value("timeout")
         if timeout is not None:
             base_cmd += ["-t", str(timeout * 60)]

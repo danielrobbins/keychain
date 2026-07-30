@@ -125,14 +125,14 @@ class TestListSelection:
 
 
 class TestSshAgentLoadOutput:
-    def _agent(self, monkeypatch):
+    def _agent(self, monkeypatch, *, quiet=False):
         def get_value(name):
             return {"no_gui": True, "confirm": False, "timeout": None}.get(name, False)
 
         kstate = SimpleNamespace(
             args=SimpleNamespace(get_value=get_value),
         )
-        agent = agents.SshAgent(kstate, Output.build(quiet=False, debug=False, eval_mode=False, color=False))
+        agent = agents.SshAgent(kstate, Output.build(quiet=quiet, debug=False, eval_mode=False, color=False))
         agent.env = SshAgentRef(sock="/tmp/agent.sock", pid="1111")
         monkeypatch.setattr(agent, "_validate_candidate", lambda *_args, **_kwargs: agent.env)
         monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
@@ -212,6 +212,17 @@ class TestSshAgentLoadOutput:
         assert plan is not None
         assert plan.commands == [["ssh-add", "/home/user/.ssh/key1"]]
         assert capsys.readouterr().err == ""
+
+    def test_prepare_load_quiet_suppresses_success_reports(self, monkeypatch):
+        plan = self._agent(monkeypatch, quiet=True).prepare_load(
+            ["/home/user/.ssh/key1"], ["/usr/lib/pkcs11/opensc-pkcs11.so"], announce=False
+        )
+
+        assert plan is not None
+        assert plan.commands == [
+            ["ssh-add", "-q", "/home/user/.ssh/key1"],
+            ["ssh-add", "-q", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"],
+        ]
 
     def test_prepare_load_for_pkcs11_provider_uses_ssh_add_s(self, monkeypatch, capsys):
         plan = self._agent(monkeypatch).prepare_load([], ["/usr/lib/pkcs11/opensc-pkcs11.so"], announce=False)

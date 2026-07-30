@@ -348,7 +348,7 @@ Print the version banner and exit. `-V` is an alias.
 
 == @global quiet: suppress non-error output on stderr
 
-Silence informational messages on stderr. Explicit command results, required interactive prompts and errors are still printed.
+Silence routine Keychain messages and successful `ssh-add` reports. Required interactive prompts, explicit results from actions such as `list`, warnings, and errors are still printed.
 
 == @global debug: trace agent-selection decisions on stderr
 
