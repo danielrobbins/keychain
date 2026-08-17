@@ -100,7 +100,7 @@ def _start(app: main.KeychainApp, coord: ActivationCoordinator):
 
     def run() -> None:
         try:
-            app._coordinate_ssh_keys(coord, main.keys.ResolvedKeys(ssh=["id_ed25519"]), False)
+            app._coordinate_ssh_keys(coord, main.keys.ResolvedKeys(ssh=["id_ed25519"]))
         except BaseException as exc:
             errors.append(exc)
 
@@ -148,7 +148,6 @@ def test_immediate_skips_prompt_and_quiet_stays_silent(tmp_path, monkeypatch, ca
     app._coordinate_ssh_keys(
         ActivationCoordinator(paths, False, 1, _out()),
         main.keys.ResolvedKeys(ssh=["id_ed25519"]),
-        False,
     )
 
     assert controller.calls == [["id_ed25519"]]
@@ -167,7 +166,6 @@ def test_activation_winner_rechecks_agent_before_loading(tmp_path, monkeypatch):
         ActivationCoordinator(paths, False, 1, _out()),
         None,
         main.keys.ResolvedKeys(ssh=["id_ed25519"]),
-        False,
     )
 
     assert result == "success"

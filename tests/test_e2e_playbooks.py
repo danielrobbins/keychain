@@ -1,7 +1,9 @@
 import json
 import os
+import shutil
 import signal
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +22,11 @@ POSIX_AGENT_ONLY = pytest.mark.skipif(
 LINUX_AGENT_ONLY = pytest.mark.skipif(
     not platform.detect().supported or not sys.platform.startswith("linux"),
     reason="real ssh-agent lifecycle e2e coverage is Linux-only in CI",
+)
+OPENSSH_AGENT_ONLY = pytest.mark.skipif(
+    not platform.detect().supported
+    or any(shutil.which(command) is None for command in ("ssh-add", "ssh-agent", "ssh-keygen")),
+    reason="real SSH key lifecycle e2e coverage requires a supported POSIX host with OpenSSH",
 )
 
 
@@ -96,6 +103,37 @@ def from_json(output: str):
             except json.JSONDecodeError:
                 pass
     raise ValueError(f"Could not find valid JSON in output:\n{output}")
+
+
+def generate_ssh_key(path: Path) -> str:
+    result = subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    fields = path.with_suffix(f"{path.suffix}.pub").read_text(encoding="utf-8").split()
+    return " ".join(fields[:2])
+
+
+def loaded_ssh_keys(playbook: PlaybookRunner, host: str) -> set[str]:
+    pidfile = playbook.keydir / f"{host}-sh"
+    agent = SshAgentRef.from_text(pidfile.read_text(encoding="utf-8"))
+    env = agent.overlay(os.environ)
+    env["LC_ALL"] = "C"
+    result = subprocess.run(
+        ["ssh-add", "-L"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 1:
+        assert "no identities" in (result.stdout + result.stderr).lower()
+        return set()
+    assert result.returncode == 0, result.stdout + result.stderr
+    return {" ".join(line.split()[:2]) for line in result.stdout.splitlines() if line.strip()}
 
 
 def pidfile_variants():
@@ -270,6 +308,102 @@ def test_wipe_routes_ssh_and_gpg_targets(playbook: PlaybookRunner, monkeypatch):
     calls.clear()
     playbook.run("wipe", "--ssh", "--gpg")
     assert calls == ["ssh", "gpg"]
+
+
+@OPENSSH_AGENT_ONLY
+@pytest.mark.parametrize(
+    "command",
+    [("--clear", "--quiet"), ("wipe", "--quiet")],
+    ids=["legacy-clear", "wipe"],
+)
+def test_ssh_wipe_commands_remove_all_identities(playbook: PlaybookRunner, command: tuple[str, ...]):
+    """Verify both bare legacy --clear and wipe perform an SSH-only wipe."""
+    host = "testhost"
+    playbook.set_host(host)
+    loaded_key = playbook.home / "id_loaded"
+    loaded_public = generate_ssh_key(loaded_key)
+
+    playbook.run("add", "--quiet", "--immediate", str(loaded_key))
+    assert loaded_ssh_keys(playbook, host) == {loaded_public}
+
+    playbook.run(*command)
+
+    assert loaded_ssh_keys(playbook, host) == set()
+
+
+@OPENSSH_AGENT_ONLY
+@pytest.mark.parametrize("include_new_key", [False, True], ids=["all-loaded", "loaded-and-new"])
+def test_clear_reloads_complete_requested_ssh_key_set(playbook: PlaybookRunner, include_new_key: bool):
+    """Verify --clear discards unrelated identities and reloads every requested key."""
+    host = "testhost"
+    playbook.set_host(host)
+    retained_key = playbook.home / "id_retained"
+    discarded_key = playbook.home / "id_discarded"
+    retained_public = generate_ssh_key(retained_key)
+    discarded_public = generate_ssh_key(discarded_key)
+
+    playbook.run("add", "--quiet", "--immediate", str(retained_key), str(discarded_key))
+    assert loaded_ssh_keys(playbook, host) == {retained_public, discarded_public}
+
+    requested = [str(retained_key)]
+    expected = {retained_public}
+    if include_new_key:
+        new_key = playbook.home / "id_new"
+        expected.add(generate_ssh_key(new_key))
+        requested.append(str(new_key))
+
+    playbook.run("add", "--quiet", "--immediate", "--clear", *requested)
+
+    assert loaded_ssh_keys(playbook, host) == expected
+
+
+@OPENSSH_AGENT_ONLY
+def test_clear_does_not_wipe_when_requested_keys_do_not_resolve(playbook: PlaybookRunner):
+    """Verify key resolution fails before --clear can remove existing identities."""
+    host = "testhost"
+    playbook.set_host(host)
+    loaded_key = playbook.home / "id_loaded"
+    loaded_public = generate_ssh_key(loaded_key)
+
+    playbook.run("add", "--quiet", "--immediate", str(loaded_key))
+    assert loaded_ssh_keys(playbook, host) == {loaded_public}
+
+    playbook.run("add", "--quiet", "--immediate", "--clear", "sshk:missing", expect_exit=1)
+
+    assert loaded_ssh_keys(playbook, host) == {loaded_public}
+
+
+@OPENSSH_AGENT_ONLY
+def test_forget_removes_only_the_requested_ssh_identity(playbook: PlaybookRunner):
+    """Verify forget evicts the requested key without disturbing another identity."""
+    host = "testhost"
+    playbook.set_host(host)
+    forgotten_key = playbook.home / "id_forgotten"
+    retained_key = playbook.home / "id_retained"
+    forgotten_public = generate_ssh_key(forgotten_key)
+    retained_public = generate_ssh_key(retained_key)
+
+    playbook.run("add", "--quiet", "--immediate", str(forgotten_key), str(retained_key))
+    assert loaded_ssh_keys(playbook, host) == {forgotten_public, retained_public}
+
+    playbook.run("forget", "--quiet", str(forgotten_key))
+
+    assert loaded_ssh_keys(playbook, host) == {retained_public}
+
+
+@OPENSSH_AGENT_ONLY
+def test_list_json_reports_the_loaded_ssh_identity(playbook: PlaybookRunner):
+    """Verify list reports the identity actually held by the selected agent."""
+    host = "testhost"
+    playbook.set_host(host)
+    loaded_key = playbook.home / "id_loaded"
+    loaded_type, loaded_body = generate_ssh_key(loaded_key).split()
+
+    playbook.run("add", "--quiet", "--immediate", str(loaded_key))
+    output, _ = playbook.run("list", "--json")
+
+    listed = json.loads(output)
+    assert {(entry["type"], entry["key"]) for entry in listed} == {(loaded_type, loaded_body)}
 
 
 @POSIX_AGENT_ONLY
