@@ -255,10 +255,11 @@ class KeychainApp:
         if (
             requested_keys
             and not bool(self.args.get_value("quick"))
-            and not resolved.ssh
-            and not any((resolved.gpg, resolved.gpg_s, resolved.gpg_e, resolved.gpg_a, resolved.pkcs11))
+            and not resolved.any
             and resolved.missing
         ):
+            if bool(self.args.get_value("ignore_missing")):
+                return 0
             raise KeychainError(
                 "No requested keys could be resolved; refusing to start an agent. "
                 "Run 'keychain help add' for more information."

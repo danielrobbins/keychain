@@ -418,6 +418,40 @@ def test_add_with_only_missing_keys_does_not_start_agent(playbook: PlaybookRunne
     assert not (playbook.keydir / "testhost-sh").exists()
 
 
+@POSIX_AGENT_ONLY
+def test_ignore_missing_with_only_missing_keys_is_a_silent_noop(playbook: PlaybookRunner):
+    """Verify --ignore-missing succeeds without creating agent state."""
+    playbook.set_host("testhost")
+
+    out, err = playbook.run("add", "--quiet", "--ignore-missing", "sshk:ghost-key")
+
+    assert out == ""
+    assert err == ""
+    assert not (playbook.keydir / "testhost-sh").exists()
+
+
+@OPENSSH_AGENT_ONLY
+def test_ignore_missing_loads_resolved_keys_from_a_mixed_request(playbook: PlaybookRunner):
+    """Verify --ignore-missing skips only absent keys in a mixed request."""
+    host = "testhost"
+    playbook.set_host(host)
+    loaded_key = playbook.home / "id_loaded"
+    loaded_public = generate_ssh_key(loaded_key)
+
+    out, err = playbook.run(
+        "add",
+        "--quiet",
+        "--immediate",
+        "--ignore-missing",
+        str(loaded_key),
+        "sshk:ghost-key",
+    )
+
+    assert out == ""
+    assert err == ""
+    assert loaded_ssh_keys(playbook, host) == {loaded_public}
+
+
 @LINUX_AGENT_ONLY
 def test_inspect_command(playbook: PlaybookRunner):
     """Verify that keychain inspect successfully outputs state."""
