@@ -514,6 +514,31 @@ class TestSshAgentStop:
         assert killed == [123]
         assert cleared == [True]
 
+    @pytest.mark.parametrize(
+        "target,expected_killed,expected_cleared",
+        [
+            ("mine", [123, 456], [True]),
+            ("others", [456], []),
+            ("all", [123, 456], [True]),
+        ],
+    )
+    def test_stop_targets_select_the_intended_agents(
+        self,
+        monkeypatch,
+        target,
+        expected_killed,
+        expected_cleared,
+    ):
+        killed: list[int] = []
+        cleared: list[bool] = []
+        monkeypatch.setattr(agents, "findpids", lambda _prog: [123, 456])
+        monkeypatch.setattr(os, "kill", lambda pid, _sig: killed.append(pid))
+
+        self._agent("123", cleared).stop(target)
+
+        assert killed == expected_killed
+        assert cleared == expected_cleared
+
 
 # ---------------------------------------------------------------------------
 # ssh_socket_valid (owner check)

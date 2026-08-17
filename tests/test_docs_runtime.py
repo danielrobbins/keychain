@@ -137,3 +137,23 @@ def test_run_man_propagates_pager_status(monkeypatch, capsys):
 
     assert docs.run_man(args, out) == 7
     assert "Pager exited with status 7" in capsys.readouterr().err
+
+
+def test_run_man_no_pager_honors_requested_width(monkeypatch, capsys):
+    widths = []
+    monkeypatch.setattr(
+        docs,
+        "_render_manual_section",
+        lambda _tag, width, _out, _labels: widths.append(width) or "manual body",
+    )
+    monkeypatch.setattr(
+        docs,
+        "_run_pager",
+        lambda _text: (_ for _ in ()).throw(AssertionError("--no-pager should write directly")),
+    )
+    args = RuntimeConfig.resolve(["man", "--no-pager", "--width", "47", "topic:usage"])
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
+
+    assert docs.run_man(args, out) == 0
+    assert widths == [47]
+    assert capsys.readouterr().out == "manual body\n"
