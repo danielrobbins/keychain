@@ -174,6 +174,27 @@ def test_expand_host_treats_missing_ssh_as_no_identities(monkeypatch):
     assert keys.expand_host("example.com") == keys.ResolvedKeys()
 
 
+def test_expand_host_resolves_identityfiles_from_openssh(monkeypatch, tmp_path):
+    first = tmp_path / "id_first"
+    second = tmp_path / "id_second"
+    first.write_text("private", encoding="utf-8")
+    second.write_text("private", encoding="utf-8")
+
+    def ssh_config(command, **kwargs):
+        assert command == ["ssh", "-nG", "example.com"]
+        assert kwargs == {"timeout": 10}
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=f"hostname example.com\nidentityfile {first}\nidentityfile {second}\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(keys, "run", ssh_config)
+
+    assert keys.expand_host("example.com").ssh == [str(first), str(second)]
+
+
 def test_resolve_requested_keys_mixes_prefixed_and_bare(fake_home, monkeypatch):
     keyfile = fake_home / ".ssh" / "id_test"
     keyfile.write_text("dummy")

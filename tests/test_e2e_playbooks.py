@@ -5,11 +5,12 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from keychain import agents, main
+from keychain import agents, keys, main
 from keychain.env import SshAgentRef
 from keychain.paths import _PID_FACTORIES
 from keychain.runtime import platform
@@ -144,9 +145,14 @@ def pidfile_variants():
 @pytest.fixture
 def playbook(tmp_path, monkeypatch, capsys):
     """Yields a PlaybookRunner configured with a sandboxed tmp_path HOME."""
-    runner = PlaybookRunner(tmp_path, monkeypatch, capsys)
-    yield runner
-    runner.cleanup_agents()
+    home = Path(tempfile.mkdtemp(prefix="kc-e2e-", dir="/tmp")) if sys.platform == "darwin" else tmp_path
+    runner = PlaybookRunner(home, monkeypatch, capsys)
+    try:
+        yield runner
+    finally:
+        runner.cleanup_agents()
+        if home != tmp_path:
+            shutil.rmtree(home)
 
 
 def test_playbook_cleanup_preserves_agents_outside_isolated_home(playbook, monkeypatch) -> None:
@@ -450,6 +456,30 @@ def test_ignore_missing_loads_resolved_keys_from_a_mixed_request(playbook: Playb
     assert out == ""
     assert err == ""
     assert loaded_ssh_keys(playbook, host) == {loaded_public}
+
+
+@OPENSSH_AGENT_ONLY
+def test_confallhosts_loads_identity_from_openssh_config(playbook: PlaybookRunner):
+    """Verify --confallhosts feeds configured identities into real agent loading."""
+    host = "testhost"
+    playbook.set_host(host)
+    ssh_dir = playbook.home / ".ssh"
+    ssh_dir.mkdir()
+    configured_key = ssh_dir / "id_configured"
+    configured_public = generate_ssh_key(configured_key)
+    (ssh_dir / "config").write_text("Host configured.example\n", encoding="utf-8")
+    seen_hosts = []
+
+    def resolve_host(configured_host):
+        seen_hosts.append(configured_host)
+        return keys.ResolvedKeys(ssh=[str(configured_key)])
+
+    playbook.monkeypatch.setattr(keys, "expand_host", resolve_host)
+
+    playbook.run("add", "--quiet", "--immediate", "--confallhosts")
+
+    assert seen_hosts == ["configured.example"]
+    assert loaded_ssh_keys(playbook, host) == {configured_public}
 
 
 @LINUX_AGENT_ONLY

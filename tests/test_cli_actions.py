@@ -172,6 +172,55 @@ class TestResolveAction:
         captured = capsys.readouterr()
         assert "Timed out while updating the systemd user environment" in captured.err
 
+    def test_systemd_set_env_passes_the_selected_agent_environment(self, monkeypatch):
+        calls = []
+
+        def record_run(command, **kwargs):
+            calls.append((command, kwargs))
+
+        monkeypatch.setattr(main.subprocess, "run", record_run)
+
+        main._systemd_set_env(
+            main.SshAgentRef("/tmp/user name/agent.sock", "123"),
+            Output.build(quiet=True, debug=False, eval_mode=False, color=False),
+        )
+
+        assert calls == [
+            (
+                [
+                    "systemctl",
+                    "--user",
+                    "set-environment",
+                    "SSH_AUTH_SOCK=/tmp/user name/agent.sock",
+                    "SSH_AGENT_PID=123",
+                ],
+                {
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL,
+                    "timeout": 5,
+                    "check": False,
+                },
+            )
+        ]
+
+    def test_systemd_option_exports_the_agent_selected_by_start(self, monkeypatch):
+        ns = RuntimeConfig.resolve(["add", "--systemd"])
+        selected = main.SshAgentRef("/tmp/agent.sock", "123")
+        exported = []
+
+        class _SSH:
+            env = selected
+
+            def start(self):
+                return False
+
+        app = KeychainApp(ns, Output.build(quiet=True, debug=False, eval_mode=False, color=False))
+        app._kstate = SimpleNamespace(ssh=_SSH(), paths=SimpleNamespace())
+        monkeypatch.setattr(main, "_systemd_set_env", lambda env, _out: exported.append(env))
+
+        assert app._prepare_agent_state() is False
+        assert exported == [selected]
+
     def test_add_with_only_missing_keys_refuses_after_gpg_resolution(self):
         ns = RuntimeConfig.resolve(["add", "ghost-key"])
 
