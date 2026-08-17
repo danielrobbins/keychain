@@ -197,6 +197,29 @@ class TestResolveAction:
         with pytest.raises(KeychainError, match="No requested keys could be resolved; refusing to start an agent"):
             app._handle_add_action()
 
+    def test_ignore_missing_returns_before_agent_setup_when_all_keys_are_missing(self):
+        ns = RuntimeConfig.resolve(["add", "--ignore-missing", "ghost-key"])
+
+        class _Paths:
+            def ensure_keydir(self):
+                return None
+
+        class _State:
+            user = "tester"
+            paths = _Paths()
+
+            def resolve_requested_keys(self, _out, *, gpg_lookup=True):
+                assert gpg_lookup is True
+                return keys.ResolvedKeys(missing=["ghost-key"])
+
+        _State.args = ns
+        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+        app = KeychainApp(ns, out)
+        app._kstate = _State()
+        app._do_add = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("agent should not start"))
+
+        assert app._handle_add_action() == 0
+
     def test_add_with_pkcs11_request_does_not_trigger_missing_only_rejection(self):
         ns = RuntimeConfig.resolve(["add", "pkcs11:/usr/lib/pkcs11/opensc-pkcs11.so"])
 

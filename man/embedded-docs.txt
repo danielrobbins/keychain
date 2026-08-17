@@ -272,7 +272,7 @@ Pass a timeout through to `ssh-add`: the key is forgotten by the agent after the
 
 == @option ignore-missing: skip keys that don't exist
 
-For each KEY positional that doesn't resolve to an existing file (or known GPG ID), skip it silently instead of erroring. Useful in dotfiles shared across machines where not every key is present everywhere. If *all* requested keys are missing, `add` still exits without spawning an agent.
+For each KEY positional that doesn't resolve to an existing file (or known GPG ID), skip it silently instead of erroring. Useful in dotfiles shared across machines where not every key is present everywhere. If *all* requested keys are missing, `add` still exits successfully without spawning an agent.
 
 == @option clear: wipe SSH identities before adding
 
