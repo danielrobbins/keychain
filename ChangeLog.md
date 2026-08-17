@@ -1,5 +1,13 @@
 # ChangeLog
 
+## 3.0.3
+
+Keychain 3.0.3 is a focused maintenance release that corrects the behavior of the legacy `--clear` option and `--ignore-missing`, backed by expanded real-agent regression coverage.
+
+- Restored `--clear` as an SSH-only wipe followed by normal coordinated key loading. It now reloads the complete requested SSH key set, including keys that were loaded before the wipe, without flushing GnuPG's passphrase cache (fixes #243).
+- Corrected `--ignore-missing` when every requested key is absent. Keychain now exits successfully without output, starting an agent, or creating a pidfile; mixed requests continue to load every key that does resolve (fixes #242).
+- Expanded behavioral coverage for SSH identity clearing, reloading, forgetting and listing; `ssh-agent` stop targets; systemd environment propagation; OpenSSH host configuration; and manual pager controls.
+
 ## 3.0.2
 
 Keychain 3.0.2 is a focused maintenance release that improves command-line compatibility and validation, quiet startup behavior, and the visibility of Keychain's core value proposition.
