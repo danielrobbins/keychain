@@ -294,14 +294,17 @@ class KeychainApp:
         with coord.state_lock():
             quick_succeeded = self._prepare_agent_state()
 
+        if wipe_pending:
+            self._activate_direct(coord, keys.ResolvedKeys(), wipe_pending=True)
+
         if bool(self.args.get_value("noask")):
             self.out.line()
             return 0
 
         if not quick_succeeded:
-            self._coordinate_ssh_keys(coord, requested, wipe_pending)
+            self._coordinate_ssh_keys(coord, requested)
         if not bool(self.args.get_value("quick")):
-            self._warm_gpg_keys(requested, wipe_pending)
+            self._warm_gpg_keys(requested)
         self.out.line()
         return 0
 
@@ -309,7 +312,6 @@ class KeychainApp:
         self,
         coord: ActivationCoordinator,
         requested: keys.ResolvedKeys,
-        wipe_pending: bool,
     ) -> None:
         with coord.state_lock():
             missing = self._missing_ssh_keys(requested)
@@ -319,7 +321,7 @@ class KeychainApp:
 
         waiter = coord.create_waiter() if coord.can_prompt() else None
         if waiter is None:
-            self._activate_direct(coord, missing, wipe_pending)
+            self._activate_direct(coord, missing)
             return
 
         try:
@@ -397,7 +399,7 @@ class KeychainApp:
                         self.out.note("Activation owner did not cancel; still waiting.")
                         continue
 
-                activation_result = self._try_activation(coord, waiter, missing, wipe_pending)
+                activation_result = self._try_activation(coord, waiter, missing)
                 if activation_result == "success":
                     return
                 handoff_wait = activation_result == "canceled" or (handoff_wait and activation_result == "busy")
@@ -456,10 +458,16 @@ class KeychainApp:
             time.sleep(0.05)
         return missing
 
-    def _activate_direct(self, coord: ActivationCoordinator, missing: keys.ResolvedKeys, wipe_pending: bool) -> None:
+    def _activate_direct(
+        self,
+        coord: ActivationCoordinator,
+        missing: keys.ResolvedKeys,
+        *,
+        wipe_pending: bool = False,
+    ) -> None:
         deadline = time.monotonic() + coord.lockwait
         while True:
-            if self._try_activation(coord, None, missing, wipe_pending) == "success":
+            if self._try_activation(coord, None, missing, wipe_pending=wipe_pending) == "success":
                 return
             if time.monotonic() >= deadline:
                 raise KeychainError(f"could not acquire activation lock {coord.paths.activation_lockf}")
@@ -470,13 +478,16 @@ class KeychainApp:
         coord: ActivationCoordinator,
         waiter: WaiterEndpoint | None,
         missing: keys.ResolvedKeys,
-        wipe_pending: bool,
+        *,
+        wipe_pending: bool = False,
     ) -> str:
         with coord.activation_lock() as activation:
             if not activation.acquired:
                 self.out.info("Another terminal is initializing keys; waiting for completion.")
                 return "busy"
 
+            if wipe_pending:
+                self.kstate.ssh.wipe()
             missing = self._missing_ssh_keys(missing, announce_known=False)
             if not missing.any:
                 return "success"
@@ -484,8 +495,6 @@ class KeychainApp:
             status = "failed"
             with _activation_signals():
                 try:
-                    if wipe_pending:
-                        self.kstate.ssh.wipe()
                     plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
                     if plan is None:
                         raise KeychainError("Unable to add keys")
@@ -501,13 +510,11 @@ class KeychainApp:
                     coord.finish_activation(status)
             return "success"
 
-    def _warm_gpg_keys(self, requested: keys.ResolvedKeys, wipe_pending: bool) -> None:
+    def _warm_gpg_keys(self, requested: keys.ResolvedKeys) -> None:
         signing = list(dict.fromkeys([*requested.gpg, *requested.gpg_s, *requested.gpg_a]))
         decryption = list(dict.fromkeys([*requested.gpg_e, *requested.gpg_a]))
         if not signing and not decryption:
             return
-        if wipe_pending:
-            self.kstate.gpg.wipe()
         if signing:
             self.kstate.gpg.warm_signing(signing)
         if decryption:

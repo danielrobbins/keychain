@@ -484,7 +484,7 @@ class TestKeychainAppCoordination:
         )
 
         with pytest.raises(SystemExit):
-            app._try_activation(coord, None, main.keys.ResolvedKeys(ssh=["key"]), False)
+            app._try_activation(coord, None, main.keys.ResolvedKeys(ssh=["key"]))
 
         assert lock_was_held == [True]
         assert installed == originals
@@ -639,7 +639,7 @@ class TestKeychainAppCoordination:
             gpg_e=["C", "D"],
             gpg_a=["B", "C"],
         )
-        app._warm_gpg_keys(requested, False)
+        app._warm_gpg_keys(requested)
 
         assert calls == [("sign", ["A", "B", "C"]), ("decrypt", ["C", "D", "B"])]
 
@@ -681,7 +681,7 @@ class TestKeychainAppCoordination:
 
         assert app._resolve_add_keys().missing == ["ghost-key"]
 
-    def test_gpg_warmup_wipes_cache_first(self):
+    def test_gpg_warmup_does_not_clear_cache(self):
         calls: list[str] = []
 
         class _GPG:
@@ -697,9 +697,9 @@ class TestKeychainAppCoordination:
         app = main.KeychainApp(RuntimeConfig.resolve(["add"]), _out())
         app._kstate = SimpleNamespace(gpg=_GPG())
 
-        app._warm_gpg_keys(main.keys.ResolvedKeys(gpg_a=["KEY"]), True)
+        app._warm_gpg_keys(main.keys.ResolvedKeys(gpg_a=["KEY"]))
 
-        assert calls == ["wipe", "sign", "decrypt"]
+        assert calls == ["sign", "decrypt"]
 
     @pytest.mark.parametrize("quick_succeeded", [False, True])
     def test_quick_gpg_add_is_ssh_only(self, tmp_path, quick_succeeded):

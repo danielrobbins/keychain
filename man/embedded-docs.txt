@@ -274,13 +274,15 @@ Pass a timeout through to `ssh-add`: the key is forgotten by the agent after the
 
 For each KEY positional that doesn't resolve to an existing file (or known GPG ID), skip it silently instead of erroring. Useful in dotfiles shared across machines where not every key is present everywhere. If *all* requested keys are missing, `add` still exits without spawning an agent.
 
-== @option clear: wipe before adding -- use chained verbs
+== @option clear: wipe SSH identities before adding
 
-Wipe agents first, then load the new keys. This can also be accomplished by calling:
+Remove every identity from the selected `ssh-agent`, then process the requested keys normally. This is equivalent to calling:
 
 ```
 keychain wipe && keychain add KEYS
 ```
+
+`--clear` does not flush GnuPG's passphrase cache, even when GPG keys are also requested. Use `keychain wipe --gpg` when that separate operation is intended.
 
 == @option confallhosts: load every IdentityFile in ~/.ssh/config
 
@@ -599,7 +601,7 @@ Every keychain 2.x flat-flag invocation is translated to the new-style action ve
 
 Old long-form spellings of options that have been renamed (`--noask`, `--noinherit`, `--nogui`, `--nolock`, `--no-color`) all remain accepted. *No deprecation is planned for the legacy flag spellings.*
 
-Old options that are now hidden but still accepted with their original meaning: `--extended`, `--gpg2`, `--absolute`, `--clear`, `--theme`, `--ssh-allow-forwarded`, `--no-inherit`, `--ssh-agent-socket`, `--confirm`. These are now lifestyle preferences set in `~/.keychainrc`; the CLI flags work but no longer appear in --help.
+Old options that are now hidden but still accepted for compatibility: `--extended`, `--gpg2`, `--absolute`, `--clear`, `--theme`, `--ssh-allow-forwarded`, `--no-inherit`, `--ssh-agent-socket`, `--confirm`. These are now lifestyle preferences set in `~/.keychainrc`; the CLI flags work but no longer appear in --help. `--clear` follows Keychain 3's SSH-only default wipe policy; clearing GnuPG remains an explicit `wipe --gpg` operation.
 
 Deprecated no-ops retained for command-line compatibility: `--ssh-allow-gpg` and `--ssh-spawn-gpg`. Each emits a warning and is ignored; Keychain uses `ssh-agent` exclusively for SSH keys.
 
