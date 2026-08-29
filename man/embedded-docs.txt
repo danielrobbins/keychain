@@ -410,7 +410,7 @@ Override the per-user state directory. By default keychain uses `~/.keychain/` f
 
 == @global host: override hostname used for pidfile naming
 
-Override the hostname used in pidfile names. Pidfiles are named `HOST-sh` / `HOST-csh` / `HOST-fish` etc. so multiple hosts sharing a homedir over NFS each get their own state. By default keychain probes `hostname(1)`, `$HOSTNAME`, then `uname -n`.
+`--host HOSTNAME` (or the more explicit `--hostname HOSTNAME`) overrides the hostname used in pidfile names. Pidfiles are named `HOST-sh` / `HOST-csh` / `HOST-fish` etc. so multiple hosts sharing a homedir over NFS each get their own state. By default keychain probes `hostname(1)`, `$HOSTNAME`, then `uname -n`.
 
 == @config agent.env.ssh_args: extra args passed to spawned `ssh-agent`
 
