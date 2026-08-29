@@ -403,6 +403,7 @@ class TestOutputFormatOptions:
         [
             ("--dir", "dir", "/tmp/keychain"),
             ("--host", "host", "build-7"),
+            ("--hostname", "host", "build-7"),
             ("--lockwait", "lockwait", 7),
             ("--timeout", "timeout", 30),
             ("--ssh-agent-socket", "ssh_agent_socket", "/tmp/agent.sock"),

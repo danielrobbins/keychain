@@ -541,7 +541,7 @@ ROOT_ACTION.add_option(
 ROOT_ACTION.add_option(option="--gpg2", deprecated=True)
 ROOT_ACTION.add_option(option="--absolute", config_section="paths")
 ROOT_ACTION.add_option(option="--dir", type="str", default="~/.keychain", config_section="paths")
-ROOT_ACTION.add_option(option="--host", type="str")
+ROOT_ACTION.add_option(option="--host", cli_aliases=("--hostname",), type="str")
 ROOT_ACTION.add_option(
     varname="pid_formats", type="str", default="sh", config_section="paths", config_doc_tag="config:paths.pid_formats"
 )
