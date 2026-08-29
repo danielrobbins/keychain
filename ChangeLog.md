@@ -1,5 +1,12 @@
 # ChangeLog
 
+## 3.0.4
+
+Keychain 3.0.4 is a focused maintenance release that improves validation of persisted SSH agent state and adds a clearer spelling for the hostname override.
+
+- Hardened pidfile reuse after reboot. A recorded PID must now belong to a running `ssh-agent`, and its recorded socket must respond as an SSH agent before Keychain will reuse it. This prevents an orphaned socket or a recycled PID from making stale state appear valid; Keychain instead rejects the stale reference and selects or starts a valid agent (fixes #246 and #247).
+- Added `--hostname` as an alias for `--host`, making explicit hostname overrides easier to discover while preserving the existing behavior and configuration model.
+
 ## 3.0.3
 
 Keychain 3.0.3 is a focused maintenance release that corrects the behavior of the legacy `--clear` option and `--ignore-missing`, backed by expanded real-agent regression coverage.
