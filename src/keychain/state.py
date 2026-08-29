@@ -227,7 +227,7 @@ class KeychainState:
     def process_listing_supported(self) -> bool:
         return self.platform.supported
 
-    @cached_property
+    @property
     def ssh_agent_pids(self) -> list[int]:
         if not self.process_listing_supported:
             return []

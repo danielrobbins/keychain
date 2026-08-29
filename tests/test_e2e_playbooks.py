@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import shutil
@@ -12,7 +13,8 @@ import pytest
 
 from keychain import agents, keys, main
 from keychain.env import SshAgentRef
-from keychain.paths import _PID_FACTORIES
+from keychain.output.core import Output
+from keychain.paths import _PID_FACTORIES, KeychainPaths
 from keychain.runtime import platform
 from tests.support import set_home
 
@@ -201,6 +203,38 @@ def test_basic_agent_lifecycle(playbook: PlaybookRunner):
     out_after, err_after = playbook.run("inspect", "--json")
     state_after = from_json(out_after)
     assert state_after["agent_state"]["pidfile"]["process"]["alive"] is False
+
+
+@OPENSSH_AGENT_ONLY
+def test_reboot_stale_socket_is_replaced_when_pid_was_reused(playbook: PlaybookRunner):
+    """A persistent socket inode must not make a reboot-stale pidfile look usable."""
+    host = "testhost"
+    playbook.set_host(host)
+    key_path = playbook.home / "reboot-key"
+    public_key = generate_ssh_key(key_path)
+    playbook.keydir.mkdir(mode=0o700, parents=True)
+    decoy = subprocess.run(["ssh-agent", "-s"], capture_output=True, text=True, check=True)
+    decoy_agent = SshAgentRef.from_text(decoy.stdout)
+    paths = KeychainPaths(playbook.keydir, host)
+    stale_socket = paths.ssh_agent_socket_path
+    sock = socket.socket(socket.AF_UNIX)
+    try:
+        sock.bind(str(stale_socket))
+        sock.close()
+        paths.write(SshAgentRef(str(stale_socket), decoy_agent.pid), Output.silent())
+
+        playbook.run("--quiet", "add", "--immediate", str(key_path))
+
+        replacement = SshAgentRef.from_text(paths.pidfile_path("sh").read_text(encoding="utf-8"))
+        assert replacement.pid != decoy_agent.pid
+        assert replacement.pid_int in agents.findpids("ssh")
+        assert replacement.sock == str(stale_socket)
+        assert loaded_ssh_keys(playbook, host) == {public_key}
+    finally:
+        sock.close()
+        if decoy_agent.pid_int is not None:
+            with contextlib.suppress(OSError):
+                os.kill(decoy_agent.pid_int, signal.SIGTERM)
 
 
 @LINUX_AGENT_ONLY

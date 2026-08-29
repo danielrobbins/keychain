@@ -94,6 +94,21 @@ class TestExtractFingerprints:
         assert len(fps) == 4
 
 
+class TestSshListProbe:
+    @pytest.mark.parametrize(
+        ("result", "expected_rc"),
+        [
+            (SimpleNamespace(returncode=1, stdout="The agent has no identities.\n", stderr=""), 1),
+            (SimpleNamespace(returncode=1, stdout="", stderr="error fetching identities: communication error\n"), 2),
+            (SimpleNamespace(returncode=2, stdout="", stderr="Error connecting to agent: Connection refused\n"), 2),
+        ],
+    )
+    def test_only_a_verified_empty_agent_is_healthy(self, monkeypatch, result, expected_rc):
+        monkeypatch.setattr(agents, "run", lambda *_args, **_kwargs: result)
+
+        assert agents.ssh_l({"SSH_AUTH_SOCK": "/tmp/agent.sock"}) == ([], expected_rc)
+
+
 class TestListSelection:
     def test_ssh_agent_starts_without_an_unvalidated_reference(self):
         kstate = SimpleNamespace()
@@ -689,6 +704,7 @@ class TestSshAgentSelection:
         pidfile: SshAgentRef = SshAgentRef(),
         inherited: SshAgentRef = SshAgentRef(),
         platform_name: str = "linux",
+        ssh_agent_pids: list[int] | None = None,
         **options,
     ):
         args = SimpleNamespace(get_value=lambda name: options.get(name))
@@ -698,6 +714,7 @@ class TestSshAgentSelection:
             inherited_env=inherited,
             pidfile_env=pidfile,
             platform=SimpleNamespace(name=platform_name),
+            ssh_agent_pids=[11, 22] if ssh_agent_pids is None else ssh_agent_pids,
         )
         return agents.SshAgent(state, _out())
 
@@ -705,7 +722,7 @@ class TestSshAgentSelection:
     def _valid_candidates(monkeypatch):
         monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
         monkeypatch.setattr(agents, "gpg_ssh_socket", lambda _env=None: "")
-        monkeypatch.setattr(agents, "pid_alive", lambda _pid: True)
+        monkeypatch.setattr(agents, "ssh_l", lambda _env: ([], 1))
 
     def test_pidfile_precedes_inherited_agent(self, monkeypatch):
         self._valid_candidates(monkeypatch)
@@ -716,10 +733,22 @@ class TestSshAgentSelection:
         assert agent.select_existing() == pidfile
         assert agent.env_source == "pidfile"
 
-    def test_rejected_pidfile_falls_back_to_inherited_agent(self, monkeypatch):
+    def test_pidfile_reused_by_non_agent_falls_back_to_inherited_agent(self, monkeypatch):
         self._valid_candidates(monkeypatch)
-        monkeypatch.setattr(agents, "pid_alive", lambda pid: pid == 22)
         inherited = SshAgentRef("/tmp/inherited.sock", "22")
+        agent = self._agent(
+            pidfile=SshAgentRef("/tmp/stale.sock", "11"),
+            inherited=inherited,
+            ssh_agent_pids=[22],
+        )
+
+        assert agent.select_existing() == inherited
+        assert agent.env_source == "env"
+
+    def test_unresponsive_pidfile_socket_falls_back_to_inherited_agent(self, monkeypatch):
+        self._valid_candidates(monkeypatch)
+        inherited = SshAgentRef("/tmp/inherited.sock", "22")
+        monkeypatch.setattr(agents, "ssh_l", lambda env: ([], 2 if env["SSH_AGENT_PID"] == "11" else 1))
         agent = self._agent(pidfile=SshAgentRef("/tmp/stale.sock", "11"), inherited=inherited)
 
         assert agent.select_existing() == inherited

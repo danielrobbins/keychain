@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from .env import SshAgentRef
 from .output.core import Output
-from .util import KeychainError, current_uid, get_tty, pid_alive, run, unlink_quiet
+from .util import KeychainError, current_uid, get_tty, run, unlink_quiet
 
 if TYPE_CHECKING:
     from .state import KeychainState
@@ -198,8 +198,9 @@ def ssh_l(env: Mapping[str, str]) -> tuple[list[str], int]:
         return [], 2
     if r.returncode == 0:
         return extract_fingerprints(r.stdout.strip()), 0
-    rc = 2 if (r.returncode == 1 and "open a connection" in r.stdout) else r.returncode
-    return [], rc
+    if r.returncode == 1 and "no identities" in r.stdout.lower():
+        return [], 1
+    return [], 2
 
 
 def ssh_fingerprint(filename: str, out: Output) -> str | None:
@@ -371,16 +372,17 @@ class SshAgent:
                 out.note("Ignoring gpg-agent SSH socket; Keychain manages SSH keys with ssh-agent.")
             return None
 
-        if pid_str:
-            try:
-                if not pid_alive(int(pid_str)):
-                    raise ValueError
-            except ValueError:
-                msg = ("SSH_AGENT_PID in {} ({}) is not a live process; ignoring it").format(source, pid_str)
-                out.debug(msg)
-                if visible:
-                    self._remember_spawn_context(source, "pid not running")
-                pid_str = ""
+        if pid_str and agent_env.pid_int not in self.keychain_state.ssh_agent_pids:
+            out.debug(f"SSH_AGENT_PID in {source} ({pid_str}) is not a running ssh-agent; ignoring it")
+            if visible:
+                self._remember_spawn_context(source, "pid is not ssh-agent")
+            return None
+
+        if ssh_l(agent_env.as_dict())[1] == 2:
+            out.debug(f"SSH_AUTH_SOCK in {source} ({sock}) is not responding as an ssh-agent; ignoring it")
+            if visible:
+                self._remember_spawn_context(source, "socket not responding")
+            return None
 
         if not pid_str:
             # A reachable socket without a PID may be a forwarded agent.

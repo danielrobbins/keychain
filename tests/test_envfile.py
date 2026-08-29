@@ -10,6 +10,7 @@ from keychain.env import SshAgentRef
 from keychain.main import main
 from keychain.output.core import Output
 from keychain.paths import KeychainPaths
+from keychain.state import KeychainState
 
 # ---------------------------------------------------------------------------
 # Issue #116: paths.write() produces a bare KEY=value sidecar
@@ -62,12 +63,8 @@ class TestEnvAction:
         pidfile.chmod(0o600)
         monkeypatch.setattr("socket.gethostname", lambda: "myhost")
         monkeypatch.setattr("keychain.agents.validate_ssh_socket", lambda path: SocketValidation(path, True))
-        monkeypatch.setattr("keychain.agents.pid_alive", lambda pid: pid == 99999)
-        # Skip ssh-add probing (no real agent).
-        monkeypatch.setattr(
-            "keychain.agents.SshAgent.list_loaded",
-            lambda self: ([], 0),
-        )
+        monkeypatch.setattr(KeychainState, "ssh_agent_pids", property(lambda _state: [99999]))
+        monkeypatch.setattr("keychain.agents.ssh_l", lambda _env: ([], 1))
         return keydir, sock
 
     def test_env_default_bare(self, tmp_path, monkeypatch, capsys):
