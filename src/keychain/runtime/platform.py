@@ -63,7 +63,10 @@ class _PosixPlatform(Platform):
         pids: list[int] = []
         try:
             proc = subprocess.Popen(
-                ["ps", "-A", "-o", "pid=,uid=,comm="],
+                # illumos/Solaris treats everything after '=' in one -o
+                # argument as header text, including commas. Separate -o
+                # options preserve all three columns across POSIX hosts.
+                ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
