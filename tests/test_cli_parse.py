@@ -89,6 +89,29 @@ class TestParseArgsActions:
 class TestPerActionHelp:
     """Pre-scan behavior for per-action help and version handling."""
 
+    @pytest.mark.parametrize("flag", ["--help", "-h", "--version", "-V"])
+    @pytest.mark.parametrize(
+        "host_args, host", [(["--host", "buildhost"], "buildhost"), (["--host=--no-color"], "--no-color")]
+    )
+    def test_output_aliases_preserve_global_options_and_values(self, flag, host_args, host):
+        ns = RuntimeConfig.resolve([*host_args, "add", "--timeout", "30", flag, "--theme=legacy"])
+        assert ns.parse_error is None
+        assert ns.get_value("host") == host
+        assert ns.get_value("theme") == "legacy"
+        assert not ns.get_value("nocolor")
+
+    def test_help_does_not_promote_action_option_values_to_global_flags(self):
+        ns = RuntimeConfig.resolve(["add", "--timeout", "--no-color", "--help"])
+        assert ns.parse_error is None
+        assert ns.action == "help"
+        assert not ns.get_value("nocolor")
+
+    def test_help_does_not_read_options_after_literal_barrier(self):
+        ns = RuntimeConfig.resolve(["add", "--help", "--", "--no-color"])
+        assert ns.parse_error is None
+        assert ns.action == "help"
+        assert not ns.get_value("nocolor")
+
     @pytest.mark.parametrize(
         "argv,expected_hint",
         [

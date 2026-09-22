@@ -402,13 +402,18 @@ class RuntimeConfig:
         structural option matches, its ``Option.action_adapter`` returns the
         canonical argv that should be parsed normally.
 
+        Preserve global options and their values for the resulting action, but
+        discard action-specific options when switching to help or version.
+
         Why it resolves this way:
         keeping the rewrite at the argv level means the existing action tree,
         positional binding, and handler flow continue to do the real work. The
         parser only has one normal execution path after canonicalization.
         """
         root_options = self._gather_options(ROOT_ACTION)
-
+        active_options = self._visible_options(action_node)
+        adapted = None
+        global_tokens: list[str] = []
         i = 0
         while i < len(tokens):
             tok = tokens[i]
@@ -418,21 +423,20 @@ class RuntimeConfig:
                 i += 1
                 continue
 
-            opt = self._resolve_alias(tok, root_options)
+            root_opt = self._resolve_alias(tok, root_options)
+            opt = root_opt or self._resolve_alias(tok, active_options)
             if opt is None:
                 i += 1
                 continue
 
-            adapted = opt.adapt_argv(tokens, i, action_node, consumed_sequence)
-            if adapted is not None:
-                return adapted
+            if root_opt and adapted is None:
+                adapted = root_opt.adapt_argv(tokens, i, action_node, consumed_sequence)
+            width = 2 if opt.takes_value and "=" not in tok else 1
+            if root_opt and root_opt.action_adapter is None:
+                global_tokens.extend(tokens[i : i + width])
+            i += width
 
-            if opt.takes_value and "=" not in tok:
-                i += 2
-            else:
-                i += 1
-
-        return None
+        return [*adapted, *global_tokens] if adapted is not None else None
 
     def _canonicalize_argv(self, tokens: list[str]) -> list[str]:
         """Return the canonical argv to parse for this invocation.

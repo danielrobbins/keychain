@@ -12,6 +12,33 @@ from keychain.runtime.config import RuntimeConfig
 
 
 class TestHelpVersionOutput:
+    @pytest.mark.parametrize(
+        "invocation",
+        [["--help"], ["-h"], ["help"], ["add", "--help"], ["agent", "stop", "-h"], ["--version"], ["version"]],
+    )
+    @pytest.mark.parametrize("flag", ["--no-color", "--nocolor"])
+    @pytest.mark.parametrize("before", [False, True])
+    def test_output_aliases_honor_no_color(self, invocation, flag, before, capfd, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setattr("os.isatty", lambda _fd: True)
+        argv = [flag, *invocation] if before else [*invocation, flag]
+        with pytest.raises(SystemExit) as ex:
+            main.main(argv)
+        assert ex.value.code == 0
+        captured = capfd.readouterr()
+        assert "keychain" in captured.out + captured.err
+        assert "\x1b[" not in captured.out + captured.err
+
+    def test_help_color_regression_has_a_colored_control(self, capfd, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("NO_COLOR", raising=False)
+        monkeypatch.setattr("os.isatty", lambda _fd: True)
+        with pytest.raises(SystemExit) as ex:
+            main.main(["--help"])
+        assert ex.value.code == 0
+        assert "\x1b[" in capfd.readouterr().out
+
     def test_source_tree_version_file_wins(self):
         from keychain import __version__
 
