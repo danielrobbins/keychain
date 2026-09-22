@@ -62,6 +62,9 @@ lint = [
 
 # Convenience superset for local development.
 dev = [
+    "build>=1",
+    "setuptools>=64",
+    "wheel",
     "pytest>=7",
     "pytest-cov>=5",
     "ruff>=0.5",

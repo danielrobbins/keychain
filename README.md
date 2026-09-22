@@ -57,6 +57,36 @@ sudo chmod 755 /usr/local/bin/keychain
 # Verify installation
 keychain version
 ```
+### Standard Python Installation
+
+The zipapp is not required. You can also install from a Keychain source checkout or extracted source release using standard Python packaging. For example, on Linux (including WSL) or macOS:
+
+```bash
+python3 -m venv .install
+.install/bin/python -m pip install .
+.install/bin/keychain version
+```
+
+For distribution packaging, Keychain uses a setuptools-based PEP 517 build backend. Run `python3 -m build` with the distribution's selected Python interpreter to produce a source distribution and a wheel built from it. Install the wheel using the distribution's normal packaging tools; they can select the installed interpreter and compile bytecode for it. There are no third-party Python runtime dependencies.
+
+The build frontend (`build`) is a build-time dependency. For offline builds, provide the dependencies from `[build-system].requires` in `pyproject.toml` and run `python3 -m build --no-isolation`. The backend generates the embedded documentation automatically. The installed `keychain` command and `python3 -m keychain` both use the same application entry point.
+
+The portable zipapp remains a source-only, single-file alternative that runs across supported Python versions. A normal Python installation lets the distribution manage interpreter-specific bytecode without putting it in the zipapp.
+
+### Precompiled Zipapp
+
+If you control which Python interpreter will run Keychain, you can build `keychain-precompiled.pyz`. It contains the same application as the portable zipapp, plus Python bytecode compiled ahead of time for your selected interpreter. This is useful for local installations as well as distribution packages:
+
+```bash
+make precompiled-pyz PYTHON=/usr/bin/python3.11
+```
+
+The executable's shebang defaults to the selected interpreter's absolute path, so launching it directly uses that interpreter instead of whichever `python3` happens to be on `PATH`. Python is still required: this is not a native executable or a bundled Python runtime. `PYTHON` selects the interpreter for documentation generation, compilation, and zipapp creation.
+
+If the installed interpreter has a different path from the build interpreter, add `PYZ_INTERPRETER=/usr/bin/python3.11` to the build command. The two interpreters must use the same Python bytecode format. Rebuild when changing Python minor versions. Running the archive explicitly with a different Python interpreter overrides its shebang; incompatible bytecode is ignored and the retained source is compiled instead.
+
+This build keeps the source for auditing and places `.pyc` files alongside it, where Python's ZIP importer can use them. It precompiles at normal optimization level, without stripping assertions or docstrings. This avoids source compilation at startup with the matching interpreter; it does not make application operations inherently faster. `make keychain.pyz` and `make release-artifacts` still produce the source-only portable zipapp, independently of the precompiled artifact.
+
 ### Verify It's Auditable
 
 Want to inspect the source? The zipapp is just a zip file:

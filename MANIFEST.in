@@ -1,3 +1,4 @@
+include VERSION
 include man/embedded-docs.txt
 include scripts/build_backend.py
 include scripts/build_doc_texts.py
