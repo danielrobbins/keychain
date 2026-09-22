@@ -387,7 +387,72 @@ def test_apply_keychainrc_enables_immediate_activation(tmp_path):
     args = RuntimeConfig.resolve(["add"])
     args.apply_keychainrc({"HOME": str(tmp_path)})
 
-    assert args.get_value("immediate") is True
+    assert args.get_value("activation") == "immediate"
+
+
+@pytest.mark.parametrize("default", ["prompt", "immediate"])
+@pytest.mark.parametrize("cli", [False, True])
+@pytest.mark.parametrize(
+    "settings, configured",
+    [
+        ("", None),
+        ("activation = prompt", "prompt"),
+        ("activation = immediate", "immediate"),
+        ("immediate = true", "immediate"),
+        ("immediate = false", "prompt"),
+        ("immediate = YES", "immediate"),
+        ("immediate = off", "prompt"),
+        ("activation = prompt\nimmediate = true", "prompt"),
+        ("immediate = true\nactivation = prompt", "prompt"),
+        ("activation = immediate\nimmediate = false", "immediate"),
+        ("immediate = false\nactivation = immediate", "immediate"),
+    ],
+)
+def test_activation_precedence(tmp_path, monkeypatch, default, cli, settings, configured):
+    from keychain.runtime.actions import ROOT_ACTION
+
+    option = ROOT_ACTION.sub_actions["add"].options["activation"]
+    monkeypatch.setattr(option, "default", default)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".keychainrc").write_text(f"[agent]\n{settings}\n", encoding="utf-8")
+    args = RuntimeConfig.resolve(["add", "--immediate"] if cli else ["add"])
+    assert args.parse_error is None
+    expected = "immediate" if cli else configured or default
+    assert args.get_value("activation") == expected
+    both = "activation =" in settings and "immediate =" in settings
+    assert args.rc_warnings == (["Ignoring [agent] immediate: activation takes precedence."] if both else [])
+    assert "immediate" not in args.rc_data["agent"]
+    diagnostics = args.diagnostics()
+    assert "agent.immediate" not in diagnostics["effective"]
+    assert diagnostics["effective"]["agent.activation"] == {
+        "value": expected,
+        "source": "command_line" if cli else "keychainrc" if configured else "default",
+    }
+
+
+@pytest.mark.parametrize("settings", ["activation = typo", "activation =", "immediate = typo"])
+@pytest.mark.parametrize("cli", [False, True])
+def test_invalid_activation_config_fails_even_with_cli_override(tmp_path, monkeypatch, settings, cli):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".keychainrc").write_text(f"[agent]\n{settings}\n", encoding="utf-8")
+    args = RuntimeConfig.resolve(["add", "--immediate"] if cli else ["add"])
+    assert "[agent]" in args.parse_error
+    assert "choose from:" in args.parse_error
+
+
+def test_activation_ignores_shadowed_legacy_value(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".keychainrc").write_text("[agent]\nimmediate = typo\nactivation = prompt\n", encoding="utf-8")
+    args = RuntimeConfig.resolve(["add"])
+    assert args.parse_error is None
+    assert args.get_value("activation") == "prompt"
+    assert args.rc_warnings == ["Ignoring [agent] immediate: activation takes precedence."]
+
+
+def test_activation_build_environment_does_not_change_runtime_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("KEYCHAIN_BUILD_ACTIVATION", "immediate")
+    assert RuntimeConfig.resolve(["add", "--allow-env"]).get_value("activation") == "prompt"
 
 
 def test_diagnostics_report_normalized_config_and_only_relevant_environment(tmp_path):
@@ -469,7 +534,7 @@ def test_apply_keychainrc_inverted_bool_keys_use_positive_atoms(tmp_path, monkey
     positive form even though the CLI flag remains negative for compatibility.
     """
     rc = tmp_path / ".keychainrc"
-    rc.write_text("[output]\ncolor = false\ngui = false\n" "[agent]\ninherit = false\n")
+    rc.write_text("[output]\ncolor = false\ngui = false\n[agent]\ninherit = false\n")
     monkeypatch.setenv("KEYCHAIN_CONFIG", str(rc))
 
     args = RuntimeConfig.resolve(["-E"])

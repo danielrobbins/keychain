@@ -1,5 +1,7 @@
 include VERSION
 include man/embedded-docs.txt
 include scripts/build_backend.py
+include scripts/build_defaults.py
+include scripts/build_package.py
 include scripts/build_doc_texts.py
 include scripts/pyz_bootstrap.py

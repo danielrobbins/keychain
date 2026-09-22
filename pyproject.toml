@@ -53,6 +53,9 @@ packages = ["keychain", "keychain.docs", "keychain.output", "keychain.runtime"]
 [tool.setuptools.package-data]
 "keychain" = ["docs/_doc_texts.json"]
 
+[tool.setuptools.cmdclass]
+build_py = "build_package.BuildPy"
+
 [project.optional-dependencies]
 lint = [
     "ruff>=0.5",

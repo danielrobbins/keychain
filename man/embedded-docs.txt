@@ -238,8 +238,23 @@ When several terminals use `--immediate`, the terminal that wins the activation 
 
 ```
 [agent]
-immediate = true
+activation = immediate
 ```
+
+The `--immediate` flag overrides the configured activation mode for this invocation. See `keychain man config:agent.activation` for package defaults and the legacy `immediate` config key.
+
+== @config agent.activation: choose prompted or immediate SSH key activation
+
+Set `[agent] activation = prompt` to wait for Enter before attempting coordinated SSH key initialization, or `activation = immediate` to begin automatically. This controls the initial activation step, not passphrase entry: `ssh-add` may still prompt, and immediate terminals may wait for another terminal to finish initialization.
+
+Upstream builds default to `prompt`. A package may be built with `immediate` as its default; both behaviors remain available. Your `~/.keychainrc` overrides the package default, and `--immediate` overrides the config for one invocation. To restore the Enter prompt on a package that defaults to immediate activation:
+
+```
+[agent]
+activation = prompt
+```
+
+The legacy `[agent] immediate = true` and `immediate = false` settings remain accepted and mean `activation = immediate` and `activation = prompt`, respectively. If both keys are present, `activation` wins regardless of their order, and Keychain warns that `immediate` was ignored. Invalid activation values are errors. See `keychain man --immediate` for coordination and failure behavior.
 
 == @option no-passphrase: set up ssh-agent without loading keys
 
@@ -639,7 +654,7 @@ ssh_args = -a ~/.ssh/agent.sock
 
 *Evaluation order.* Keychain evaluates settings in this order, with successive steps overriding previous steps:
 
-1. Built-in defaults provide the base settings.
+1. Built-in defaults provide the base settings, including any package-selected activation default.
 2. If `--allow-env` is specified, `$KEYCHAIN_CONFIG` can point to an alternate `.keychainrc` path.
 3. The selected `.keychainrc` file is parsed.
 4. If `--allow-env` is specified, supported `KEYCHAIN_*` variables from the environment are applied.

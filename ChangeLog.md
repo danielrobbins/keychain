@@ -1,5 +1,9 @@
 # ChangeLog
 
+## Unreleased
+
+- Added `[agent] activation = prompt` or `immediate` to select SSH key initialization behavior. Packages can choose a build-time default, users can override it in `~/.keychainrc`, and `--immediate` remains a per-invocation override. The legacy `immediate = true/false` setting remains accepted; if both config keys appear, `activation` takes precedence with a warning. Both activation modes remain available in every build.
+
 ## 3.0.4
 
 Keychain 3.0.4 is a focused maintenance release that improves validation of persisted SSH agent state and adds a clearer spelling for the hostname override.

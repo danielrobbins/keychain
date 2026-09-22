@@ -2,7 +2,7 @@
 
 Keychain orchestrates `ssh-agent` and gives you one coordinated, long-running SSH agent per user and host. For GnuPG, Keychain can also auto-warm your signing and encryption keys so they are ready for use.
 
-Keychain 3 is the evolution of the original Bourne shell-based tool created by Daniel Robbins in 2001. It preserves the single-file deployment model that made Keychain useful for over two decades, while adding modern capabilities: coordinated multi-terminal initialization, stable agent sockets, seamless cron and script integration, PKCS#11 hardware key support, explicit GPG credential warm-up, hardened security defaults, and a comprehensive test suite of 450+ unit and integration tests — now written in Python and distributed as a self-contained executable zipapp with no third-party Python dependencies.
+Keychain 3 is the evolution of the original Bourne shell-based tool created by Daniel Robbins in 2001. It preserves the single-file deployment model that made Keychain useful for over two decades, while adding modern capabilities: coordinated multi-terminal activation, stable agent sockets, seamless cron and script integration, PKCS#11 hardware key support, explicit GPG credential warm-up, hardened security defaults, and a comprehensive test suite of 700+ unit and integration tests — now written in Python and distributed as a self-contained executable zipapp with no third-party Python dependencies.
 
 For background on the decision to rewrite Keychain in Python, see [Why Keychain 3 Uses Python](https://kernel-seeds.org/projects/keychain/why-python/).
 
@@ -57,35 +57,6 @@ sudo chmod 755 /usr/local/bin/keychain
 # Verify installation
 keychain version
 ```
-### Standard Python Installation
-
-The zipapp is not required. You can also install from a Keychain source checkout or extracted source release using standard Python packaging. For example, on Linux (including WSL) or macOS:
-
-```bash
-python3 -m venv .install
-.install/bin/python -m pip install .
-.install/bin/keychain version
-```
-
-For distribution packaging, Keychain uses a setuptools-based PEP 517 build backend. Run `python3 -m build` with the distribution's selected Python interpreter to produce a source distribution and a wheel built from it. Install the wheel using the distribution's normal packaging tools; they can select the installed interpreter and compile bytecode for it. There are no third-party Python runtime dependencies.
-
-The build frontend (`build`) is a build-time dependency. For offline builds, provide the dependencies from `[build-system].requires` in `pyproject.toml` and run `python3 -m build --no-isolation`. The backend generates the embedded documentation automatically. The installed `keychain` command and `python3 -m keychain` both use the same application entry point.
-
-The portable zipapp remains a source-only, single-file alternative that runs across supported Python versions. A normal Python installation lets the distribution manage interpreter-specific bytecode without putting it in the zipapp.
-
-### Precompiled Zipapp
-
-If you control which Python interpreter will run Keychain, you can build `keychain-precompiled.pyz`. It contains the same application as the portable zipapp, plus Python bytecode compiled ahead of time for your selected interpreter. This is useful for local installations as well as distribution packages:
-
-```bash
-make precompiled-pyz PYTHON=/usr/bin/python3.11
-```
-
-The executable's shebang defaults to the selected interpreter's absolute path, so launching it directly uses that interpreter instead of whichever `python3` happens to be on `PATH`. Python is still required: this is not a native executable or a bundled Python runtime. `PYTHON` selects the interpreter for documentation generation, compilation, and zipapp creation.
-
-If the installed interpreter has a different path from the build interpreter, add `PYZ_INTERPRETER=/usr/bin/python3.11` to the build command. The two interpreters must use the same Python bytecode format. Rebuild when changing Python minor versions. Running the archive explicitly with a different Python interpreter overrides its shebang; incompatible bytecode is ignored and the retained source is compiled instead.
-
-This build keeps the source for auditing and places `.pyc` files alongside it, where Python's ZIP importer can use them. It precompiles at normal optimization level, without stripping assertions or docstrings. This avoids source compilation at startup with the matching interpreter; it does not make application operations inherently faster. `make keychain.pyz` and `make release-artifacts` still produce the source-only portable zipapp, independently of the precompiled artifact.
 
 ### Verify It's Auditable
 
@@ -161,7 +132,7 @@ Your private key is stored in `~/.ssh/id_ed25519` (or similar). If someone steal
 
 **Enter Keychain:** Keychain turns `ssh-agent` into a reliable shared service
 by handling startup, reuse, stable sockets, shell exports, cron access, and
-coordinated initialization across terminals. It also integrates native
+coordinated activation across terminals. It also integrates native
 GnuPG signing and decryption workflows without managing `gpg-agent` or using
 GnuPG as an SSH-agent replacement.
 
@@ -180,7 +151,7 @@ Most CLI tools ask you to trust them. Keychain 3 asks you to understand it. We b
 
 When multiple terminals start simultaneously (like when VS Code reconnects to WSL, or you log in via Linux desktop or terminal login), `ssh-agent` or an ad-hoc `ssh-agent` wrapper might start multiple `ssh-agent` processes, which all need to cache your private key and prompt you for your passphrase.
 
-**Keychain 3 is different.** All terminals cooperate:
+**Keychain 3 supports a new, robust coordinated activation sequence.** All terminals cooperate:
 
 ```
 Terminal 1:  [ 🔑 Press Enter to initialize keys 🔑 ]
@@ -197,13 +168,7 @@ Terminal 3:  Keys initialized by another terminal.
 
 **Stuck prompt?** Type `takeover` in any waiting terminal to cancel the stuck process and take over.
 
-For automatic shell startup without Keychain's preliminary Enter prompt, add
-`--immediate`. Coordination remains active and exactly one terminal runs
-`ssh-add`; any required passphrase prompt still appears in the elected terminal:
-
-```bash
-eval "$(keychain add --eval --quiet --immediate ~/.ssh/id_ed25519)"
-```
+This is a new feature for Keychain 3 and differs from the default behavior of Keychain 2. For legacy automatic shell startup without Keychain's preliminary Enter prompt, add `--immediate`. OS packagers can make this the default behavior at build-time if desired (see [Build-Time Activation Default](#build-time-activation-default)).
 
 ### 2. Embedded Documentation
 
@@ -385,8 +350,6 @@ eval "$(keychain add --eval --systemd ~/.ssh/id_ed25519)"
 
 This pushes the agent environment to `systemctl --user`, making it available to all your user services.
 
----
-
 ## Upgrading from Keychain 2.x
 
 **Good news:** Your existing shell snippets still work.
@@ -416,7 +379,59 @@ eval `keychain --eval id_rsa`
 eval "$(keychain add --eval ~/.ssh/id_rsa)"
 ```
 
----
+## OS/Distribution Build and Packaging Options
+
+This section covers alternative ways to install and build Keychain. It is primarily intended for Operating System/Linux distribution package maintainers, but may also be of interest to advanced users.
+
+### Standard Python Installation
+
+Besides a pre-built zipapp deployment, you can also install from a Keychain source checkout or extracted source release using standard Python packaging. For example, on Linux or macOS:
+
+```bash
+python3 -m venv .install
+.install/bin/python -m pip install .
+.install/bin/keychain version
+```
+
+For distribution packaging, Keychain uses a setuptools-based PEP 517 build backend. Run `python3 -m build` with the distribution's selected Python interpreter to produce a source distribution and a wheel built from it. Install the wheel using the distribution's normal packaging tools; they can select the installed interpreter and compile bytecode for it. There are no third-party Python runtime dependencies.
+
+The build frontend (`build`) is a build-time dependency. For offline builds, provide the dependencies from `[build-system].requires` in `pyproject.toml` and run `python3 -m build --no-isolation`. The backend generates the embedded documentation automatically. The installed `keychain` command and `python3 -m keychain` both use the same application entry point.
+
+The portable zipapp remains a source-only, single-file alternative that runs across supported Python versions. A normal Python installation lets the distribution manage interpreter-specific bytecode without putting it in the zipapp.
+
+### Precompiled Zipapp
+
+If you control which Python interpreter will run Keychain, you can build `keychain-precompiled.pyz`. It contains the same application as the portable zipapp, plus Python bytecode compiled ahead of time for your selected interpreter. This is useful for local installations as well as distribution packages:
+
+```bash
+make precompiled-pyz PYTHON=/usr/bin/python3.11
+```
+
+The executable's shebang defaults to the selected interpreter's absolute path, so launching it directly uses that interpreter instead of whichever `python3` happens to be on `PATH`. Python is still required: this is not a native executable or a bundled Python runtime. `PYTHON` selects the interpreter for documentation generation, compilation, and zipapp creation.
+
+If the installed interpreter has a different path from the build interpreter, add `PYZ_INTERPRETER=/usr/bin/python3.11` to the build command. The two interpreters must use the same Python bytecode format. Rebuild when changing Python minor versions. Running the archive explicitly with a different Python interpreter overrides its shebang; incompatible bytecode is ignored and the retained source is compiled instead.
+
+This build keeps the source for auditing and places `.pyc` files alongside it, where Python's ZIP importer can use them. It precompiles at normal optimization level, without stripping assertions or docstrings. This avoids source compilation at startup with the matching interpreter; it does not make application operations inherently faster. `make keychain.pyz` and `make release-artifacts` still produce the source-only portable zipapp, independently of the precompiled artifact.
+
+### Build-Time Activation Default
+
+Keychain 3.x features a coordinated activation system which is technically superior to the classic "race" startup of Keychain 2.x, but OS/distribution maintainers may prefer classic 2.x behavior to be the default. It is possible to build Keychain to make classic behavior the default, without removing the option for users to enable coordinated activation via `~/.keychainrc`:
+
+```bash
+make keychain.pyz DEFAULT_ACTIVATION=immediate
+make precompiled-pyz DEFAULT_ACTIVATION=immediate PYTHON=/usr/bin/python3.11
+```
+
+For standard Python packages, use `KEYCHAIN_BUILD_ACTIVATION=immediate python3 -m build`. The generated default is written into the build output, leaving the source checkout unchanged. This allows the use of a build-time flag, such as a Gentoo USE flag, to select the chosen runtime default.
+
+Users can override either package default in `~/.keychainrc`:
+
+```ini
+[agent]
+activation = prompt
+```
+
+The classic 2.x behavior corresponds with `activation = immediate`, which skips the initial Enter prompt. `--immediate` overrides the configuration for one invocation. The old `immediate = true/false` config key remains accepted, but `.keychainrc` `activation =` takes precedence with a warning when both are present. Immediate activation still coordinates across terminals and can require a passphrase but the first terminal to prompt for a passphrase is not deterministic.
 
 ## Historical Notes
 

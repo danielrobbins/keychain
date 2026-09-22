@@ -530,6 +530,8 @@ def _config_doc_lines(item: dict[str, Any], width: int, out) -> list[str]:
     if opt.option:
         lines.extend([""])
         alias_text = f"Persistent equivalent of {opt.option_formats}. Set it in {str(out.dim('~/.keychainrc'))} to make that behavior the default."
+        if opt.cli_const is not None:
+            alias_text = f"`{opt.option}` selects `{key} = {opt.cli_const}` for this invocation."
         if opt.config_invert_bool and opt.type == "bool":
             alias_text = (
                 f"Persistent inverse of {opt.option_formats}. Set `{str(out.dim(key))} = true` in {str(out.dim('~/.keychainrc'))} to enable the positive behavior, "
