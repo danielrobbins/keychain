@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Deterministic policy tests for --immediate activation."""
+"""Prompt/immediate policy matrix using real coordination and controlled key loading."""
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import os
+import select
 import threading
 import time
 from types import SimpleNamespace
@@ -13,8 +15,7 @@ import pytest
 
 from keychain import main
 from keychain.agents import SshAddPlan
-from keychain.coordination import ActivationCoordinator, WaitResult
-from keychain.env import SshAgentRef
+from keychain.coordination import ActivationCoordinator, ActivationOwner, ActivationWaiter, WaitResult
 from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.runtime.config import RuntimeConfig
@@ -23,391 +24,253 @@ from keychain.util import KeychainError
 pytestmark = pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="POSIX FIFO support required")
 
 
-def _out() -> Output:
-    return Output.build(quiet=True, debug=False, eval_mode=False, color=False)
-
-
-class _SharedSSH:
-    env = SshAgentRef(sock="/tmp/agent.sock", pid="123")
-
-    def __init__(self, loaded: threading.Event) -> None:
-        self.loaded = loaded
-
-    def list_missing(self, ssh_keys: list[str], *, announce_known: bool = True) -> list[str]:
-        return [] if self.loaded.is_set() else list(ssh_keys)
-
-    def announce_load(self, _missing: list[str], _pkcs11: list[str] | None = None) -> None:
-        return None
-
-    def prepare_load(
-        self,
-        missing: list[str],
-        pkcs11: list[str] | None = None,
-        *,
-        announce: bool = True,
-    ) -> SshAddPlan:
-        return SshAddPlan([["ssh-add", *missing, *(pkcs11 or [])]], {"SSH_AUTH_SOCK": self.env.sock})
-
-    def wipe(self) -> None:
-        raise AssertionError("wipe should not run")
-
-
-class _OwnerController:
-    def __init__(self, loaded: threading.Event, statuses: list[str]) -> None:
-        self.loaded = loaded
-        self.statuses = statuses
+class World:
+    def __init__(self, paths, statuses):
+        self.paths, self.statuses = paths, statuses
+        self.loaded = set()
         self.started = [threading.Event() for _ in statuses]
         self.release = [threading.Event() for _ in statuses]
-        self.calls: list[list[str]] = []
-        self._lock = threading.Lock()
+        self.calls = []
+        self.loaders = []
+        self.terminals = []
+        self.local = threading.local()
+        self.out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
 
-    def factory(self, coord, waiter, requested_keys, _out):
-        with self._lock:
-            index = len(self.calls)
-            if index >= len(self.statuses):
-                raise AssertionError("unexpected additional activation attempt")
-            self.calls.append(list(requested_keys))
-        controller = self
+    def run_child(self, owner, command, env):
+        index = len(self.calls)
+        self.calls.append(command)
+        self.loaders.append(self.local.terminal)
+        assert index < len(self.statuses), "unexpected additional activation"
+        self.started[index].set()
+        deadline = time.monotonic() + 5
+        while not self.release[index].wait(0.01):
+            if owner._canceled.is_set():
+                return "canceled"
+            if time.monotonic() >= deadline:
+                raise RuntimeError("test did not release the loading operation")
+        status = self.statuses[index]
+        if status == "success":
+            self.loaded.update(command[1:])
+        return status
 
-        class _Owner:
-            def run_ssh_add(self, _commands: list[list[str]], _env: dict[str, str]) -> str:
-                with coord.state_lock():
-                    state = coord.load_state()
-                    coord.begin_activation(state, waiter, requested_keys)
-                    coord.save_state(state)
-                controller.started[index].set()
-                if not controller.release[index].wait(timeout=5):
-                    raise RuntimeError("test activation was not released")
-                status = controller.statuses[index]
-                if status == "success":
-                    controller.loaded.set()
-                return status
+    def app(self, immediate):
+        args = RuntimeConfig.resolve(["add", "id_ed25519"])
+        args.rc_data = {"agent": {"activation": "immediate" if immediate else "prompt"}}
+        app = main.KeychainApp(args, self.out)
+        app._kstate = SimpleNamespace(
+            ssh=SimpleNamespace(
+                list_missing=lambda requested, **kwargs: [key for key in requested if key not in self.loaded],
+                announce_load=lambda *args: None,
+                prepare_load=lambda missing, pkcs11=None, **kwargs: SshAddPlan([["ssh-add", *missing]], {}),
+            )
+        )
+        return app
 
-        return _Owner()
+    def start(self, immediate, keys=("id_ed25519",)):
+        reader, writer = os.pipe()
+        terminal = SimpleNamespace(reader=reader, writer=writer, waiting=threading.Event(), errors=[])
 
+        def run():
+            self.local.terminal = terminal
+            try:
+                self.app(immediate)._coordinate_ssh_keys(
+                    ActivationCoordinator(self.paths, False, 1, self.out),
+                    main.keys.ResolvedKeys(ssh=list(keys)),
+                )
+            except BaseException as exc:
+                terminal.errors.append(exc)
 
-def _app(paths: KeychainPaths, ssh: _SharedSSH, *, immediate: bool) -> main.KeychainApp:
-    args = RuntimeConfig.resolve(["add", "id_ed25519"])
-    if immediate:
-        args.rc_data = {"agent": {"activation": "immediate"}}
-    app = main.KeychainApp(args, _out())
-    app._kstate = SimpleNamespace(paths=paths, user="tester", ssh=ssh, gpg=SimpleNamespace())
-    return app
+        terminal.thread = threading.Thread(target=run, daemon=True)
+        self.terminals.append(terminal)
+        terminal.thread.start()
+        return terminal
 
+    def finish(self, *terminals):
+        for terminal in terminals:
+            terminal.thread.join(5)
+            assert not terminal.thread.is_alive(), "terminal was stranded"
 
-def _start(app: main.KeychainApp, coord: ActivationCoordinator):
-    errors: list[BaseException] = []
-
-    def run() -> None:
-        try:
-            app._coordinate_ssh_keys(coord, main.keys.ResolvedKeys(ssh=["id_ed25519"]))
-        except BaseException as exc:
-            errors.append(exc)
-
-    thread = threading.Thread(target=run, daemon=True)
-    thread.start()
-    return thread, errors
-
-
-def _join(thread: threading.Thread) -> None:
-    thread.join(timeout=7)
-    assert not thread.is_alive()
-
-
-def _install_owner(monkeypatch, controller: _OwnerController) -> None:
-    monkeypatch.setattr(ActivationCoordinator, "can_prompt", lambda self: True)
-    monkeypatch.setattr(main, "_activation_signals", contextlib.nullcontext)
-    monkeypatch.setattr(main, "ActivationOwner", controller.factory)
-
-
-def _mark_immediate_wait(monkeypatch) -> threading.Event:
-    waiting = threading.Event()
-    original = ActivationCoordinator.wait_for_notification
-
-    def wait(self, waiter):
-        waiting.set()
-        return original(self, waiter)
-
-    monkeypatch.setattr(ActivationCoordinator, "wait_for_notification", wait)
-    return waiting
+    def press(self, terminal, text="\n"):
+        terminal.waiting.clear()
+        os.write(terminal.writer, text.encode())
 
 
-def test_immediate_skips_prompt_and_quiet_stays_silent(tmp_path, monkeypatch, capsys):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["success"])
-    controller.release[0].set()
-    _install_owner(monkeypatch, controller)
-    monkeypatch.setattr(
-        ActivationCoordinator,
-        "wait_for_activation_signal",
-        lambda *_args, **_kwargs: pytest.fail("--immediate must not request terminal input"),
-    )
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    worlds = []
 
-    app = _app(paths, _SharedSSH(loaded), immediate=True)
-    app._coordinate_ssh_keys(
-        ActivationCoordinator(paths, False, 1, _out()),
-        main.keys.ResolvedKeys(ssh=["id_ed25519"]),
-    )
+    def make(statuses):
+        world = World(KeychainPaths(keydir=tmp_path, host="box"), statuses)
+        worlds.append(world)
+        real_open, real_select = builtins.open, select.select
 
-    assert controller.calls == [["id_ed25519"]]
+        def open_tty(path, *args, **kwargs):
+            if path == "/dev/tty":
+                return os.fdopen(os.dup(world.local.terminal.reader), "r")
+            return real_open(path, *args, **kwargs)
+
+        def watch_select(readers, *args):
+            terminal = getattr(world.local, "terminal", None)
+            if terminal is not None and args[-1:] != (0,):
+                terminal.waiting.set()
+            return real_select(readers, *args)
+
+        monkeypatch.setattr(builtins, "open", open_tty)
+        monkeypatch.setattr(select, "select", watch_select)
+        monkeypatch.setattr(ActivationCoordinator, "can_prompt", lambda self: True)
+        monkeypatch.setattr(main, "_activation_signals", contextlib.nullcontext)
+        monkeypatch.setattr(ActivationOwner, "_run_child", lambda owner, cmd, env: world.run_child(owner, cmd, env))
+        return world
+
+    yield make
+    for world in worlds:
+        for release in world.release:
+            release.set()
+        for terminal in world.terminals:
+            os.close(terminal.writer)
+        for terminal in world.terminals:
+            terminal.thread.join(6)
+            os.close(terminal.reader)
+
+
+def test_immediate_skips_prompt_and_quiet_stays_silent(world, capsys):
+    w = world(["success"])
+    owner = w.start(True)
+    assert w.started[0].wait(3)
+    w.release[0].set()
+    w.finish(owner)
+    assert not owner.errors
+    assert w.calls == [["ssh-add", "id_ed25519"]]
     assert capsys.readouterr().err == ""
 
 
-def test_activation_winner_rechecks_agent_before_loading(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    loaded.set()
-    controller = _OwnerController(loaded, [])
-    _install_owner(monkeypatch, controller)
-    app = _app(paths, _SharedSSH(loaded), immediate=True)
-
-    result = app._try_activation(
-        ActivationCoordinator(paths, False, 1, _out()),
-        None,
-        main.keys.ResolvedKeys(ssh=["id_ed25519"]),
-    )
-
-    assert result == "success"
-    assert controller.calls == []
+def test_activation_winner_rechecks_agent_before_loading(world):
+    w = world([])
+    w.loaded.add("id_ed25519")
+    coord = ActivationCoordinator(w.paths, False, 1, w.out)
+    assert w.app(True)._try_activation(coord, None, main.keys.ResolvedKeys(ssh=["id_ed25519"])) == "success"
+    assert w.calls == []
 
 
-def test_immediate_pair_runs_one_activation(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["success"])
-    _install_owner(monkeypatch, controller)
-    waiting = _mark_immediate_wait(monkeypatch)
-
-    first = _app(paths, _SharedSSH(loaded), immediate=True)
-    second = _app(paths, _SharedSSH(loaded), immediate=True)
-    first_thread, first_errors = _start(first, ActivationCoordinator(paths, False, 1, _out()))
-    assert controller.started[0].wait(timeout=2)
-    second_thread, second_errors = _start(second, ActivationCoordinator(paths, False, 1, _out()))
-    assert waiting.wait(timeout=2)
-
-    controller.release[0].set()
-    _join(first_thread)
-    _join(second_thread)
-
-    assert first_errors == []
-    assert second_errors == []
-    assert controller.calls == [["id_ed25519"]]
+@pytest.mark.parametrize(
+    "owner_immediate,waiter_immediate", [(True, True), (True, False), (False, True), (False, False)]
+)
+def test_owner_waiter_matrix_runs_one_activation(world, owner_immediate, waiter_immediate):
+    w = world(["success"])
+    owner = w.start(owner_immediate)
+    if not owner_immediate:
+        assert owner.waiting.wait(3)
+        w.press(owner)
+    assert w.started[0].wait(3)
+    waiter = w.start(waiter_immediate)
+    assert waiter.waiting.wait(3)
+    w.release[0].set()
+    w.finish(owner, waiter)
+    assert not owner.errors and not waiter.errors
+    assert len(w.calls) == 1
 
 
-def test_immediate_owner_regular_waiter_uses_owner_result(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["success"])
-    _install_owner(monkeypatch, controller)
-    regular_waiting = threading.Event()
+@pytest.mark.parametrize("owner_immediate", [True, False])
+def test_immediate_waiter_loads_its_different_key_after_owner_succeeds(world, owner_immediate):
+    w = world(["success", "success"])
+    owner = w.start(owner_immediate, keys=["key-A"])
+    if not owner_immediate:
+        assert owner.waiting.wait(3)
+        w.press(owner)
+    assert w.started[0].wait(3)
+    waiter = w.start(True, keys=["key-B"])
+    assert waiter.waiting.wait(3)
+    assert w.calls == [["ssh-add", "key-A"]], "the second load must wait for the first"
 
-    def regular_wait(self, waiter, *, activation_active):
-        if not activation_active:
-            raise AssertionError("regular waiter should observe the immediate owner")
-        regular_waiting.set()
-        return self.wait_for_notification(waiter)
+    w.release[1].set()
+    w.release[0].set()
+    w.finish(owner, waiter)
 
-    monkeypatch.setattr(ActivationCoordinator, "wait_for_activation_signal", regular_wait)
-
-    immediate = _app(paths, _SharedSSH(loaded), immediate=True)
-    regular = _app(paths, _SharedSSH(loaded), immediate=False)
-    owner_thread, owner_errors = _start(immediate, ActivationCoordinator(paths, False, 1, _out()))
-    assert controller.started[0].wait(timeout=2)
-    waiter_thread, waiter_errors = _start(regular, ActivationCoordinator(paths, False, 1, _out()))
-    assert regular_waiting.wait(timeout=2)
-
-    controller.release[0].set()
-    _join(owner_thread)
-    _join(waiter_thread)
-
-    assert owner_errors == []
-    assert waiter_errors == []
-    assert controller.calls == [["id_ed25519"]]
+    assert not owner.errors
+    assert not waiter.errors, "another terminal's success must not prevent loading a different requested key"
+    assert w.calls == [["ssh-add", "key-A"], ["ssh-add", "key-B"]]
+    assert w.loaded == {"key-A", "key-B"}
 
 
-def test_regular_owner_immediate_waiter_uses_owner_result(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["success"])
-    _install_owner(monkeypatch, controller)
-    immediate_waiting = _mark_immediate_wait(monkeypatch)
-
-    def regular_activate(_self, _waiter, *, activation_active):
-        if activation_active:
-            raise AssertionError("regular owner should make the initial activation decision")
-        return WaitResult("activate")
-
-    monkeypatch.setattr(ActivationCoordinator, "wait_for_activation_signal", regular_activate)
-
-    regular = _app(paths, _SharedSSH(loaded), immediate=False)
-    immediate = _app(paths, _SharedSSH(loaded), immediate=True)
-    owner_thread, owner_errors = _start(regular, ActivationCoordinator(paths, False, 1, _out()))
-    assert controller.started[0].wait(timeout=2)
-    waiter_thread, waiter_errors = _start(immediate, ActivationCoordinator(paths, False, 1, _out()))
-    assert immediate_waiting.wait(timeout=2)
-
-    controller.release[0].set()
-    _join(owner_thread)
-    _join(waiter_thread)
-
-    assert owner_errors == []
-    assert waiter_errors == []
-    assert controller.calls == [["id_ed25519"]]
+@pytest.mark.parametrize("owner_immediate", [True, False])
+def test_failure_does_not_cascade_to_immediate_waiter(world, owner_immediate):
+    w = world(["failed"])
+    owner = w.start(owner_immediate)
+    if not owner_immediate:
+        assert owner.waiting.wait(3)
+        w.press(owner)
+    assert w.started[0].wait(3)
+    waiter = w.start(True)
+    assert waiter.waiting.wait(3)
+    w.release[0].set()
+    w.finish(owner, waiter)
+    assert len(owner.errors) == len(waiter.errors) == 1
+    assert isinstance(owner.errors[0], KeychainError)
+    assert isinstance(waiter.errors[0], KeychainError)
+    assert len(w.calls) == 1
 
 
-def test_immediate_failure_does_not_cascade_to_immediate_waiter(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["failed"])
-    _install_owner(monkeypatch, controller)
-    waiting = _mark_immediate_wait(monkeypatch)
-
-    owner = _app(paths, _SharedSSH(loaded), immediate=True)
-    waiter = _app(paths, _SharedSSH(loaded), immediate=True)
-    owner_thread, owner_errors = _start(owner, ActivationCoordinator(paths, False, 1, _out()))
-    assert controller.started[0].wait(timeout=2)
-    waiter_thread, waiter_errors = _start(waiter, ActivationCoordinator(paths, False, 1, _out()))
-    assert waiting.wait(timeout=2)
-
-    controller.release[0].set()
-    _join(owner_thread)
-    _join(waiter_thread)
-
-    assert len(owner_errors) == 1
-    assert isinstance(owner_errors[0], KeychainError)
-    assert len(waiter_errors) == 1
-    assert isinstance(waiter_errors[0], KeychainError)
-    assert controller.calls == [["id_ed25519"]]
+def test_regular_waiter_can_retry_after_immediate_failure(world):
+    w = world(["failed", "success"])
+    owner = w.start(True)
+    assert w.started[0].wait(3)
+    waiter = w.start(False)
+    assert waiter.waiting.wait(3)
+    waiter.waiting.clear()
+    w.release[0].set()
+    w.finish(owner)
+    assert waiter.waiting.wait(3)
+    w.press(waiter)
+    assert w.started[1].wait(3)
+    w.release[1].set()
+    w.finish(waiter)
+    assert len(owner.errors) == 1 and not waiter.errors
+    assert len(w.calls) == 2
 
 
-def test_regular_waiter_can_retry_after_immediate_failure(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["failed", "success"])
-    controller.release[1].set()
-    _install_owner(monkeypatch, controller)
-    regular_waiting = threading.Event()
-
-    def regular_wait(self, waiter, *, activation_active):
-        if activation_active:
-            regular_waiting.set()
-            return self.wait_for_notification(waiter)
-        return WaitResult("activate")
-
-    monkeypatch.setattr(ActivationCoordinator, "wait_for_activation_signal", regular_wait)
-
-    immediate = _app(paths, _SharedSSH(loaded), immediate=True)
-    regular = _app(paths, _SharedSSH(loaded), immediate=False)
-    owner_thread, owner_errors = _start(immediate, ActivationCoordinator(paths, False, 1, _out()))
-    assert controller.started[0].wait(timeout=2)
-    waiter_thread, waiter_errors = _start(regular, ActivationCoordinator(paths, False, 1, _out()))
-    assert regular_waiting.wait(timeout=2)
-
-    controller.release[0].set()
-    assert controller.started[1].wait(timeout=2)
-    _join(owner_thread)
-    _join(waiter_thread)
-
-    assert len(owner_errors) == 1
-    assert isinstance(owner_errors[0], KeychainError)
-    assert waiter_errors == []
-    assert controller.calls == [["id_ed25519"], ["id_ed25519"]]
+def test_regular_takeover_hands_immediate_owner_to_new_result(world):
+    w = world(["canceled", "success"])
+    owner = w.start(True)
+    assert w.started[0].wait(3)
+    waiter = w.start(False)
+    assert waiter.waiting.wait(3)
+    w.press(waiter, "takeover\n")
+    assert w.started[1].wait(3)
+    w.release[1].set()
+    w.finish(owner, waiter)
+    assert not owner.errors and not waiter.errors
+    assert len(w.calls) == 2
 
 
-def test_immediate_waiter_does_not_retry_after_regular_failure(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["failed"])
-    _install_owner(monkeypatch, controller)
-    immediate_waiting = _mark_immediate_wait(monkeypatch)
-    monkeypatch.setattr(
-        ActivationCoordinator,
-        "wait_for_activation_signal",
-        lambda _self, _waiter, *, activation_active: WaitResult("wait" if activation_active else "activate"),
-    )
+@pytest.mark.parametrize("owner_immediate", [True, False])
+def test_late_cancellation_preserves_requesting_terminal_after_timeout(world, monkeypatch, owner_immediate):
+    w = world(["canceled", "success"])
+    canceled = threading.Event()
+    notify = ActivationCoordinator.notify_waiters
 
-    regular = _app(paths, _SharedSSH(loaded), immediate=False)
-    immediate = _app(paths, _SharedSSH(loaded), immediate=True)
-    owner_thread, owner_errors = _start(regular, ActivationCoordinator(paths, False, 1, _out()))
-    assert controller.started[0].wait(timeout=2)
-    waiter_thread, waiter_errors = _start(immediate, ActivationCoordinator(paths, False, 1, _out()))
-    assert immediate_waiting.wait(timeout=2)
+    def notify_and_signal(coord, attempt, status):
+        notify(coord, attempt, status)
+        if status == "canceled":
+            canceled.set()
 
-    controller.release[0].set()
-    _join(owner_thread)
-    _join(waiter_thread)
+    def response_times_out(waiter):
+        # Leave the real completion message for the next wait, as happens after a slow cancellation.
+        w.release[0].set()
+        assert canceled.wait(3)
+        return WaitResult("timeout")
 
-    assert len(owner_errors) == 1
-    assert isinstance(owner_errors[0], KeychainError)
-    assert len(waiter_errors) == 1
-    assert isinstance(waiter_errors[0], KeychainError)
-    assert controller.calls == [["id_ed25519"]]
-
-
-def test_regular_takeover_hands_immediate_owner_to_new_result(tmp_path, monkeypatch):
-    paths = KeychainPaths(keydir=tmp_path, host="box")
-    loaded = threading.Event()
-    controller = _OwnerController(loaded, ["canceled", "success"])
-    controller.release[1].set()
-    _install_owner(monkeypatch, controller)
-    takeover_started = threading.Event()
-    busy_seen = threading.Event()
-    release_owner_lock = threading.Event()
-
-    def regular_takeover(_self, _waiter, *, activation_active):
-        if not activation_active:
-            raise AssertionError("regular process should observe the immediate owner")
-        return WaitResult("takeover")
-
-    def request_takeover(self, _waiter, timeout=5.0):
-        takeover_started.set()
-        controller.release[0].set()
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            activation = self.load_state().activation
-            if not activation.in_progress and activation.status == "canceled":
-                return {"status": "canceled"}
-            time.sleep(0.01)
-        return {"status": "timeout"}
-
-    monkeypatch.setattr(ActivationCoordinator, "wait_for_activation_signal", regular_takeover)
-    monkeypatch.setattr(ActivationCoordinator, "request_takeover", request_takeover)
-
-    immediate = _app(paths, _SharedSSH(loaded), immediate=True)
-    regular = _app(paths, _SharedSSH(loaded), immediate=False)
-    owner_coord = ActivationCoordinator(paths, False, 1, _out())
-    regular_coord = ActivationCoordinator(paths, False, 1, _out())
-    finish_activation = owner_coord.finish_activation
-    activation_lock = regular_coord.activation_lock
-
-    def finish_while_holding_lock(status):
-        waiters = finish_activation(status)
-        if status == "canceled" and not release_owner_lock.wait(timeout=2):
-            raise RuntimeError("takeover did not encounter the held activation lock")
-        return waiters
-
-    @contextlib.contextmanager
-    def observe_busy_lock():
-        with activation_lock() as lock:
-            if not lock.acquired:
-                busy_seen.set()
-                release_owner_lock.set()
-            yield lock
-
-    monkeypatch.setattr(owner_coord, "finish_activation", finish_while_holding_lock)
-    monkeypatch.setattr(regular_coord, "activation_lock", observe_busy_lock)
-
-    owner_thread, owner_errors = _start(immediate, owner_coord)
-    assert controller.started[0].wait(timeout=2)
-    takeover_thread, takeover_errors = _start(regular, regular_coord)
-    assert takeover_started.wait(timeout=2)
-    assert busy_seen.wait(timeout=2)
-    assert controller.started[1].wait(timeout=2)
-
-    _join(owner_thread)
-    _join(takeover_thread)
-
-    assert owner_errors == []
-    assert takeover_errors == []
-    assert controller.calls == [["id_ed25519"], ["id_ed25519"]]
+    monkeypatch.setattr(ActivationCoordinator, "notify_waiters", notify_and_signal)
+    monkeypatch.setattr(ActivationWaiter, "request_takeover", response_times_out)
+    owner = w.start(owner_immediate)
+    if not owner_immediate:
+        assert owner.waiting.wait(3)
+        w.press(owner)
+    assert w.started[0].wait(3)
+    waiter = w.start(False)
+    assert waiter.waiting.wait(3)
+    w.press(waiter, "takeover\n")
+    assert w.started[1].wait(3), "the requesting terminal must not require a second Enter after a late cancellation"
+    assert w.loaders[1] is waiter
+    w.release[1].set()
+    w.finish(owner, waiter)
+    assert not owner.errors and not waiter.errors

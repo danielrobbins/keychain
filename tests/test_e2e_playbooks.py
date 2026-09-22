@@ -213,7 +213,14 @@ def test_reboot_stale_socket_is_replaced_when_pid_was_reused(playbook: PlaybookR
     key_path = playbook.home / "reboot-key"
     public_key = generate_ssh_key(key_path)
     playbook.keydir.mkdir(mode=0o700, parents=True)
-    decoy = subprocess.run(["ssh-agent", "-s"], capture_output=True, text=True, check=True)
+    decoy = subprocess.run(
+        ["ssh-agent", "-s", "-a", "decoy.sock"],
+        cwd=playbook.home,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert decoy.returncode == 0, decoy.stdout + decoy.stderr
     decoy_agent = SshAgentRef.from_text(decoy.stdout)
     paths = KeychainPaths(playbook.keydir, host)
     stale_socket = paths.ssh_agent_socket_path

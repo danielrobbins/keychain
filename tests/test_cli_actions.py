@@ -76,6 +76,17 @@ class TestResolveAction:
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         assert KeychainApp(args, out)._resolve_action() == expected
 
+    def test_wipe_uses_shared_lockwait_option_and_help(self):
+        from keychain.runtime.actions import agent_start, cmd_add, cmd_wipe
+
+        option = cmd_wipe.options["lockwait"]
+        assert option is cmd_add.options["lockwait"] is agent_start.options["lockwait"]
+        assert option.short_help
+        args = RuntimeConfig.resolve(["wipe", "--ssh", "--lockwait", "0"])
+        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+        assert KeychainApp(args, out)._resolve_action() == "wipe"
+        assert args.get_value("lockwait") == 0
+
     @pytest.mark.parametrize(
         "sub,expected",
         [
@@ -203,7 +214,7 @@ class TestResolveAction:
             )
         ]
 
-    def test_systemd_option_exports_the_agent_selected_by_start(self, monkeypatch):
+    def test_systemd_option_exports_the_agent_selected_by_start(self, tmp_path, monkeypatch):
         ns = RuntimeConfig.resolve(["add", "--systemd"])
         selected = main.SshAgentRef("/tmp/agent.sock", "123")
         exported = []
@@ -211,14 +222,14 @@ class TestResolveAction:
         class _SSH:
             env = selected
 
-            def start(self):
+            def start(self, state_lock):
                 return False
 
         app = KeychainApp(ns, Output.build(quiet=True, debug=False, eval_mode=False, color=False))
-        app._kstate = SimpleNamespace(ssh=_SSH(), paths=SimpleNamespace())
+        app._kstate = SimpleNamespace(ssh=_SSH(), paths=KeychainPaths(keydir=tmp_path, host="box"))
         monkeypatch.setattr(main, "_systemd_set_env", lambda env, _out: exported.append(env))
 
-        assert app._prepare_agent_state() is False
+        assert app._prepare_agent_state(app._coordinator()) is False
         assert exported == [selected]
 
     def test_add_with_only_missing_keys_refuses_after_gpg_resolution(self):
