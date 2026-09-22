@@ -1,8 +1,34 @@
 # ChangeLog
 
-## Unreleased
+## 3.0.5
 
-- Added `[agent] activation = prompt` or `immediate` to select SSH key initialization behavior. Packages can choose a build-time default, users can override it in `~/.keychainrc`, and `--immediate` remains a per-invocation override. The legacy `immediate = true/false` setting remains accepted; if both config keys appear, `activation` takes precedence with a warning. Both activation modes remain available in every build.
+Keychain 3.0.5 focuses on making shell startup more reliable, particularly when several terminals are opened together or key initialization is interrupted. It also gives users and distribution maintainers a clearer choice of startup behavior and improves Python packaging.
+
+### More Reliable Multi-Terminal Startup
+
+A previously interrupted key-loading operation could leave other terminals waiting indefinitely, even though nothing was still loading keys. This could prevent a login shell from becoming usable, as reported with `--immediate` on Fedora under WSL (#260). Keychain now checks whether the loading operation is actually still running rather than trusting a saved record that says it is. If an `ssh-add` child survives its Keychain parent, other terminals continue waiting for that child instead of starting a competing passphrase prompt.
+
+The same review led to several related fixes:
+
+- A slow or busy SSH agent no longer holds the shared state lock while Keychain waits for a reply. Other terminals can still register and finish coordination updates, including when the agent is waiting for a graphical `--confirm` approval.
+- An immediate-mode terminal requesting different keys can load them after another terminal finishes successfully, rather than treating those still-missing keys as an error.
+- If a `takeover` cancellation response arrives late, Keychain still recognizes which terminal requested it. That terminal can attempt to take over without requiring another Enter.
+- `wipe --ssh` now waits for exclusive access before clearing identities, so a normal wipe cannot run alongside another Keychain's key-loading operation. `--lockwait` controls how long it waits to acquire that access.
+
+These changes are backed by expanded tests using real agents, encrypted keys, and multiple terminals, including interrupted processes and missed completion messages.
+
+### Choosing the Startup Experience
+
+The new `[agent] activation = prompt` or `immediate` setting in `~/.keychainrc` selects whether Keychain waits for Enter before starting key initialization. Distribution packages can choose either build-time default without removing the other mode, and users can override that choice in their configuration (#257). Upstream builds still default to `prompt`. `--immediate` remains a per-invocation override, and the older `immediate = true/false` setting remains accepted; `activation` takes precedence if both are present. Immediate mode skips the Enter step, not the passphrase prompt, and the first terminal to begin loading is not predetermined.
+
+### Packaging and Compatibility
+
+- Removed unused Python bytecode from the portable zipapp, reducing its size without losing a startup benefit: Python was ignoring the bundled files (#258, #259).
+- Added `make precompiled-pyz` for installations that use a known Python interpreter. This build includes usable bytecode, avoiding source compilation at startup when run with the matching interpreter (#254).
+- Documented and tested standard Python installation as an alternative to the zipapp, including building a wheel from a source distribution with the correct version and embedded manual (#256).
+- Fixed `--help` and `--version` handling so global options such as `--no-color` remain effective (#249).
+- Corrected SSH-agent detection on OmniOS/illumos (PR #252).
+- Extended automated testing through Python 3.14 while retaining Python 3.9 as the minimum supported version (#255).
 
 ## 3.0.4
 
