@@ -21,7 +21,7 @@ import time
 from contextlib import contextmanager
 
 from . import __version__, agents, keys, state
-from .coordination import ActivationCoordinator, ActivationOwner, WaiterEndpoint, WaitResult
+from .coordination import ActivationCoordinator, ActivationWaiter
 from .env import SshAgentRef
 from .output.core import Output
 from .runtime import platform
@@ -225,7 +225,7 @@ class KeychainApp:
         wipe_ssh = bool(self.args.get_value("wipe_ssh"))
         wipe_gpg = bool(self.args.get_value("wipe_gpg"))
         if wipe_ssh or not wipe_gpg:
-            self.kstate.ssh.wipe()
+            self._activate_direct(self._coordinator(), keys.ResolvedKeys(), wipe_pending=True)
         if wipe_gpg:
             self.kstate.gpg.wipe()
         self.out.line()
@@ -252,12 +252,7 @@ class KeychainApp:
             return self._do_add(keys.ResolvedKeys())
         resolved = self._resolve_add_keys()
         requested_keys = list(self.args.get_value("keys") or [])
-        if (
-            requested_keys
-            and not bool(self.args.get_value("quick"))
-            and not resolved.any
-            and resolved.missing
-        ):
+        if requested_keys and not bool(self.args.get_value("quick")) and not resolved.any and resolved.missing:
             if bool(self.args.get_value("ignore_missing")):
                 return 0
             raise KeychainError(
@@ -281,21 +276,19 @@ class KeychainApp:
                 self.out.warn(f'Can\'t find key "{self.out.value(missing)}"')
         return resolved
 
-    def _do_add(self, requested: keys.ResolvedKeys) -> int:
-        """Coordinated flow used for keychain 'add' and 'agent start' actions."""
-        paths = self.kstate.paths
-
+    def _coordinator(self) -> ActivationCoordinator:
         lockwait = self.args.get_value("lockwait")
         if lockwait is None:
             lockwait = 5
         no_lock = bool(self.args.get_value("no_lock"))
-        coord = ActivationCoordinator(paths, no_lock, lockwait, self.out)
-        wipe_pending = bool(self.args.get_value("clear"))
+        return ActivationCoordinator(self.kstate.paths, no_lock, lockwait, self.out)
 
-        with coord.state_lock():
-            quick_succeeded = self._prepare_agent_state()
+    def _do_add(self, requested: keys.ResolvedKeys) -> int:
+        """Coordinated flow used for keychain 'add' and 'agent start' actions."""
+        coord = self._coordinator()
+        quick_succeeded = self._prepare_agent_state(coord)
 
-        if wipe_pending:
+        if bool(self.args.get_value("clear")):
             self._activate_direct(coord, keys.ResolvedKeys(), wipe_pending=True)
 
         if bool(self.args.get_value("noask")):
@@ -314,115 +307,70 @@ class KeychainApp:
         coord: ActivationCoordinator,
         requested: keys.ResolvedKeys,
     ) -> None:
-        with coord.state_lock():
-            missing = self._missing_ssh_keys(requested)
-
+        missing = self._missing_ssh_keys(requested)
         if not missing.any:
             return
 
-        waiter = coord.create_waiter() if coord.can_prompt() else None
+        waiter = coord.create_waiter()
         if waiter is None:
             self._activate_direct(coord, missing)
             return
-
         try:
-            with coord.state_lock():
-                missing = self._missing_ssh_keys(requested)
-                if not missing.any:
-                    return
-                state_snapshot = coord.load_state()
-                coord.register_waiter(state_snapshot, waiter, missing.labels())
-                coord.save_state(state_snapshot)
+            # Registration precedes this query, so subsequent changes wake us.
+            missing = self._missing_ssh_keys(requested)
+            if not missing.any:
+                return
             self.kstate.ssh.announce_load(missing.ssh, missing.pkcs11)
-
             immediate = self.args.get_value("activation") == "immediate"
-            immediate_pending = immediate
-            handoff_wait = False
-            quiet_handoff_wait = False
+            handoff = False
+            takeover_attempt = ""
             while True:
-                if quiet_handoff_wait:
-                    quiet_handoff_wait = False
-                    wait_result = coord.wait_for_handoff(waiter)
-                else:
-                    state_snapshot = coord.load_state()
-                    activation_active = state_snapshot.activation.in_progress or handoff_wait
-                    if immediate_pending and not activation_active:
-                        immediate_pending = False
-                        wait_result = WaitResult("activate")
-                    elif immediate:
-                        immediate_pending = False
-                        wait_result = coord.wait_for_notification(waiter)
-                    else:
-                        wait_result = coord.wait_for_activation_signal(
-                            waiter,
-                            activation_active=activation_active,
-                        )
-                if wait_result.action == "notified":
-                    handoff_wait = False
-                    status = str(wait_result.message.get("status", ""))
+                result = waiter.wait(immediate=immediate, interactive=not immediate, handoff=handoff)
+                handoff = False
+                if result.action == "takeover":
+                    takeover_attempt = waiter.attempt
+                    result = waiter.request_takeover()
+                    if result.action == "unavailable":
+                        takeover_attempt = ""
+                    if result.action in ("unavailable", "timeout"):
+                        self.out.note("Activation owner did not cancel; still waiting.")
+                        continue
+                if result.action == "notified":
+                    takeover = bool(takeover_attempt and result.message.get("attempt") == takeover_attempt)
+                    if takeover:
+                        takeover_attempt = ""
+                    status = str(result.message.get("status", ""))
                     missing = self._missing_ssh_keys_after_notification(requested, status=status)
                     if not missing.any:
                         self.out.info("Keys initialized by another terminal.")
                         return
-                    with coord.state_lock():
-                        state_snapshot = coord.load_state()
-                        coord.register_waiter(state_snapshot, waiter, missing.labels())
-                        coord.save_state(state_snapshot)
                     if status == "canceled":
-                        handoff_wait = True
-                        quiet_handoff_wait = True
-                    elif immediate:
+                        if not takeover:
+                            handoff = True
+                            continue
+                    elif status == "abandoned":
+                        if not immediate:
+                            continue
+                    elif immediate and status != "success":
                         raise KeychainError(
                             "Requested SSH keys remain unavailable after activation in another terminal"
                         )
-                    elif status == "failed":
-                        self.out.note("Key initialization failed in another terminal.")
-                    else:
-                        self.out.note("Key initialization is still needed.")
-                    continue
-
-                if wait_result.action == "wait":
-                    continue
-
-                if wait_result.action == "handoff":
-                    quiet_handoff_wait = True
-                    continue
-
-                if wait_result.action == "takeover":
-                    handoff_wait = True
-                    takeover = coord.request_takeover(waiter)
-                    if takeover.get("status") in ("canceled", "inactive"):
-                        missing = self._missing_ssh_keys(requested)
-                        if not missing.any:
-                            self.out.info("Keys initialized by another terminal.")
-                            return
-                    else:
-                        self.out.note("Activation owner did not cancel; still waiting.")
+                    elif not immediate:
+                        self.out.note(
+                            "Key initialization failed in another terminal."
+                            if status == "failed"
+                            else "Key initialization is still needed."
+                        )
                         continue
-
                 activation_result = self._try_activation(coord, waiter, missing)
                 if activation_result == "success":
                     return
-                handoff_wait = activation_result == "canceled" or (handoff_wait and activation_result == "busy")
-                quiet_handoff_wait = handoff_wait
-
-                with coord.state_lock():
-                    missing = self._missing_ssh_keys(requested)
-                    if not missing.any:
-                        self.out.info("Keys initialized by another terminal.")
-                        return
-                    state_snapshot = coord.load_state()
-                    coord.register_waiter(state_snapshot, waiter, missing.labels())
-                    coord.save_state(state_snapshot)
+                handoff = activation_result == "canceled"
         finally:
-            with coord.state_lock():
-                state_snapshot = coord.load_state()
-                coord.unregister_waiter(state_snapshot, waiter)
-                coord.save_state(state_snapshot)
             waiter.cleanup()
 
-    def _prepare_agent_state(self) -> bool:
-        quick_succeeded = self.kstate.ssh.start()
+    def _prepare_agent_state(self, coord: ActivationCoordinator) -> bool:
+        quick_succeeded = self.kstate.ssh.start(coord.state_lock())
 
         if bool(self.args.get_value("eval")):
             self.out.write(self.kstate.paths.render_env(self.kstate.ssh.env, "eval", os.environ))
@@ -477,39 +425,33 @@ class KeychainApp:
     def _try_activation(
         self,
         coord: ActivationCoordinator,
-        waiter: WaiterEndpoint | None,
+        waiter: ActivationWaiter | None,
         missing: keys.ResolvedKeys,
         *,
         wipe_pending: bool = False,
     ) -> str:
-        with coord.activation_lock() as activation:
-            if not activation.acquired:
+        with _activation_signals(), coord.activation(waiter) as owner:
+            if not owner.acquired:
                 self.out.info("Another terminal is initializing keys; waiting for completion.")
                 return "busy"
 
             if wipe_pending:
                 self.kstate.ssh.wipe()
-            missing = self._missing_ssh_keys(missing, announce_known=False)
+            if missing.any:
+                missing = self._missing_ssh_keys(missing, announce_known=False)
             if not missing.any:
+                owner.status = "success"
                 return "success"
 
-            status = "failed"
-            with _activation_signals():
-                try:
-                    plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
-                    if plan is None:
-                        raise KeychainError("Unable to add keys")
-                    owner = ActivationOwner(coord, waiter, missing.labels(), self.out)
-                    status = owner.run_ssh_add(plan.commands, plan.env)
-                    if status == "canceled":
-                        self.out.note("Another terminal took over key initialization; waiting for completion.")
-                        return "canceled"
-                    if status != "success":
-                        raise KeychainError("Unable to add keys")
-                    status = "success"
-                finally:
-                    coord.finish_activation(status)
-            return "success"
+            plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
+            if plan is None:
+                raise KeychainError("Unable to add keys")
+            status = owner.run_ssh_add(plan.commands, plan.env)
+            if status == "canceled":
+                self.out.note("Another terminal took over key initialization; waiting for completion.")
+            elif status != "success":
+                raise KeychainError("Unable to add keys")
+            return status
 
     def _warm_gpg_keys(self, requested: keys.ResolvedKeys) -> None:
         signing = list(dict.fromkeys([*requested.gpg, *requested.gpg_s, *requested.gpg_a]))

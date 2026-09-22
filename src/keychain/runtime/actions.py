@@ -664,7 +664,8 @@ Option(
     option="--lockwait",
     type="int",
     default=5,
-    actions={cmd_add, agent_start},
+    doc_tag="global:lockwait",
+    actions={cmd_add, agent_start, cmd_wipe},
     validator=(lambda value: value >= 0, "--lockwait requires an argument zero or greater."),
 )
 Option(

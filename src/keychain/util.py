@@ -172,8 +172,8 @@ class LockFile:
                     if sys.platform == "win32":
                         os.lseek(self._fd, 0, os.SEEK_SET)
                         msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
-                    else:
-                        fcntl.flock(self._fd, fcntl.LOCK_UN)
+                    # On POSIX, closing our descriptor preserves a lock inherited
+                    # by a still-running child; explicit LOCK_UN would release both.
             finally:
                 with contextlib.suppress(OSError):
                     os.close(self._fd)

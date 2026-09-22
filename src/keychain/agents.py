@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from .env import SshAgentRef
 from .output.core import Output
-from .util import KeychainError, current_uid, get_tty, run, unlink_quiet
+from .util import KeychainError, LockFile, current_uid, get_tty, run, unlink_quiet
 
 if TYPE_CHECKING:
     from .state import KeychainState
@@ -428,7 +428,7 @@ class SshAgent:
     def _our_pid(self) -> int | None:
         return self.env.pid_int
 
-    def start(self) -> bool:
+    def start(self, state_lock: LockFile) -> bool:
         """Find or spawn an ssh-agent.
 
         Returns True if a *quick* start succeeded (an existing agent was
@@ -437,7 +437,6 @@ class SshAgent:
         updates ``self.env`` in place.
         """
         a = self.keychain_state.args
-        self._spawn_context = ""
         paths = self.keychain_state.paths
         confirm = bool(a.get_value("confirm"))
         native_confirm = confirm and self.keychain_state.platform.name == "darwin"
@@ -445,71 +444,76 @@ class SshAgent:
         if confirm and bool(a.get_value("no_gui")):
             raise KeychainError("--confirm requires graphical confirmation and cannot be combined with --no-gui")
 
-        # 1. Quick path: trust an existing pidfile if it is both valid AND
-        # already has keys loaded -- saves a full key reload on repeat invocations.
-        if bool(a.get_value("quick")):
-            env = self.select_existing(pidfile_only=True)
-            if env:
-                fps, _ = self.list_loaded()
-                if fps:
+        while True:
+            pidfile = self.keychain_state.pidfile_env
+            self._spawn_context = ""
+            quick_succeeded = False
+            if bool(a.get_value("quick")):
+                env = self.select_existing(pidfile_only=True)
+                quick_succeeded = bool(env and self.list_loaded()[0])
+                if not quick_succeeded:
+                    self.out.note(
+                        "Quick start unsuccessful -- no keys loaded..."
+                        if env
+                        else "Quick start unsuccessful -- no agent found..."
+                    )
+            if not quick_succeeded:
+                env = self.select_existing(announce=True)
+
+            # Agent queries may wait for confirmation. Only publication and spawning
+            # hold this lock; retry if another terminal published an agent meanwhile.
+            with state_lock:
+                if pidfile != self.keychain_state.pidfile_env:
+                    continue
+                if quick_succeeded:
                     self.out.info("Found existing populated ssh-agent (quick)")
                     return True
-                self.out.note("Quick start unsuccessful -- no keys loaded...")
-            else:
-                self.out.note("Quick start unsuccessful -- no agent found...")
+                if env:
+                    if self.env_source == "pidfile":
+                        self.out.debug("pidfile is valid")
+                    elif not env.forwarded:
+                        paths.write(env, self.out)
+                    return False
 
-        # 2. Normal path. Try the pidfile, then the inherited environment.
-        env = self.select_existing(announce=True)
-        if env:
-            if self.env_source == "pidfile":
-                self.out.debug("pidfile is valid")
-            elif not env.forwarded:
-                paths.write(env, self.out)
-            return False
-
-        # 3. Spawn a new agent.
-        paths.clear()
-        context = f" ({self._spawn_context})" if self._spawn_context else ""
-        self.out.info(f"Starting ssh-agent{context}...")
-        cmd = ["ssh-agent", "-s"]
-        timeout = a.get_value("timeout")
-        if timeout is not None:
-            cmd += ["-t", str(timeout * 60)]
-        ssh_agent_socket = a.get_value("ssh_agent_socket")
-        if ssh_agent_socket:
-            cmd += ["-a", ssh_agent_socket]
-        else:
-            ssh_agent_socket = str(paths.ssh_agent_socket_path)
-            unlink_quiet(ssh_agent_socket)
-            cmd += ["-a", ssh_agent_socket]
-        # User-supplied extra flags (issue #21).
-        # SECURITY: KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only
-        # when --allow-env / -E is set. Direct env var access here is
-        # safe because the gate is enforced at the config layer.
-        cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
-        spawn_env = dict(self.keychain_state.env)
-        if native_confirm:
-            askpass = spawn_env.get("SSH_ASKPASS")
-            if not askpass:
-                askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
-                spawn_env["SSH_ASKPASS"] = askpass
-            spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
-        try:
-            r = run(cmd, env=spawn_env)
-        except (FileNotFoundError, OSError) as exc:
-            raise KeychainError(f"Unable to start ssh-agent: {exc}") from exc
-        if r.returncode != 0:
-            detail = (r.stderr or r.stdout).strip()
-            if detail:
-                raise KeychainError(f"ssh-agent failed to start: {detail}")
-            raise KeychainError(f"ssh-agent failed to start with exit status {r.returncode}")
-        spawned = SshAgentRef.from_text(r.stdout)
-        if not spawned:
-            raise KeychainError("ssh-agent started but did not return its socket information")
-        paths.write(spawned, self.out)
-        self.env = spawned
-        self.env_source = "spawned"
-        return False
+                paths.clear()
+                context = f" ({self._spawn_context})" if self._spawn_context else ""
+                self.out.info(f"Starting ssh-agent{context}...")
+                cmd = ["ssh-agent", "-s"]
+                timeout = a.get_value("timeout")
+                if timeout is not None:
+                    cmd += ["-t", str(timeout * 60)]
+                ssh_agent_socket = a.get_value("ssh_agent_socket")
+                if ssh_agent_socket:
+                    cmd += ["-a", ssh_agent_socket]
+                else:
+                    ssh_agent_socket = str(paths.ssh_agent_socket_path)
+                    unlink_quiet(ssh_agent_socket)
+                    cmd += ["-a", ssh_agent_socket]
+                # KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only with --allow-env / -E.
+                cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
+                spawn_env = dict(self.keychain_state.env)
+                if native_confirm:
+                    askpass = spawn_env.get("SSH_ASKPASS")
+                    if not askpass:
+                        askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
+                        spawn_env["SSH_ASKPASS"] = askpass
+                    spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
+                try:
+                    r = run(cmd, env=spawn_env)
+                except (FileNotFoundError, OSError) as exc:
+                    raise KeychainError(f"Unable to start ssh-agent: {exc}") from exc
+                if r.returncode != 0:
+                    detail = (r.stderr or r.stdout).strip()
+                    if detail:
+                        raise KeychainError(f"ssh-agent failed to start: {detail}")
+                    raise KeychainError(f"ssh-agent failed to start with exit status {r.returncode}")
+                spawned = SshAgentRef.from_text(r.stdout)
+                if not spawned:
+                    raise KeychainError("ssh-agent started but did not return its socket information")
+                paths.write(spawned, self.out)
+                self.env = spawned
+                self.env_source = "spawned"
+                return False
 
     def stop(self, which: str) -> None:
         out = self.out

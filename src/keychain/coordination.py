@@ -1,22 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Coordination primitives for interactive key activation.
-
-The add flow needs two very different kinds of synchronization:
-
-* a short state lock for pidfile writes and waiter registration
-* an activation lock for the one process that is allowed to prompt for keys
-
-This module keeps those mechanics out of ``main.py``. The state file is
-coordination metadata only; the agent itself remains the source of truth.
-"""
+"""Event-driven activation: OS locks exclude loaders; FIFO closure wakes waiters."""
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import secrets
 import select
+import stat
 import subprocess
 import tempfile
 import threading
@@ -27,127 +20,56 @@ from typing import Any
 
 from .output.core import Output
 from .paths import KeychainPaths
-from .util import LockFile, get_tty, unlink_quiet
+from .util import KeychainError, LockFile, unlink_quiet
+
+_CHILD_TERMINATE_TIMEOUT = 5.0
 
 
-def _json_load(path: Path) -> dict[str, Any]:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _json_save(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, sort_keys=True)
-            handle.write("\n")
-        Path(tmp_name).replace(path)
-    except Exception:
-        unlink_quiet(tmp_name)
-        raise
-
-
-def _nonblock_flag() -> int:
-    return getattr(os, "O_NONBLOCK", 0)
-
-
-@dataclass
-class ActivationInfo:
-    in_progress: bool = False
-    cancel_endpoint: str = ""
-    status: str = ""
-    requested_keys: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ActivationInfo:
-        if not isinstance(data, dict):
-            return cls()
-        return cls(
-            in_progress=bool(data.get("in_progress")),
-            cancel_endpoint=str(data.get("cancel_endpoint") or ""),
-            status=str(data.get("status") or ""),
-            requested_keys=[str(item) for item in data.get("requested_keys", []) if item],
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "in_progress": self.in_progress,
-            "cancel_endpoint": self.cancel_endpoint,
-            "status": self.status,
-            "requested_keys": list(self.requested_keys),
-        }
-
-
-@dataclass
-class WaiterInfo:
-    pid: int
-    tty: str
-    fifo_path: str
-    registered_at: float
-    requested_keys: list[str] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> WaiterInfo | None:
-        if not isinstance(data, dict):
-            return None
-        pid = _maybe_int(data.get("pid"))
-        fifo_path = str(data.get("fifo") or data.get("fifo_path") or "")
-        if pid is None or not fifo_path:
-            return None
-        return cls(
-            pid=pid,
-            tty=str(data.get("tty") or ""),
-            fifo_path=fifo_path,
-            registered_at=_maybe_float(data.get("registered_at")) or time.time(),
-            requested_keys=[str(item) for item in data.get("requested_keys", []) if item],
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "pid": self.pid,
-            "tty": self.tty,
-            "fifo": self.fifo_path,
-            "registered_at": self.registered_at,
-            "requested_keys": list(self.requested_keys),
-        }
-
-
-@dataclass
+@dataclass(frozen=True)
 class CoordinationState:
-    generation: int = 0
-    activation: ActivationInfo = field(default_factory=ActivationInfo)
-    waiters: list[WaiterInfo] = field(default_factory=list)
+    attempt: str = ""
+    status: str = ""
 
     @classmethod
     def load(cls, path: Path) -> CoordinationState:
-        data = _json_load(path)
-        raw_waiters = data.get("waiters", [])
-        waiters: list[WaiterInfo] = []
-        if isinstance(raw_waiters, list):
-            for item in raw_waiters:
-                waiter = WaiterInfo.from_dict(item)
-                if waiter is not None:
-                    waiters.append(waiter)
-        return cls(
-            generation=int(data.get("generation") or 0),
-            activation=ActivationInfo.from_dict(data.get("activation", {})),
-            waiters=waiters,
-        )
+        try:
+            with path.open(encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            return cls()
+        except OSError as exc:
+            raise KeychainError(f"Cannot read coordination result {path}: {exc}") from exc
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: Any) -> CoordinationState:
+        if not isinstance(data, dict):
+            return cls()
+        attempt, status = data.get("attempt"), data.get("status")
+        if not isinstance(attempt, str) or len(attempt) != 32 or any(c not in "0123456789abcdef" for c in attempt):
+            return cls()
+        if status not in ("loading", "success", "failed", "canceled"):
+            return cls()
+        return cls(attempt, status)
 
     def save(self, path: Path) -> None:
-        _json_save(path, self.to_dict())
+        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"attempt": self.attempt, "status": self.status}, handle)
+                handle.write("\n")
+            Path(name).replace(path)
+        finally:
+            unlink_quiet(name)
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "generation": self.generation,
-            "activation": self.activation.to_dict(),
-            "waiters": [waiter.to_dict() for waiter in self.waiters],
-        }
+
+def _open_fifo(path: Path, mode: int) -> int:
+    fd = os.open(path, mode | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NOCTTY", 0))
+    info = os.fstat(fd)
+    if not stat.S_ISFIFO(info.st_mode) or info.st_uid != os.getuid():
+        os.close(fd)
+        raise OSError(errno.EINVAL, "Not an owned FIFO", str(path))
+    return fd
 
 
 @dataclass
@@ -157,68 +79,69 @@ class WaiterEndpoint:
     keepalive_fd: int
     buffer: bytes = b""
 
+    @classmethod
+    def create(cls, path: Path) -> WaiterEndpoint:
+        os.mkfifo(path, mode=0o600)
+        read_fd = -1
+        try:
+            read_fd = _open_fifo(path, os.O_RDONLY)
+            return cls(path, read_fd, _open_fifo(path, os.O_WRONLY))
+        except BaseException:
+            if read_fd >= 0:
+                os.close(read_fd)
+            unlink_quiet(path)
+            raise
+
+    @staticmethod
+    def send(path: Path, message: dict[str, str]) -> bool:
+        try:
+            fd = _open_fifo(path, os.O_WRONLY)
+        except OSError as exc:
+            if exc.errno == errno.ENXIO:
+                with contextlib.suppress(OSError):
+                    if stat.S_ISFIFO(path.lstat().st_mode):
+                        unlink_quiet(path)
+            return False
+        try:
+            # These small, fixed-field messages fit within POSIX PIPE_BUF.
+            os.write(fd, (json.dumps(message) + "\n").encode())
+            return True
+        except OSError:
+            return False
+        finally:
+            os.close(fd)
+
     def read_message(self) -> dict[str, Any]:
-        data = self.buffer
-        self.buffer = b""
-        while b"\n" not in data:
+        while True:
+            if b"\n" in self.buffer:
+                raw, self.buffer = self.buffer.split(b"\n", 1)
+                try:
+                    value = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(value, dict):
+                    return value
+                continue
             try:
                 chunk = os.read(self.read_fd, 65536)
             except BlockingIOError:
-                break
+                return {}
             if not chunk:
-                break
-            data += chunk
-        if b"\n" in data:
-            raw, self.buffer = data.split(b"\n", 1)
-        else:
-            raw = data
-        raw = raw.strip()
-        if not raw:
-            return {}
-        try:
-            msg = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return {}
-        return msg if isinstance(msg, dict) else {}
-
-    def wait_for_message(self, timeout: float | None = None) -> dict[str, Any]:
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            wait = None if deadline is None else max(0.0, deadline - time.monotonic())
-            ready, _, _ = select.select([self.read_fd], [], [], wait)
-            if not ready:
                 return {}
-            message = self.read_message()
-            if message:
-                return message
-            if deadline is not None and time.monotonic() >= deadline:
-                return {}
+            self.buffer += chunk
 
-    def cleanup(self) -> None:
+    def cleanup(self, *, preserve_writers: bool = False) -> None:
+        remove = True
+        if preserve_writers and self.keepalive_fd >= 0:
+            os.close(self.keepalive_fd)
+            self.keepalive_fd = -1
+            remove = bool(select.select([self.read_fd], [], [], 0)[0])
         for fd in (self.read_fd, self.keepalive_fd):
             with contextlib.suppress(OSError):
                 os.close(fd)
-        unlink_quiet(self.fifo_path)
-
-
-@dataclass
-class CancelEndpoint:
-    fifo_path: Path
-    read_fd: int
-    keepalive_fd: int
-
-    def read_command(self) -> str:
-        try:
-            data = os.read(self.read_fd, 4096)
-        except BlockingIOError:
-            return ""
-        return data.decode("utf-8", errors="replace").strip().lower()
-
-    def cleanup(self) -> None:
-        for fd in (self.read_fd, self.keepalive_fd):
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        unlink_quiet(self.fifo_path)
+        self.read_fd = self.keepalive_fd = -1
+        if remove:
+            unlink_quiet(self.fifo_path)
 
 
 @dataclass(frozen=True)
@@ -228,8 +151,6 @@ class WaitResult:
 
 
 class ActivationLock(LockFile):
-    """A non-raising, non-blocking lock for the activation owner."""
-
     def __init__(self, path: Path, no_lock: bool, out: Output) -> None:
         super().__init__(path, no_lock, 0, out)
 
@@ -237,66 +158,23 @@ class ActivationLock(LockFile):
         self.try_acquire()
         return self
 
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        return (self._fd,) if self._fd >= 0 and os.name != "nt" else ()
+
 
 class ActivationCoordinator:
-    """Small façade around the state file, waiter FIFOs, and activation lock."""
-
     def __init__(self, paths: KeychainPaths, no_lock: bool, lockwait: int, out: Output) -> None:
-        self.paths = paths
-        self.no_lock = no_lock
-        self.lockwait = lockwait
-        self.out = out
+        self.paths, self.no_lock, self.lockwait, self.out = paths, no_lock, lockwait, out
 
     def state_lock(self) -> LockFile:
         return LockFile(self.paths.state_lockf, self.no_lock, self.lockwait, Output.silent())
 
+    def activation_lock(self) -> ActivationLock:
+        return ActivationLock(self.paths.activation_lockf, self.no_lock, self.out)
+
     def load_state(self) -> CoordinationState:
         return CoordinationState.load(self.paths.state_file)
-
-    def save_state(self, state: CoordinationState) -> None:
-        state.save(self.paths.state_file)
-
-    def create_waiter(self) -> WaiterEndpoint | None:
-        if self.no_lock or not hasattr(os, "mkfifo"):
-            return None
-        self.paths.waiters_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fifo_path = self.paths.waiters_dir / f"{os.getpid()}.{secrets.token_hex(8)}.fifo"
-        read_fd = -1
-        keepalive_fd = -1
-        try:
-            os.mkfifo(fifo_path, mode=0o600)
-            read_fd = os.open(str(fifo_path), os.O_RDONLY | _nonblock_flag())
-            keepalive_fd = os.open(str(fifo_path), os.O_WRONLY | _nonblock_flag())
-        except OSError as exc:
-            for fd in (read_fd, keepalive_fd):
-                if fd >= 0:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-            unlink_quiet(fifo_path)
-            self.out.debug(f"waiter FIFO unavailable ({exc}); falling back to direct activation")
-            return None
-        return WaiterEndpoint(fifo_path=fifo_path, read_fd=read_fd, keepalive_fd=keepalive_fd)
-
-    def create_cancel_endpoint(self) -> CancelEndpoint | None:
-        if self.no_lock or not hasattr(os, "mkfifo"):
-            return None
-        self.paths.waiters_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fifo_path = self.paths.waiters_dir / f"cancel.{os.getpid()}.{secrets.token_hex(8)}.fifo"
-        read_fd = -1
-        keepalive_fd = -1
-        try:
-            os.mkfifo(fifo_path, mode=0o600)
-            read_fd = os.open(str(fifo_path), os.O_RDONLY | _nonblock_flag())
-            keepalive_fd = os.open(str(fifo_path), os.O_WRONLY | _nonblock_flag())
-        except OSError as exc:
-            for fd in (read_fd, keepalive_fd):
-                if fd >= 0:
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
-            unlink_quiet(fifo_path)
-            self.out.debug(f"cancel FIFO unavailable ({exc}); activation will not be cancelable")
-            return None
-        return CancelEndpoint(fifo_path=fifo_path, read_fd=read_fd, keepalive_fd=keepalive_fd)
 
     def can_prompt(self) -> bool:
         if os.name == "nt":
@@ -305,299 +183,287 @@ class ActivationCoordinator:
             fd = os.open("/dev/tty", os.O_RDONLY)
         except OSError:
             return False
-        with contextlib.suppress(OSError):
-            os.close(fd)
+        os.close(fd)
         return True
 
-    def register_waiter(self, state: CoordinationState, waiter: WaiterEndpoint, requested_keys: list[str]) -> None:
-        info = WaiterInfo(
-            pid=os.getpid(),
-            tty=get_tty(),
-            fifo_path=str(waiter.fifo_path),
-            registered_at=time.time(),
-            requested_keys=list(requested_keys),
-        )
-        state.waiters = [existing for existing in state.waiters if existing.fifo_path != info.fifo_path]
-        state.waiters.append(info)
+    def endpoint(self, name: str) -> WaiterEndpoint:
+        self.paths.waiters_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return WaiterEndpoint.create(self.paths.waiters_dir / f"{name}.fifo")
 
-    def unregister_waiter(self, state: CoordinationState, waiter: WaiterEndpoint) -> None:
-        state.waiters = [existing for existing in state.waiters if existing.fifo_path != str(waiter.fifo_path)]
-
-    def activation_lock(self) -> ActivationLock:
-        return ActivationLock(self.paths.activation_lockf, self.no_lock, self.out)
-
-    def begin_activation(
-        self,
-        state: CoordinationState,
-        waiter: WaiterEndpoint | None,
-        requested_keys: list[str],
-        *,
-        cancel_endpoint: str = "",
-    ) -> None:
-        if waiter is not None:
-            self.unregister_waiter(state, waiter)
-        state.activation = ActivationInfo(
-            in_progress=True,
-            cancel_endpoint=cancel_endpoint,
-            status="loading",
-            requested_keys=list(requested_keys),
-        )
-
-    def finish_activation(self, status: str) -> list[WaiterInfo]:
+    def create_waiter(self) -> ActivationWaiter | None:
+        if self.no_lock or not hasattr(os, "mkfifo") or not self.can_prompt():
+            return None
         with self.state_lock():
-            state = self.load_state()
-            waiters = list(state.waiters)
-            state.waiters = []
-            state.activation = ActivationInfo(in_progress=False, status=status)
-            state.generation += 1
-            self.save_state(state)
-        self.notify_waiters(waiters, status=status, generation=state.generation)
-        return waiters
+            return ActivationWaiter(self, self.endpoint(f"wait.{os.getpid()}.{secrets.token_hex(8)}"))
 
-    def request_takeover(self, waiter: WaiterEndpoint, timeout: float = 5.0) -> dict[str, Any]:
-        if reconciled := self.reconcile_activation():
-            return reconciled
-        with self.state_lock():
-            state = self.load_state()
-            activation = state.activation
-            if not activation.in_progress:
-                return {"status": "inactive"}
-            cancel_path = activation.cancel_endpoint
+    def notify_waiters(self, attempt: str, status: str) -> None:
+        for path in self.paths.waiters_dir.glob("wait.*.fifo"):
+            WaiterEndpoint.send(path, {"attempt": attempt, "status": status})
 
-        if not cancel_path:
-            return {"status": "unavailable"}
+    def activation(self, waiter: ActivationWaiter | None = None) -> ActivationOwner:
+        return ActivationOwner(self, waiter)
 
-        try:
-            fd = os.open(cancel_path, os.O_WRONLY | _nonblock_flag())
-        except OSError:
-            if reconciled := self.reconcile_activation():
-                return reconciled
-            return {"status": "unavailable"}
+    def discard_attempts(self) -> None:
+        """Called with both locks held: no previous loader can still be running."""
+        for kind in ("life", "cancel"):
+            for path in self.paths.waiters_dir.glob(f"{kind}.*.fifo"):
+                unlink_quiet(path)
 
-        try:
-            os.write(fd, b"cancel\n")
-        finally:
-            os.close(fd)
-        if message := waiter.wait_for_message(timeout):
-            return message
-
-        if reconciled := self.reconcile_activation():
-            return reconciled
-        with self.state_lock():
-            state = self.load_state()
-            activation = state.activation
-            if not activation.in_progress:
-                status = activation.status or "inactive"
-                if status == "success":
-                    status = "inactive"
-                return {"status": status, "generation": state.generation}
-
-        return {"status": "timeout"}
-
-    def reconcile_activation(self) -> dict[str, Any] | None:
-        with self.activation_lock() as activation_lock:
-            if not activation_lock.acquired:
-                return None
-            with self.state_lock():
-                state = self.load_state()
-                if not state.activation.in_progress:
-                    status = state.activation.status or "inactive"
-                    if status == "success":
-                        status = "inactive"
-                    return {"status": status, "generation": state.generation}
-                waiters = list(state.waiters)
-                state.waiters = []
-                state.activation = ActivationInfo(in_progress=False, status="canceled")
-                state.generation += 1
-                self.save_state(state)
-            self.notify_waiters(waiters, status="canceled", generation=state.generation)
-            return {"status": "canceled", "generation": state.generation}
-
-    def notify_waiters(self, waiters: list[WaiterInfo], status: str, generation: int | None = None) -> None:
-        message = {
-            "status": status,
-            "generation": generation,
-            "loader_pid": os.getpid(),
-            "timestamp": time.time(),
-        }
-        payload = (json.dumps(message, sort_keys=True) + "\n").encode("utf-8")
-        for waiter in waiters:
-            with contextlib.suppress(OSError):
-                fd = os.open(waiter.fifo_path, os.O_WRONLY | _nonblock_flag())
-                try:
-                    os.write(fd, payload)
-                finally:
+    def observe(self) -> tuple[str, int]:
+        """Called under the state lock; the activation lock establishes liveness."""
+        with self.activation_lock() as lock:
+            if lock.acquired:
+                self.discard_attempts()
+                return "", -1
+        for path in self.paths.waiters_dir.glob("life.*.fifo"):
+            attempt = path.name.split(".")[1]
+            if not CoordinationState.from_dict({"attempt": attempt, "status": "loading"}).attempt:
+                continue
+            try:
+                fd = _open_fifo(path, os.O_RDONLY)
+            except OSError:
+                continue
+            # The loader could die between the first lock probe and opening this reader.
+            with self.activation_lock() as lock:
+                if lock.acquired:
                     os.close(fd)
+                    self.discard_attempts()
+                    return "", -1
+            return attempt, fd
+        raise KeychainError("Key loading is locked but its lifetime notification is unavailable")
 
-    def wait_for_activation_signal(self, waiter: WaiterEndpoint, *, activation_active: bool) -> WaitResult:
-        prompt_ephemeral = False
-        try:
-            with open("/dev/tty", encoding="utf-8", errors="replace") as tty:
-                prompt_ephemeral = self._prompt(activation_active)
-                ready, _, _ = select.select([tty.fileno(), waiter.read_fd], [], [])
-                if waiter.read_fd in ready:
-                    if prompt_ephemeral:
-                        self.out.clear_ephemeral_line(after_input=tty.fileno() in ready)
-                    return WaitResult("notified", waiter.read_message())
-                line = tty.readline().strip().lower()
-                if prompt_ephemeral:
-                    self.out.clear_ephemeral_line(after_input=True)
-        except OSError:
-            if prompt_ephemeral:
-                self.out.clear_ephemeral_line()
-            return WaitResult("activate")
 
-        if activation_active:
-            return WaitResult("takeover" if line == "takeover" else "wait")
-        return WaitResult("activate")
+class ActivationWaiter:
+    def __init__(self, coord: ActivationCoordinator, endpoint: WaiterEndpoint) -> None:
+        self.coord, self.endpoint = coord, endpoint
+        self.attempt = ""
+        self.life_fd = -1
+        self.ignore_attempt = ""
 
-    def wait_for_notification(self, waiter: WaiterEndpoint) -> WaitResult:
-        return WaitResult("notified", waiter.wait_for_message())
+    def _close_watch(self) -> None:
+        if self.life_fd >= 0:
+            os.close(self.life_fd)
+            self.life_fd = -1
 
-    def wait_for_handoff(self, waiter: WaiterEndpoint, timeout: float = 1.0) -> WaitResult:
-        if message := waiter.wait_for_message(timeout):
-            return WaitResult("notified", message)
-        return WaitResult("activate" if self.reconcile_activation() is not None else "handoff")
+    def cleanup(self) -> None:
+        self._close_watch()
+        self.endpoint.cleanup()
 
-    def _prompt(self, activation_active: bool) -> bool:
-        if activation_active:
-            text = self.out.warn_text(
-                f"[ {self.out.glyph('key')} Type 'takeover' to initialize keys in this terminal; "
-                f"Enter to wait {self.out.glyph('key')} ]"
-            )
-        else:
-            text = self.out.warn_text(
-                f"[ {self.out.glyph('key')} Press Enter to initialize keys {self.out.glyph('key')} ]"
-            )
-        return self.out.ephemeral_line(text)
+    def _completion(self) -> WaitResult:
+        record = self.coord.load_state()
+        status = record.status if record.attempt == self.attempt else "unknown"
+        if status == "loading":
+            status = "abandoned"
+        self._close_watch()
+        self.ignore_attempt = self.attempt
+        return WaitResult("notified", {"attempt": self.attempt, "status": status})
+
+    def wait(
+        self, *, immediate: bool = False, interactive: bool = False, handoff: bool = False, timeout: float | None = None
+    ) -> WaitResult:
+        if handoff:
+            timeout = 1.0
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with contextlib.ExitStack() as stack:
+            tty = stack.enter_context(open("/dev/tty", encoding="utf-8", errors="replace")) if interactive else None
+            while True:
+                with self.coord.state_lock():
+                    while message := self.endpoint.read_message():
+                        record = CoordinationState.from_dict(message)
+                        attempt, status = record.attempt, record.status
+                        if not attempt or attempt == self.ignore_attempt:
+                            continue
+                        if status in ("success", "failed", "canceled"):
+                            self._close_watch()
+                            self.attempt = self.ignore_attempt = attempt
+                            return WaitResult("notified", message)
+                        if status == "loading" and self.life_fd < 0:
+                            self.attempt = attempt
+                    if self.life_fd >= 0 and select.select([self.life_fd], [], [], 0)[0]:
+                        return self._completion()
+                    if self.life_fd < 0:
+                        attempt, fd = self.coord.observe()
+                        if fd >= 0:
+                            self.attempt, self.life_fd = attempt, fd
+                        elif self.attempt and self.attempt != self.ignore_attempt:
+                            return self._completion()
+                    active = self.life_fd >= 0
+                    if handoff and active:
+                        # The successor is here: wait for its lifetime, not a timer.
+                        handoff, deadline = False, None
+                    if not active and not handoff and (immediate or (not interactive and timeout is None)):
+                        return WaitResult("activate")
+
+                prompt = False
+                if tty is not None and not handoff:
+                    text = (
+                        "Type 'takeover' to initialize keys in this terminal; Enter to wait"
+                        if active
+                        else "Press Enter to initialize keys"
+                    )
+                    prompt = self.coord.out.ephemeral_line(
+                        self.coord.out.warn_text(
+                            f"[ {self.coord.out.glyph('key')} {text} {self.coord.out.glyph('key')} ]"
+                        )
+                    )
+                fds = [self.endpoint.read_fd]
+                if self.life_fd >= 0:
+                    fds.append(self.life_fd)
+                if tty is not None and not handoff:
+                    fds.append(tty.fileno())
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                ready, _, _ = select.select(fds, [], [], remaining)
+                if prompt:
+                    self.coord.out.clear_ephemeral_line(after_input=tty.fileno() in ready if tty else False)
+                if not ready:
+                    return WaitResult("activate" if handoff and not active else "timeout")
+                if self.endpoint.read_fd in ready or self.life_fd in ready:
+                    continue
+                if tty is not None:
+                    line = tty.readline()
+                    if not line:
+                        raise KeychainError("Terminal closed while waiting to initialize keys")
+                    if not active:
+                        return WaitResult("activate")
+                    if line.strip().lower() == "takeover":
+                        return WaitResult("takeover")
+
+    def request_takeover(self) -> WaitResult:
+        with self.coord.state_lock():
+            if self.life_fd < 0:
+                return WaitResult("activate")
+            path = self.coord.paths.waiters_dir / f"cancel.{self.attempt}.fifo"
+            if not WaiterEndpoint.send(path, {"status": "cancel"}):
+                return WaitResult("unavailable")
+        return self.wait(timeout=_CHILD_TERMINATE_TIMEOUT + 2.0)
 
 
 class ActivationOwner:
-    """Own one cancelable ``ssh-add`` activation attempt."""
+    """The activation lock and lifetime writer both remain open in ssh-add."""
 
-    def __init__(
-        self,
-        coord: ActivationCoordinator,
-        waiter: WaiterEndpoint | None,
-        requested_keys: list[str],
-        out: Output,
-    ) -> None:
-        self.coord = coord
-        self.waiter = waiter
-        self.requested_keys = list(requested_keys)
-        self.out = out
-        self.cancel_endpoint: CancelEndpoint | None = None
+    def __init__(self, coord: ActivationCoordinator, waiter: ActivationWaiter | None) -> None:
+        self.coord, self.waiter = coord, waiter
+        self.lock = coord.activation_lock()
+        self.attempt = secrets.token_hex(16)
+        self.status = "failed"
+        self.life: WaiterEndpoint | None = None
+        self.cancel: WaiterEndpoint | None = None
         self.proc: subprocess.Popen[bytes] | None = None
         self._stop = threading.Event()
         self._canceled = threading.Event()
-        self._cancel_thread: threading.Thread | None = None
+        self._thread: threading.Thread | None = None
         self._proc_lock = threading.Lock()
 
-    def run_ssh_add(self, commands: list[list[str]], env: dict[str, str]) -> str:
-        self.cancel_endpoint = self.coord.create_cancel_endpoint()
-        cancel_path = str(self.cancel_endpoint.fifo_path) if self.cancel_endpoint is not None else ""
+    @property
+    def acquired(self) -> bool:
+        return self.lock.acquired
 
-        with self.coord.state_lock():
-            state = self.coord.load_state()
-            self.coord.begin_activation(state, self.waiter, self.requested_keys, cancel_endpoint=cancel_path)
-            self.coord.save_state(state)
-
+    def __enter__(self) -> ActivationOwner:
         try:
-            self._start_cancel_thread()
-            for child_cmd in commands:
-                status = self._run_child(child_cmd, env)
-                if status != "success":
-                    return status
-            return "success"
-        finally:
+            with self.coord.state_lock():
+                if not self.lock.try_acquire():
+                    return self
+                if not self.coord.no_lock and hasattr(os, "mkfifo"):
+                    self.coord.discard_attempts()
+                    self.life = self.coord.endpoint(f"life.{self.attempt}")
+                    self.cancel = self.coord.endpoint(f"cancel.{self.attempt}")
+                    CoordinationState(self.attempt, "loading").save(self.coord.paths.state_file)
+                    if self.waiter is not None:
+                        self.waiter._close_watch()
+                        self.waiter.attempt = self.waiter.ignore_attempt = self.attempt
+                    # Every existing waiter is notified before a child can be started.
+                    self.coord.notify_waiters(self.attempt, "loading")
+            return self
+        except BaseException:
+            self._cleanup()
+            raise
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if not self.acquired:
+            return
+        if exc_type is not None:
+            self.status = "failed"
+        try:
             self._stop.set()
-            self._join_threads()
-            if self.cancel_endpoint is not None:
-                self.cancel_endpoint.cleanup()
+            self._cancel_child()
+            if self._thread is not None:
+                self._thread.join()
+            with self.coord.state_lock():
+                try:
+                    if self.life is not None:
+                        CoordinationState(self.attempt, self.status).save(self.coord.paths.state_file)
+                        self.coord.notify_waiters(self.attempt, self.status)
+                finally:
+                    self._cleanup()
+        finally:
+            self._cleanup()
+
+    def _cleanup(self) -> None:
+        self.lock.release()
+        for endpoint in (self.life, self.cancel):
+            if endpoint is not None:
+                endpoint.cleanup(preserve_writers=endpoint is self.life)
+        self.life = self.cancel = None
+
+    def run_ssh_add(self, commands: list[list[str]], env: dict[str, str]) -> str:
+        if self.cancel is not None:
+            self._thread = threading.Thread(target=self._cancel_loop, name="keychain-cancel-listener", daemon=True)
+            self._thread.start()
+        for command in commands:
+            self.status = self._run_child(command, env)
+            if self.status != "success":
+                break
+        return self.status
 
     def _run_child(self, cmd: list[str], env: dict[str, str]) -> str:
         try:
-            with self._open_tty() as tty:
+            with contextlib.ExitStack() as stack:
                 kwargs: dict[str, Any] = {"env": env, "close_fds": True}
-                if tty is not None:
-                    kwargs.update({"stdin": tty, "stdout": tty, "stderr": tty})
+                if os.name != "nt":
+                    kwargs["pass_fds"] = self.lock.pass_fds + ((self.life.keepalive_fd,) if self.life else ())
+                    try:
+                        tty = stack.enter_context(open("/dev/tty", "rb+", buffering=0))
+                    except OSError:
+                        pass
+                    else:
+                        kwargs.update(stdin=tty, stdout=tty, stderr=tty)
                 with self._proc_lock:
                     if self._canceled.is_set():
                         return "canceled"
                     self.proc = subprocess.Popen(cmd, **kwargs)
                 rc = self.proc.wait()
-        except FileNotFoundError:
-            self.out.warn("ssh-add not found")
-            return "failed"
         except OSError as exc:
-            self.out.warn(f"ssh-add failed to start: {exc}")
+            self.coord.out.warn(f"ssh-add failed to start: {exc}")
             return "failed"
-
         if self._canceled.is_set():
-            self.out.debug("ssh-add canceled by another terminal.")
             return "canceled"
         if rc != 0:
-            self.out.warn(f"ssh-add failed (return code: {rc})")
+            self.coord.out.warn(f"ssh-add failed (return code: {rc})")
             return "failed"
         return "success"
 
-    @contextlib.contextmanager
-    def _open_tty(self):
-        if os.name == "nt":
-            yield None
-            return
-        try:
-            with open("/dev/tty", "rb+", buffering=0) as tty:
-                yield tty
-        except OSError:
-            yield None
-
-    def _start_cancel_thread(self) -> None:
-        if self.cancel_endpoint is None:
-            return
-        self._cancel_thread = threading.Thread(target=self._cancel_loop, name="keychain-cancel-listener", daemon=True)
-        self._cancel_thread.start()
-
-    def _join_threads(self) -> None:
-        if self._cancel_thread is not None:
-            self._cancel_thread.join(timeout=1.0)
-
     def _cancel_loop(self) -> None:
-        endpoint = self.cancel_endpoint
+        endpoint = self.cancel
         if endpoint is None:
             return
         while not self._stop.is_set():
-            ready, _, _ = select.select([endpoint.read_fd], [], [], 0.5)
-            if not ready:
+            if not select.select([endpoint.read_fd], [], [], 0.5)[0]:
                 continue
-            if endpoint.read_command() == "cancel":
+            if endpoint.read_message().get("status") == "cancel":
+                self._canceled.set()
                 self._cancel_child()
                 return
 
     def _cancel_child(self) -> None:
         with self._proc_lock:
-            self._canceled.set()
             proc = self.proc
         if proc is None or proc.poll() is not None:
             return
         with contextlib.suppress(OSError):
             proc.terminate()
         try:
-            proc.wait(timeout=5)
+            proc.wait(timeout=_CHILD_TERMINATE_TIMEOUT)
         except subprocess.TimeoutExpired:
             with contextlib.suppress(OSError):
                 proc.kill()
-
-
-def _maybe_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _maybe_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+            proc.wait()
