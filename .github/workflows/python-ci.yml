@@ -113,9 +113,9 @@ jobs:
         #   build from source if no manylinux wheel matches; not
         #   strictly required today (no C deps) but cheap insurance
         #   against transitive deps growing one later.
-        # make: builds keychain.pyz for the smoke test below.
+        # make + findutils: build keychain.pyz and remove staged bytecode.
         run: |
-          dnf install -y git make gcc
+          dnf install -y git make gcc findutils
           dnf module install -y python39
           dnf install -y python39-devel
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
