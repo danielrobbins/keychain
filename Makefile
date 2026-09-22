@@ -9,6 +9,7 @@
 
 V := $(shell cat VERSION)
 PYTHON ?= python3
+DEFAULT_ACTIVATION ?= prompt
 PYZ_INTERPRETER ?= /usr/bin/env python3
 PYZ_STAGE = build/$@-stage
 
@@ -24,7 +25,7 @@ precompiled-pyz : keychain-precompiled.pyz
 keychain-precompiled.pyz : PYZ_INTERPRETER = $(shell "$(PYTHON)" -c 'import sys; print(sys.executable)')
 keychain-precompiled.pyz : PYZ_COMPILE = "$(PYTHON)" -m compileall -q -b -o 0 --invalidation-mode checked-hash -s "$(PYZ_STAGE)" "$(PYZ_STAGE)"
 
-keychain.pyz keychain-precompiled.pyz : Makefile $(shell find src/keychain -name '*.py') src/keychain/docs/_doc_texts.json man/embedded-docs.txt scripts/build_doc_texts.py VERSION scripts/pyz_bootstrap.py
+keychain.pyz keychain-precompiled.pyz : Makefile $(shell find src/keychain -name '*.py') src/keychain/docs/_doc_texts.json man/embedded-docs.txt scripts/build_doc_texts.py VERSION scripts/pyz_bootstrap.py scripts/build_defaults.py
 	rm -rf "$(PYZ_STAGE)"
 	mkdir -p "$(PYZ_STAGE)"
 	cp -r src/keychain "$(PYZ_STAGE)/"
@@ -32,6 +33,7 @@ keychain.pyz keychain-precompiled.pyz : Makefile $(shell find src/keychain -name
 	find "$(PYZ_STAGE)" -name __pycache__ -type d -prune -exec rm -rf {} +
 	find "$(PYZ_STAGE)" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 	cp scripts/pyz_bootstrap.py "$(PYZ_STAGE)/__main__.py"
+	"$(PYTHON)" scripts/build_defaults.py "$(PYZ_STAGE)/keychain/_build_defaults.py" "$(DEFAULT_ACTIVATION)"
 	$(PYZ_COMPILE)
 	"$(PYTHON)" -m zipapp "$(PYZ_STAGE)" -o "$@" -p '$(PYZ_INTERPRETER)' -c
 	chmod +x "$@"

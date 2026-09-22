@@ -89,7 +89,7 @@ class _OwnerController:
 def _app(paths: KeychainPaths, ssh: _SharedSSH, *, immediate: bool) -> main.KeychainApp:
     args = RuntimeConfig.resolve(["add", "id_ed25519"])
     if immediate:
-        args.rc_data = {"agent": {"immediate": "true"}}
+        args.rc_data = {"agent": {"activation": "immediate"}}
     app = main.KeychainApp(args, _out())
     app._kstate = SimpleNamespace(paths=paths, user="tester", ssh=ssh, gpg=SimpleNamespace())
     return app

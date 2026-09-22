@@ -20,12 +20,14 @@ secondary commands, keychain documentation follows these formatting conventions:
 
 from __future__ import annotations
 
+import configparser
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from keychain.output.core import Output
 
+from .._build_defaults import DEFAULT_ACTIVATION
 from ..docs import _entry
 
 OUTPUT_ACTIONS = frozenset(("man", "version", "help"))
@@ -113,6 +115,8 @@ class Option(Element):
     env_presence: str | None = None  # environment variable whose presence enables this option
     config_section: str | None = None  # INI section name for config file binding
     config_key: str | None = None  # INI key override; defaults to name if omitted
+    config_aliases: dict[str, dict[str, str]] = field(default_factory=dict)
+    cli_const: str | None = None  # value assigned by a flag that takes no argument
     examples: tuple[tuple[str, str], ...] = ()  # (description, command) pairs for docs
     action_adapter: ActionAdapter | None = None  # canonical argv rewriter for structural action-equivalent flags
     deprecated: bool = False  # deprecated options are auto-hidden and emit policy feedback when used
@@ -158,7 +162,27 @@ class Option(Element):
 
     @property
     def takes_value(self) -> bool:
-        return self.type != "bool"
+        return self.type != "bool" and self.cli_const is None
+
+    def normalize_config(self, section: dict[str, str]) -> list[str]:
+        """Translate legacy config spellings into one validated canonical key."""
+        key = self.effective_config_key
+        warnings = []
+        for alias, values in self.config_aliases.items():
+            if alias not in section:
+                continue
+            raw = section.pop(alias)
+            if key in section:
+                warnings.append(f"Ignoring [{self.config_section}] {alias}: {key} takes precedence.")
+            elif raw.strip().lower() in values:
+                section[key] = values[raw.strip().lower()]
+            else:
+                raise ValueError(f"Invalid [{self.config_section}] {alias}: {raw!r}; choose from: {', '.join(values)}")
+        if key in section and self.choices:
+            error = self.validate_value(self._coerce(section[key]), label=f"[{self.config_section}] {key}")
+            if error:
+                raise ValueError(error)
+        return warnings
 
     @property
     def effective_config_key(self) -> str:
@@ -231,7 +255,7 @@ class Option(Element):
             return None
         return self.action_adapter(tokens, index, action_node, tuple(consumed_sequence))
 
-    def validate_value(self, value: Any) -> str | None:
+    def validate_value(self, value: Any, *, label: str | None = None) -> str | None:
         """Return a validation error string when *value* violates option policy.
 
         Why this exists:
@@ -249,7 +273,7 @@ class Option(Element):
         without inventing a larger schema or type system.
         """
         if self.choices and value not in self.choices:
-            return f"{self.option} does not support {value!r}; choose from: {', '.join(self.choices)}"
+            return f"{label or self.option} does not support {value!r}; choose from: {', '.join(self.choices)}"
         if self.validator is None:
             return None
         predicate, message = self.validator
@@ -585,7 +609,23 @@ Option(option="--eval", actions={cmd_add, agent_start}, see_also=("--systemd",))
 Option(option="--systemd", actions={cmd_add, agent_start}, config_section="agent", see_also=("--eval",))
 
 cmd_add.add_option(option="--quick", cli_aliases=("-Q",))
-cmd_add.add_option(option="--immediate", config_section="agent", doc_tag="option:immediate")
+cmd_add.add_option(
+    option="--immediate",
+    varname="activation",
+    type="str",
+    cli_const="immediate",
+    default=DEFAULT_ACTIVATION,
+    choices=("prompt", "immediate"),
+    config_section="agent",
+    config_aliases={
+        "immediate": {
+            value: "immediate" if enabled else "prompt"
+            for value, enabled in configparser.ConfigParser.BOOLEAN_STATES.items()
+        }
+    },
+    doc_tag="option:immediate",
+    config_doc_tag="config:agent.activation",
+)
 cmd_add.add_option(varname="noask", option="--no-passphrase", cli_aliases=("--noask",))
 cmd_add.add_option(option="--confirm", config_section="agent", doc_tag="option:confirm")
 cmd_add.add_option(

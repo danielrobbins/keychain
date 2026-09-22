@@ -12,6 +12,15 @@ from keychain.runtime.config import RuntimeConfig
 
 
 class TestHelpVersionOutput:
+    def test_activation_config_manual_explains_fixed_cli_value(self, capsys):
+        with pytest.raises(SystemExit) as ex:
+            main.main(["man", "config:agent.activation"])
+        assert ex.value.code == 0
+        text = capsys.readouterr().out
+        assert "--immediate selects activation = immediate" in text
+        assert "activation = prompt" in text
+        assert "legacy" in text
+
     @pytest.mark.parametrize(
         "invocation",
         [["--help"], ["-h"], ["help"], ["add", "--help"], ["agent", "stop", "-h"], ["--version"], ["version"]],

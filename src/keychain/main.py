@@ -335,7 +335,7 @@ class KeychainApp:
                 coord.save_state(state_snapshot)
             self.kstate.ssh.announce_load(missing.ssh, missing.pkcs11)
 
-            immediate = bool(self.args.get_value("immediate"))
+            immediate = self.args.get_value("activation") == "immediate"
             immediate_pending = immediate
             handoff_wait = False
             quiet_handoff_wait = False

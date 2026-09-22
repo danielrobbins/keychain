@@ -315,7 +315,7 @@ class TestResolveAction:
         ns = RuntimeConfig.resolve(["add", "--immediate", "id_ed25519"])
 
         assert ns.action == "add"
-        assert ns.get_value("immediate") is True
+        assert ns.get_value("activation") == "immediate"
         assert ns.get_value("keys") == ["id_ed25519"]
 
     def test_confhost_raises(self):

@@ -29,7 +29,7 @@ def distribution_tree(tmp_path, monkeypatch):
     home.mkdir()
     for name in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(name, str(home))
-    for name in ("PYTHONPATH", "PYTHONHOME", "KEYCHAIN_CONFIG"):
+    for name in ("PYTHONPATH", "PYTHONHOME", "KEYCHAIN_CONFIG", "KEYCHAIN_BUILD_ACTIVATION"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("NO_COLOR", "1")
     return tree
@@ -121,8 +121,11 @@ main(['version'])
         assert not any(name.endswith(".pyc") for name in archive.namelist())
 
 
-def test_standard_install_from_sdist(distribution_tree):
+@pytest.mark.parametrize("activation", [None, "immediate"])
+def test_standard_install_from_sdist(distribution_tree, monkeypatch, activation):
     tree = distribution_tree
+    if activation:
+        monkeypatch.setenv("KEYCHAIN_BUILD_ACTIVATION", activation)
     # The build frontend's default builds an sdist, then a wheel from that sdist.
     # Dependencies are installed with the dev extra; this test needs no network.
     run([sys.executable, "-m", "build", "--no-isolation"], tree)
@@ -136,6 +139,10 @@ def test_standard_install_from_sdist(distribution_tree):
         assert version_file.read() == (tree / "VERSION").read_bytes()
     with zipfile.ZipFile(wheels[0]) as archive:
         assert "keychain/docs/_doc_texts.json" in archive.namelist()
+        assert (
+            f'DEFAULT_ACTIVATION = "{activation or "prompt"}"' in archive.read("keychain/_build_defaults.py").decode()
+        )
+    assert 'DEFAULT_ACTIVATION = "prompt"' in (tree / "src/keychain/_build_defaults.py").read_text()
 
     installed = tree.parent / "installed"
     venv.EnvBuilder(with_pip=True).create(installed)
@@ -149,3 +156,52 @@ def test_standard_install_from_sdist(distribution_tree):
     assert f"keychain {version}" in run([str(python), "-I", "-m", "keychain", "version"], tree.parent)
     assert "--confirm" in run([str(command), "man", "--list"], tree.parent)
     assert "--confirm" in run([str(command), "add", "--help"], tree.parent)
+    probe = "from keychain.runtime.config import RuntimeConfig; print(RuntimeConfig.resolve(['add']).get_value('activation'))"
+    assert run([str(python), "-I", "-c", probe], tree.parent).strip() == (activation or "prompt")
+    (tree.parent / "home/.keychainrc").write_text("[agent]\nactivation = prompt\n")
+    assert run([str(python), "-I", "-c", probe], tree.parent).strip() == "prompt"
+    if activation:
+        monkeypatch.delenv("KEYCHAIN_BUILD_ACTIVATION")
+        run([sys.executable, "-m", "build", "--wheel", "--no-isolation"], tree)
+        with zipfile.ZipFile(wheels[0]) as archive:
+            assert 'DEFAULT_ACTIVATION = "prompt"' in archive.read("keychain/_build_defaults.py").decode()
+        monkeypatch.setenv("KEYCHAIN_BUILD_ACTIVATION", "typo")
+        result = subprocess.run(
+            [sys.executable, "-m", "build", "--wheel", "--no-isolation"],
+            cwd=tree,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode != 0
+        assert "invalid choice" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("make"), reason="zipapp Makefile requires POSIX tools")
+@pytest.mark.parametrize("target", ["keychain.pyz", "keychain-precompiled.pyz"])
+def test_zipapp_activation_build_default(distribution_tree, target):
+    tree = distribution_tree
+    artifact = tree / target
+    probe = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from keychain.runtime.config import RuntimeConfig
+print(RuntimeConfig.resolve(['add', *sys.argv[2:]]).get_value('activation'))
+"""
+    command = [sys.executable, "-I", "-c", probe, str(artifact)]
+    run(["make", target, f"PYTHON={sys.executable}", "DEFAULT_ACTIVATION=immediate"], tree)
+    assert run(command, tree.parent).strip() == "immediate"
+    rc = tree.parent / "home/.keychainrc"
+    for setting in ("activation = prompt", "immediate = false"):
+        rc.write_text(f"[agent]\n{setting}\n")
+        assert run(command, tree.parent).strip() == "prompt"
+        assert run([*command, "--immediate"], tree.parent).strip() == "immediate"
+    rc.unlink()
+    assert 'DEFAULT_ACTIVATION = "prompt"' in (tree / "src/keychain/_build_defaults.py").read_text()
+    run(["make", target, f"PYTHON={sys.executable}"], tree)
+    assert run(command, tree.parent).strip() == "prompt"
+    result = subprocess.run(
+        ["make", target, "DEFAULT_ACTIVATION=typo"], cwd=tree, capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr

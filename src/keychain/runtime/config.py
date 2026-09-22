@@ -145,6 +145,8 @@ class RuntimeConfig:
             for opt in node.options.values():
                 if opt.config_section:
                     all_options_by_section[opt.config_section.lower()][opt.effective_config_key.lower()] = opt
+                    for alias in opt.config_aliases:
+                        all_options_by_section[opt.config_section.lower()][alias] = opt
             for child in node.sub_actions.values():
                 _scan_sections(child)
 
@@ -153,6 +155,7 @@ class RuntimeConfig:
             f"{section}.{key}": opt
             for section, options in all_options_by_section.items()
             for key, opt in options.items()
+            if key == opt.effective_config_key
         }
 
         # Parse .keychainrc with case-insensitive key/section matching
@@ -183,6 +186,14 @@ class RuntimeConfig:
             except OSError as e:
                 self.rc_status = "unreadable"
                 self.rc_warnings.append(f"Failed to read {rc_path}: {e}")
+
+        for config_option in self._config_options.values():
+            try:
+                self.rc_warnings.extend(
+                    config_option.normalize_config(self.rc_data.get(config_option.config_section or "", {}))
+                )
+            except ValueError as exc:
+                self.parse_error = self.parse_error or str(exc)
 
         for varname in _AGENT_ARG_VARS:
             opt = self.get_option(varname)
@@ -677,9 +688,9 @@ class RuntimeConfig:
                 raise ParserError(f"Option '{opt.option}' expects an integer.")
             opt._cli_value = coerced
             self._record_option_policy(opt, coerced)
-        elif opt.type == "bool":
-            opt._cli_value = True
-            self._record_option_policy(opt, True)
+        elif opt.cli_const is not None or opt.type == "bool":
+            opt._cli_value = opt.cli_const if opt.cli_const is not None else True
+            self._record_option_policy(opt, opt._cli_value)
         else:
             opt._cli_value = val
             self._record_option_policy(opt, val)
