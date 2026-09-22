@@ -52,13 +52,13 @@ jobs:
   #
   # Floor + ceiling on Linux + Windows/macOS-on-ceiling. Rationale:
   #   - 3.9 (floor) catches usage of features added later.
-  #   - 3.13 (ceiling) catches deprecations and stdlib drift.
-  #   - Windows × 3.13 catches POSIX-only assumptions; OS-portability
+  #   - 3.14 (ceiling) catches deprecations and stdlib drift.
+  #   - Windows × 3.14 catches POSIX-only assumptions; OS-portability
   #     bugs almost never differ between Python minor versions, so one
   #     Windows job is enough for PR-time feedback.
   #   - macOS × 3.9 catches floor-version Darwin behavior on a key
   #     supported platform.
-  #   - macOS × 3.13 catches ceiling-version Darwin-specific POSIX edges,
+  #   - macOS × 3.14 catches ceiling-version Darwin-specific POSIX edges,
   #     especially AF_UNIX socket path limits that Linux does not share.
   # -------------------------------------------------------------------------
   test-fast:
@@ -70,13 +70,13 @@ jobs:
           - os: ubuntu-latest
             python-version: "3.9"
           - os: ubuntu-latest
-            python-version: "3.13"
+            python-version: "3.14"
           - os: windows-latest
-            python-version: "3.13"
+            python-version: "3.14"
           - os: macos-latest
             python-version: "3.9"
           - os: macos-latest
-            python-version: "3.13"
+            python-version: "3.14"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -156,7 +156,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
