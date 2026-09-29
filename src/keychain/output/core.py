@@ -28,6 +28,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TextIO, Union
 
+from .debug import DebugLog
+
 # ---------------------------------------------------------------------------
 # Roles
 # ---------------------------------------------------------------------------
@@ -308,7 +310,7 @@ def _visible_width(text: str) -> int:
 
 @dataclass(frozen=True)
 class Output:
-    """Stateless output sink (one per process).
+    """Console output and optional diagnostic log (one per process).
 
     ``Output.build()`` is the one true constructor for normal use; it
     parses theme/color/policy arguments and installs the active theme on
@@ -326,6 +328,7 @@ class Output:
     # When True, every emitter (including warn/error) is a no-op.
     # Used by :meth:`silent` for state probes; not user-tunable.
     _silent: bool = field(default=False, repr=False)
+    _log: DebugLog | None = field(default=None, repr=False, compare=False)
 
     # ---- construction --------------------------------------------------
 
@@ -339,6 +342,7 @@ class Output:
         theme: str | None = None,
         json: bool = False,
         color_stream: TextIO | None = None,
+        debug_log: str | None = None,
     ) -> Output:
         # Theme is set exclusively via --theme CLI flag; no env var override.
         chosen = resolve_theme_name(theme)
@@ -372,7 +376,20 @@ class Output:
             json=json,
             theme=chosen,
             _theme=active,
+            _log=DebugLog(debug_log) if debug_log else None,
         )
+
+    @property
+    def debug_enabled(self) -> bool:
+        return self.debug_on or self._log is not None
+
+    def close(self) -> None:
+        if self._log is not None:
+            self._log.close()
+
+    def _record(self, level: str, msg: Renderable) -> None:
+        if not self._silent and self._log is not None:
+            self._log.write(level, _stringify(msg))
 
     @classmethod
     def silent(cls) -> Output:
@@ -541,12 +558,14 @@ class Output:
 
     def line(self, msg: Renderable = "") -> None:
         """Plain stderr line. Suppressed by quiet / json."""
+        self._record("info", msg)
         if self._silent or self.quiet:
             return
         print(_stringify(msg), file=sys.stderr)
 
     def result(self, msg: Renderable = "") -> None:
         """Explicit command result on stderr. Never suppressed by quiet."""
+        self._record("result", msg)
         if not self._silent:
             print(_stringify(msg), file=sys.stderr)
 
@@ -563,6 +582,7 @@ class Output:
         if not self._can_use_ephemeral_line(text):
             self.result(text)
             return False
+        self._record("prompt", text)
         sys.stderr.write(f"\r\x1b[2K{text}")
         sys.stderr.flush()
         return True
@@ -577,12 +597,14 @@ class Output:
 
     def info(self, msg: Renderable) -> None:
         """Informational message (▸). Suppressed by quiet / json."""
+        self._record("info", msg)
         if self._silent or self.quiet:
             return
         print(f" {self.glyph('info')} {_stringify(msg)}", file=sys.stderr)
 
     def warn(self, msg: Renderable) -> None:
         """Inline warning. Suppressed by json (and by silent())."""
+        self._record("warning", msg)
         if self._silent or self.json:
             return
         prefix = self._theme.palette.get("YEL", "")
@@ -591,6 +613,7 @@ class Output:
 
     def note(self, msg: Renderable) -> None:
         """Notice (›). Suppressed by quiet / json."""
+        self._record("note", msg)
         if self._silent or self.quiet:
             return
         prefix = self._theme.palette.get("PURP", "")
@@ -599,6 +622,7 @@ class Output:
 
     def error(self, msg: Renderable) -> None:
         """Inline error. Suppressed by json (and by silent())."""
+        self._record("error", msg)
         if self._silent or self.json:
             return
         prefix = self._theme.palette.get("RED", "")
@@ -607,6 +631,7 @@ class Output:
 
     def debug(self, msg: Renderable) -> None:
         """Debug trace. Suppressed unless ``debug_on`` and not json."""
+        self._record("debug", msg)
         if self._silent or self.json or not self.debug_on:
             return
         prefix = self._theme.palette.get("DIM", "")

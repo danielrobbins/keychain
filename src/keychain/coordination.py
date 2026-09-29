@@ -373,6 +373,7 @@ class ActivationOwner:
                         self.waiter.attempt = self.waiter.ignore_attempt = self.attempt
                     # Every existing waiter is notified before a child can be started.
                     self.coord.notify_waiters(self.attempt, "loading")
+            self.coord.out.debug(f"Activation started: attempt={self.attempt}")
             return self
         except BaseException:
             self._cleanup()
@@ -431,7 +432,9 @@ class ActivationOwner:
                     if self._canceled.is_set():
                         return "canceled"
                     self.proc = subprocess.Popen(cmd, **kwargs)
+                self.coord.out.debug(f"ssh-add started: pid={self.proc.pid} attempt={self.attempt}")
                 rc = self.proc.wait()
+                self.coord.out.debug(f"ssh-add exited: pid={self.proc.pid} status={rc} attempt={self.attempt}")
         except OSError as exc:
             self.coord.out.warn(f"ssh-add failed to start: {exc}")
             return "failed"
@@ -450,6 +453,7 @@ class ActivationOwner:
             if not select.select([endpoint.read_fd], [], [], 0.5)[0]:
                 continue
             if endpoint.read_message().get("status") == "cancel":
+                self.coord.out.debug(f"Activation cancellation requested: attempt={self.attempt}")
                 self._canceled.set()
                 self._cancel_child()
                 return

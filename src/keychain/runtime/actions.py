@@ -542,6 +542,7 @@ ROOT_ACTION.add_option(option="--allow-env", cli_aliases=("-E",), type="bool", d
 
 ROOT_ACTION.add_option(option="--quiet", cli_aliases=("-q",), config_section="output")
 ROOT_ACTION.add_option(option="--debug", cli_aliases=("-D",))
+ROOT_ACTION.add_option(option="--debug-log", type="str", metavar="FILE")
 ROOT_ACTION.add_option(
     option="--nocolor",
     cli_aliases=("--no-color",),
