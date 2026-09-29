@@ -81,7 +81,7 @@ For GPG keys, Keychain exercises the requested capability so `gpg-agent` has the
 3. Other terminals wait automatically and are notified when initialization completes.
 4. When notified, waiting terminals print `Keys initialized by another terminal.` and configure their environment without prompting.
 
-*Takeover for stuck prompts.* If the terminal that started `ssh-add` becomes inaccessible (hidden behind other windows, or the passphrase prompt is not visible), you can type `takeover` in any other terminal that is waiting. This cancels the stuck `ssh-add` process and allows the visible terminal to complete the initialization instead. The original terminal will then wait for the takeover to complete.
+*Moving a passphrase request.* If the terminal that started `ssh-add` becomes inaccessible, press Enter at Keychain's waiting prompt in your visible terminal. Keychain cancels the existing request before prompting there and prints a short notice. The original terminal waits for the replacement operation to finish.
 
 *Transitioning from classic lock behavior.* In earlier versions, simultaneous terminal startups would race for a lock, with losers timing out after 5 seconds (or the `--lockwait` value). The new coordination model is fundamentally different: terminals cooperate rather than compete, and all terminals succeed together once any one completes the passphrase entry.
 
@@ -226,7 +226,7 @@ This is intentionally an SSH-only compatibility option. GPG key arguments are ig
 
 == @option immediate: begin coordinated SSH key activation without waiting for Enter
 
-When requested SSH keys are missing, immediately contend for the activation lock instead of displaying `Press Enter to initialize keys`. The activation lock still elects exactly one terminal to run `ssh-add`; other immediate terminals wait for its result and verify that their requested keys became available.
+When requested SSH keys are missing, start `ssh-add` without displaying `Press Enter to initialize keys`. Immediate invocations can prompt independently, so a hidden terminal's passphrase request does not prevent a visible terminal from loading keys. After another terminal completes loading, each invocation checks its own requested keys and cancels its unfinished `ssh-add` if those keys are now available.
 
 This option does not suppress an `ssh-add` passphrase prompt, hide errors, disable coordination, or imply `--quiet`. For quiet automatic shell startup, use:
 
@@ -234,7 +234,7 @@ This option does not suppress an `ssh-add` passphrase prompt, hide errors, disab
 eval "$(keychain add --eval --quiet --immediate id_ed25519)"
 ```
 
-When several terminals use `--immediate`, the terminal that wins the activation lock is nondeterministic. If its `ssh-add` invocation fails, other immediate terminals fail rather than launching successive activation attempts. Regular terminals retain their interactive retry and takeover behavior. To make automatic activation persistent:
+A failed invocation does not cancel other attempts. Terminals requesting different keys can continue independently. Pressing Enter in a regular waiting terminal moves outstanding requests there; canceled invocations wait for that operation instead of immediately starting another prompt. Keychain reports the confirmation and lifetime settings used by a successful load. It does not reconcile differing settings: if the same identity is added again, OpenSSH applies that addition's settings. To make automatic activation persistent:
 
 ```
 [agent]
@@ -482,13 +482,13 @@ This was especially problematic in Visual Studio Code: only one terminal is visi
 
 *The solution (3.0.0_beta2+).* Keychain now uses a coordinated unlock protocol designed specifically for multi-terminal scenarios:
 
-1. *State lock (short-lived).* All terminals acquire a brief lock to check agent state and register as a "waiter" if keys are missing. This lock is held for milliseconds, not seconds.
+1. *State lock (short-lived).* A brief lock protects agent setup and coordination updates, including waiter registration. Agent queries and passphrase entry run outside this lock, so a slow or unanswered prompt does not block those updates.
 
-2. *Activation lock (elects the loader).* When the user presses Enter in any terminal, that terminal tries to acquire the activation lock. Only the winner runs `ssh-add` and prompts for the passphrase.
+2. *Loading and clearing.* Each loading attempt has its own lock. Loading attempts share the activation lock, while SSH clearing requires exclusive access. This permits independent immediate prompts without allowing `wipe` to clear the agent during loading.
 
-3. *FIFO notification (no polling).* Waiting terminals create private FIFO endpoints and block in `select()`. When the loader completes `ssh-add`, it writes to all waiter FIFOs, waking them instantly. No polling loops.
+3. *FIFO notification.* Waiting terminals create private named pipes (FIFOs) and sleep until keyboard input, a notification, or the end of a loading operation wakes them. A loading terminal also listens for cancellation and other terminals' results; it checks the agent before canceling its own redundant prompt.
 
-4. *Takeover mechanism.* If the terminal running `ssh-add` becomes inaccessible (hidden window, stuck prompt), any waiting terminal can type `takeover`. This sends a cancel request to the loader, which terminates its `ssh-add` process and releases the activation lock. The takeover terminal then becomes the loader.
+4. *Moving the request.* Pressing Enter in a waiting terminal asks existing loaders to cancel their requests. Keychain waits for those loading children to exit before starting a replacement and displays a short notice. The canceled terminals wait for the replacement operation.
 
 *User experience.* All terminals that detect missing SSH keys display:
 
@@ -499,8 +499,7 @@ This was especially problematic in Visual Studio Code: only one terminal is visi
 Pressing Enter in any one terminal starts `ssh-add`. Other terminals show:
 
 ```
-keychain: another terminal is unlocking keys on /dev/pts/3
-  Press Enter to keep waiting, or type 'takeover' to unlock here:
+[ Press Enter to move the passphrase request to this terminal ]
 ```
 
 When initialization completes, waiting terminals wake automatically and print:
@@ -509,9 +508,9 @@ When initialization completes, waiting terminals wake automatically and print:
 Keys initialized by another terminal.
 ```
 
-*Automatic activation.* `--immediate` skips Keychain's initial Enter prompt and immediately lets the invoking terminal contend for the same activation lock. It does not bypass coordination: one terminal still runs `ssh-add`, other terminals wait through their FIFO endpoints, and every waiter verifies the resulting agent state. This is useful for unencrypted keys and other shell-startup workflows where Keychain's preliminary Enter prompt is unnecessary. If `ssh-add` requires a passphrase, that interaction appears in whichever terminal won the activation lock.
+*Automatic activation.* `--immediate` skips Keychain's initial Enter prompt. Several terminals can run `ssh-add` at the same time, but you only need to complete a prompt that loads your requested keys. Other invocations check the actual agent after completion notifications and cancel their own redundant prompts. A success message for another terminal's different key request is not enough: each invocation checks its own keys. Failed attempts do not cancel useful prompts elsewhere. The normal Enter prompt remains the default so users can choose where passphrase entry begins.
 
-*Implementation details.* Coordination state is stored in `~/.keychain/<host>.state.json` under the state lock. Waiter FIFOs live in `~/.keychain/<host>-waiters/` with per-process unique names. The activation lock is `~/.keychain/<host>.activation.lock`. Runtime files are private to the current user and are checked before use.
+*Implementation details.* The latest completion record is stored in `~/.keychain/<host>.state.json`; it is not proof that an operation is alive or that keys are loaded. Per-attempt locks, lifetime and cancellation FIFOs, and notification FIFOs live in `~/.keychain/<host>-waiters/`. The shared loading/exclusive clearing lock is `~/.keychain/<host>.activation.lock`. Runtime files are private to the current user and are checked before use.
 
 *Scope.* The coordinated unlock flow applies to SSH key loading only. GPG keys use explicit warm-up paths (`gpgs:`, `gpge:`, `gpga:`) and do not participate in multi-terminal coordination.
 
@@ -531,7 +530,7 @@ Keychain runs with the authority of the invoking user. It assumes the operating 
 
 *--ssh-allow-forwarded.* Adopting a forwarded agent socket on a remote host means the *source* machine -- the laptop you forwarded from -- can sign authentication requests on this host's behalf. That is by design (it's the point of agent forwarding) but it widens the trust boundary. Don't enable on hosts you don't fully control.
 
-*Coordination security (3.0.0_beta2+).* The coordinated unlock protocol uses per-process FIFO endpoints for waiter notification and operating-system advisory locks for ownership. The open activation-lock descriptor is the authoritative liveness signal; PID, hostname, heartbeat, and lock-file contents are not separate ownership mechanisms. If the lock is free while metadata says an activation is active, that metadata is reconciled as stale. A FIFO wakeup only signals a possible state change, so waiters check the agent again before reporting success. `--no-lock` deliberately disables these guarantees.
+*Coordination security.* The coordinated unlock protocol uses private FIFO endpoints for notification and operating-system advisory locks for ownership. Each attempt's held lock establishes that it is active; PID, hostname, heartbeat, and saved file contents do not establish ownership. The shared activation lock prevents SSH clearing during loading. A FIFO wakeup only signals a possible state change, so terminals check the agent before reporting that another attempt supplied their keys. `--no-lock` deliberately disables these guarantees.
 
 *What Keychain does not protect against.* Root, the current user, or a process already able to act as that user can reach or replace user-owned resources. A malicious program selected through `PATH`, an intentionally unsafe command-line or preference-file setting, and a compromised agent are also outside the trust boundary. Any process that can reach an unlocked agent socket may ask it to sign; use agent timeouts, confirmation constraints, screen locking, and careful forwarding policy as appropriate.
 
@@ -545,7 +544,7 @@ Keychain runs with the authority of the invoking user. It assumes the operating 
 
 *Pidfile is the source of truth.* Per-host (so NFS-shared homes work) and per-user (mode 700). Older pidfiles are replaced atomically; no in-place edits. The default managed `ssh-agent` socket lives beside these files as `HOST-agent.sock`.
 
-*Coordinated key loading (3.0.0_beta2+).* When multiple terminals detect missing SSH keys simultaneously, they coordinate via a state file (`<host>.state.json`) and two locks: a short-lived state lock for metadata updates, and an activation lock that elects which terminal runs `ssh-add`. Waiting terminals are notified via FIFO endpoints when initialization completes. See `keychain man topic:coordination`.
+*Coordinated key loading.* A short-lived state lock protects metadata updates. Per-attempt locks identify live loading operations; the activation lock allows concurrent loading but excludes SSH clearing. Waiting terminals are notified through FIFO endpoints and verify the requested keys in the agent. See `keychain man topic:coordination`.
 
 *Agent responsibilities.* Keychain owns `ssh-agent` discovery, startup, and coordination for SSH keys. For native GPG signing and decryption, Keychain invokes `gpg` and leaves `gpg-agent` startup, configuration, pinentry, and lifecycle entirely to GnuPG (this is new as of 3.0.1). It deliberately does not use GnuPG's SSH-agent emulation because adding an SSH key there imports the private key into GnuPG's persistent key store, whose behavior differs from the in-memory model users expect from `ssh-agent`.
 
@@ -599,12 +598,12 @@ One pidfile per host means that homedirs shared over NFS across many machines ea
 
 *Coordination state (3.0.0_beta2+).* For coordinated multi-terminal initialization:
 
-    HOST.state.json      coordination metadata (activation state, waiters)
+    HOST.state.json      latest attempt identifier and recorded outcome
     HOST.state.lock      protects state file and waiter registration
-    HOST.activation.lock elects which terminal runs ssh-add
-    HOST-waiters/        directory for per-process FIFO endpoints
+    HOST.activation.lock shared for loading, exclusive for clearing
+    HOST-waiters/        per-attempt locks and private FIFO endpoints
 
-The coordination state file tracks which terminal is running `ssh-add`, registered waiters, and activation status. All coordination files are mode 0o600 and owner-checked. Waiter FIFOs are named with per-process unique identifiers and cleaned up on exit.
+The coordination state file is a result record, not a list of live processes or registered waiters. Held per-attempt locks identify live operations, and each terminal's notification FIFO is its registration. Coordination files are created with mode 0o600 inside the private keychain directory. Normal cleanup removes the attempt's temporary resources; files left by a terminated process are cleaned up after its lock is no longer held.
 
 == @topic env: Environment emission and shell integration [category=reference, priority=50]
 

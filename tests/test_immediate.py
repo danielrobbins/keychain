@@ -44,7 +44,7 @@ class World:
         self.started[index].set()
         deadline = time.monotonic() + 5
         while not self.release[index].wait(0.01):
-            if owner._canceled.is_set():
+            if owner._canceled.is_set() or owner._satisfied.is_set():
                 return "canceled"
             if time.monotonic() >= deadline:
                 raise RuntimeError("test did not release the loading operation")
@@ -120,6 +120,7 @@ def world(tmp_path, monkeypatch):
         monkeypatch.setattr(ActivationCoordinator, "can_prompt", lambda self: True)
         monkeypatch.setattr(main, "_activation_signals", contextlib.nullcontext)
         monkeypatch.setattr(ActivationOwner, "_run_child", lambda owner, cmd, env: world.run_child(owner, cmd, env))
+        monkeypatch.setattr(SshAddPlan, "keys_available", lambda plan: set(plan.commands[0][1:]).issubset(world.loaded))
         return world
 
     yield make
@@ -155,23 +156,23 @@ def test_activation_winner_rechecks_agent_before_loading(world):
 @pytest.mark.parametrize(
     "owner_immediate,waiter_immediate", [(True, True), (True, False), (False, True), (False, False)]
 )
-def test_owner_waiter_matrix_runs_one_activation(world, owner_immediate, waiter_immediate):
-    w = world(["success"])
+def test_owner_waiter_matrix_cancels_redundant_immediate_prompt(world, owner_immediate, waiter_immediate):
+    w = world(["success", "success"])
     owner = w.start(owner_immediate)
     if not owner_immediate:
         assert owner.waiting.wait(3)
         w.press(owner)
     assert w.started[0].wait(3)
     waiter = w.start(waiter_immediate)
-    assert waiter.waiting.wait(3)
+    assert (w.started[1] if waiter_immediate else waiter.waiting).wait(3)
     w.release[0].set()
     w.finish(owner, waiter)
     assert not owner.errors and not waiter.errors
-    assert len(w.calls) == 1
+    assert len(w.calls) == (2 if waiter_immediate else 1)
 
 
 @pytest.mark.parametrize("owner_immediate", [True, False])
-def test_immediate_waiter_loads_its_different_key_after_owner_succeeds(world, owner_immediate):
+def test_immediate_terminal_can_load_a_different_key_independently(world, owner_immediate):
     w = world(["success", "success"])
     owner = w.start(owner_immediate, keys=["key-A"])
     if not owner_immediate:
@@ -179,10 +180,11 @@ def test_immediate_waiter_loads_its_different_key_after_owner_succeeds(world, ow
         w.press(owner)
     assert w.started[0].wait(3)
     waiter = w.start(True, keys=["key-B"])
-    assert waiter.waiting.wait(3)
-    assert w.calls == [["ssh-add", "key-A"]], "the second load must wait for the first"
+    assert w.started[1].wait(3)
 
     w.release[1].set()
+    w.finish(waiter)
+    assert owner.thread.is_alive(), "loading B must not cancel the still-needed A prompt"
     w.release[0].set()
     w.finish(owner, waiter)
 
@@ -193,21 +195,38 @@ def test_immediate_waiter_loads_its_different_key_after_owner_succeeds(world, ow
 
 
 @pytest.mark.parametrize("owner_immediate", [True, False])
-def test_failure_does_not_cascade_to_immediate_waiter(world, owner_immediate):
-    w = world(["failed"])
+def test_failure_does_not_cancel_another_immediate_attempt(world, owner_immediate):
+    w = world(["failed", "success"])
     owner = w.start(owner_immediate)
     if not owner_immediate:
         assert owner.waiting.wait(3)
         w.press(owner)
     assert w.started[0].wait(3)
     waiter = w.start(True)
-    assert waiter.waiting.wait(3)
+    assert w.started[1].wait(3)
     w.release[0].set()
+    w.finish(owner)
+    assert waiter.thread.is_alive()
+    w.release[1].set()
     w.finish(owner, waiter)
-    assert len(owner.errors) == len(waiter.errors) == 1
+    assert len(owner.errors) == 1 and not waiter.errors
     assert isinstance(owner.errors[0], KeychainError)
-    assert isinstance(waiter.errors[0], KeychainError)
-    assert len(w.calls) == 1
+    assert len(w.calls) == 2
+
+
+def test_partial_success_does_not_cancel_a_terminal_requesting_more_keys(world):
+    w = world(["success", "success"])
+    first = w.start(True, keys=["key-A"])
+    assert w.started[0].wait(3)
+    second = w.start(True, keys=["key-A", "key-B"])
+    assert w.started[1].wait(3)
+    w.release[0].set()
+    w.finish(first)
+    assert second.thread.is_alive()
+    w.release[1].set()
+    w.finish(second)
+    assert not first.errors and not second.errors
+    assert w.loaded == {"key-A", "key-B"}
 
 
 def test_regular_waiter_can_retry_after_immediate_failure(world):
@@ -234,7 +253,7 @@ def test_regular_takeover_hands_immediate_owner_to_new_result(world):
     assert w.started[0].wait(3)
     waiter = w.start(False)
     assert waiter.waiting.wait(3)
-    w.press(waiter, "takeover\n")
+    w.press(waiter)
     assert w.started[1].wait(3)
     w.release[1].set()
     w.finish(owner, waiter)
@@ -255,6 +274,7 @@ def test_late_cancellation_preserves_requesting_terminal_after_timeout(world, mo
 
     def response_times_out(waiter):
         # Leave the real completion message for the next wait, as happens after a slow cancellation.
+        waiter.pending_takeover = set(waiter.watches)
         w.release[0].set()
         assert canceled.wait(3)
         return WaitResult("timeout")
@@ -268,7 +288,7 @@ def test_late_cancellation_preserves_requesting_terminal_after_timeout(world, mo
     assert w.started[0].wait(3)
     waiter = w.start(False)
     assert waiter.waiting.wait(3)
-    w.press(waiter, "takeover\n")
+    w.press(waiter)
     assert w.started[1].wait(3), "the requesting terminal must not require a second Enter after a late cancellation"
     assert w.loaders[1] is waiter
     w.release[1].set()

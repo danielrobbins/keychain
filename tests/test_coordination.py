@@ -184,7 +184,7 @@ class TestWaiters:
         try:
             with coord.activation() as owner:
                 with coord.state_lock():
-                    waiter.attempt, waiter.life_fd = coord.observe()
+                    waiter.watch()
                 path = owner.cancel.fifo_path
                 path.unlink()
                 path.write_text("untouched")
@@ -220,10 +220,10 @@ class TestWaiters:
         try:
             with coord.activation() as owner:
                 with coord.state_lock():
-                    waiter.attempt, waiter.life_fd = coord.observe()
+                    waiter.watch()
                 owner.status = status
                 monkeypatch.setattr(coord, "notify_waiters", lambda *args: None)
-            assert select.select([waiter.life_fd], [], [], 0)[0]
+            assert select.select(list(waiter.watches.values()), [], [], 0)[0]
             assert waiter.wait().message["status"] == status
         finally:
             waiter.cleanup()
@@ -252,10 +252,10 @@ class TestWaiters:
                 lifetime_inode = os.fstat(owner.life.read_fd).st_ino
                 for waiter in waiters:
                     with coord.state_lock():
-                        waiter.attempt, waiter.life_fd = coord.observe()
+                        waiter.watch()
                 owner.status = "success"
             for waiter in waiters:
-                assert select.select([waiter.life_fd], [], [], 0)[0]
+                assert select.select(list(waiter.watches.values()), [], [], 0)[0]
                 assert waiter.wait().message["status"] == "success"
         finally:
             for waiter in waiters:
@@ -265,7 +265,7 @@ class TestWaiters:
         stale = coord.endpoint(f"life.{ATTEMPT}")
         try:
             with coord.state_lock():
-                assert coord.observe() == ("", -1)
+                assert coord.observe() == {}
             assert not stale.fifo_path.exists()
         finally:
             stale.cleanup()
@@ -284,7 +284,7 @@ class TestWaiters:
         monkeypatch.setattr(coordination, "_open_fifo", dying_loader)
         try:
             with coord.state_lock():
-                assert coord.observe() == ("", -1)
+                assert coord.observe() == {}
             assert not owner.life.fifo_path.exists()
         finally:
             owner._cleanup()
@@ -297,6 +297,39 @@ class TestWaiters:
                     waiter.wait(immediate=True)
         finally:
             waiter.cleanup()
+
+    @pytest.mark.parametrize("failure_point", ["first-probe", "open-fifo", "second-probe"])
+    def test_discovery_failure_closes_all_opened_observers(self, coord, monkeypatch, failure_point):
+        opened = []
+        open_fifo = coordination._open_fifo
+        attempt_lock = coord.attempt_lock
+        with coord.activation() as first, coord.activation() as second:
+            target = max(first.attempt, second.attempt)
+            probes = 0
+
+            def checked_probe(attempt):
+                nonlocal probes
+                if attempt == target:
+                    probes += 1
+                    if (failure_point, probes) in (("first-probe", 1), ("second-probe", 2)):
+                        raise PermissionError("probe denied")
+                return attempt_lock(attempt)
+
+            def checked_open(path, mode):
+                if target in path.name and failure_point == "open-fifo":
+                    raise PermissionError("open denied")
+                fd = open_fifo(path, mode)
+                opened.append(fd)
+                return fd
+
+            monkeypatch.setattr(coord, "attempt_lock", checked_probe)
+            monkeypatch.setattr(coordination, "_open_fifo", checked_open)
+            with coord.state_lock(), pytest.raises(KeychainError, match="lifetime notification"):
+                coord.observe()
+            assert opened
+            for fd in opened:
+                with pytest.raises(OSError):
+                    os.fstat(fd)
 
     def test_handoff_timeout_reopens_inactive_activation(self, coord):
         waiter = coord.create_waiter()
@@ -314,6 +347,46 @@ class TestWaiters:
 
 @POSIX
 class TestOwner:
+    @pytest.mark.parametrize("failure", ["query-timeout", "query-error", "observation-error"])
+    def test_verification_failure_does_not_disable_cancellation(self, coord, monkeypatch, capsys, failure):
+        waiter = coord.create_waiter()
+        attempted = threading.Event()
+        stopped = []
+
+        def verify():
+            attempted.set()
+            if failure == "query-timeout":
+                raise subprocess.TimeoutExpired("ssh-add -l", 1)
+            raise OSError("agent unavailable")
+
+        def broken_wait(**_kwargs):
+            attempted.set()
+            raise KeychainError("cannot inspect peer")
+
+        try:
+            with coord.activation(waiter) as owner:
+                owner._keys_available = verify
+                monkeypatch.setattr(owner, "_cancel_child", lambda: stopped.append(True))
+                if failure == "observation-error":
+                    monkeypatch.setattr(waiter, "wait", broken_wait)
+                else:
+                    coordination.WaiterEndpoint.send(
+                        waiter.endpoint.fifo_path, {"attempt": ATTEMPT, "status": "success"}
+                    )
+                owner._thread = threading.Thread(target=owner._cancel_loop, daemon=True)
+                owner._thread.start()
+                assert attempted.wait(3)
+                assert not owner._satisfied.is_set()
+                coordination.WaiterEndpoint.send(owner.cancel.fifo_path, {"status": "cancel"})
+                owner._thread.join(3)
+                assert not owner._thread.is_alive()
+                assert owner._canceled.is_set()
+                assert stopped
+            if failure == "observation-error":
+                assert "Cannot monitor other terminals" in capsys.readouterr().err
+        finally:
+            waiter.cleanup()
+
     def test_new_owner_removes_abandoned_channels_before_publication(self, coord):
         stale = coord.endpoint(f"life.{ATTEMPT}")
         cancel = coord.endpoint(f"cancel.{ATTEMPT}")
@@ -321,7 +394,7 @@ class TestOwner:
             with coord.activation() as owner:
                 assert not stale.fifo_path.exists() and not cancel.fifo_path.exists()
                 with coord.state_lock():
-                    attempt, fd = coord.observe()
+                    attempt, fd = next(iter(coord.observe().items()))
                 try:
                     assert attempt == owner.attempt
                 finally:
@@ -339,14 +412,14 @@ class TestOwner:
                 helper = subprocess.Popen(
                     [sys.executable, "-c", "import sys; sys.stdin.read()"],
                     stdin=subprocess.PIPE,
-                    pass_fds=owner.lock.pass_fds + (owner.life.keepalive_fd,),
+                    pass_fds=owner.pass_fds,
                 )
                 owner.status = "success"
             assert life_path.exists()
             with coord.activation_lock() as lock:
                 assert not lock.acquired
             with coord.state_lock():
-                attempt, fd = coord.observe()
+                attempt, fd = next(iter(coord.observe().items()))
             assert attempt == owner.attempt and fd >= 0
             assert not select.select([fd], [], [], 0)[0]
             helper.communicate(timeout=5)
@@ -354,7 +427,7 @@ class TestOwner:
             with coord.activation_lock() as lock:
                 assert lock.acquired
             with coord.state_lock():
-                assert coord.observe() == ("", -1)
+                assert coord.observe() == {}
             assert not life_path.exists()
         finally:
             if fd >= 0:
@@ -369,7 +442,7 @@ class TestOwner:
         assert coord.create_waiter() is None
         with coord.activation() as owner:
             with coord.state_lock():
-                attempt, fd = coord.observe()
+                attempt, fd = next(iter(coord.observe().items()))
             assert attempt == owner.attempt
             os.close(fd)
             assert owner.run_ssh_add([[sys.executable, "-c", ""]], os.environ.copy()) == "success"
@@ -401,13 +474,13 @@ class TestOwner:
             with pytest.raises(OSError, match="cannot save"):
                 with coord.activation():
                     with coord.state_lock():
-                        waiter.attempt, waiter.life_fd = coord.observe()
+                        waiter.watch()
 
                     def fail(*args):
                         raise OSError("cannot save")
 
                     monkeypatch.setattr(CoordinationState, "save", fail)
-            assert select.select([waiter.life_fd], [], [], 0)[0]
+            assert select.select(list(waiter.watches.values()), [], [], 0)[0]
             assert waiter.wait().message["status"] == "abandoned"
         finally:
             waiter.cleanup()
@@ -460,14 +533,14 @@ class TestOwner:
                 time.sleep(0.01)
             assert marker.exists()
             with coord.state_lock():
-                waiter.attempt, waiter.life_fd = coord.observe()
+                waiter.watch()
             result = waiter.request_takeover()
             thread.join(5)
             assert not thread.is_alive() and not errors
             assert holder[0].proc.poll() is not None
             assert coord.load_state().status == "canceled"
-            assert result.action == "notified", "takeover timed out before child termination finished"
-            assert result.message["status"] == "canceled"
+            assert result.action == "activate", "takeover timed out before child termination finished"
+            assert result.message["takeover"]
         finally:
             if holder:
                 cancel_child(holder[0])
