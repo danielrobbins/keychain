@@ -1,5 +1,14 @@
 # ChangeLog
 
+## 3.0.6
+
+Keychain 3.0.6 focuses on making Keychain's coordinated startup feel natural and get out of your way, building on feedback from people using it in their daily workflows.
+
+- When a passphrase request was waiting in another terminal, moving it to your current terminal required typing `takeover`. Now, simply press Enter at Keychain's waiting prompt to bring the request to the terminal you are using (#263).
+- `--immediate` now works better when several terminals start together: enter your passphrase in the terminal you are using, without being forced to perform an extra `takeover` step to cancel another terminal's request. Keychain cancels redundant requests once the needed keys are loaded. This benefits multi-terminal workflows generally, and is particularly helpful with WSL and systemd, where startup can trigger a passphrase request in a hidden terminal (#260).
+- The key emoji did not display correctly on many Linux terminals because their fonts lacked the required glyph. It has been replaced with a more widely supported arrow and a brief, one-time color animation. The clearer wording, `Press Enter to run ssh-add in this terminal`, explains what the prompt is asking you to do. Terminals that cannot support the animation display a static prompt; it can also be disabled with `animate = false` under `[output]` in `~/.keychainrc`.
+- Startup problems are difficult to diagnose when the shell hides or captures Keychain's output. The new `--debug-log FILE` option records detailed diagnostics without redirecting terminal output or capturing passphrases or private-key contents (#262).
+
 ## 3.0.5
 
 Keychain 3.0.5 focuses on making shell startup more reliable, particularly when several terminals are opened together or key initialization is interrupted. It also gives users and distribution maintainers a clearer choice of startup behavior and improves Python packaging.
