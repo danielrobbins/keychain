@@ -56,7 +56,7 @@ In addition to printing user-friendly output to your terminal, keychain outputs 
 
 These ssh-agent environment variables are also written to `~/.keychain/${HOSTNAME}-sh`, so that subsequent logins and non-interactive shells such as cron jobs can source this file to access the running `ssh-agent` and make passwordless ssh connections using the cached private keys -- even when you are logged out. These files are collectively called *pidfiles*.
 
-*Multi-terminal coordination (3.0.0_beta2+).* When multiple shells start simultaneously, all terminals coordinate automatically. Each displays `Press Enter to initialize keys`. Pressing Enter in any one terminal runs `ssh-add`; other terminals wait and are notified when complete. This eliminates the `could not acquire lock` errors from earlier versions. See `keychain man topic:coordination`.
+*Multi-terminal coordination (3.0.0_beta2+).* When multiple shells start simultaneously, all terminals coordinate automatically. Each displays `Press Enter to run ssh-add in this terminal`. Pressing Enter in any one terminal runs `ssh-add`; other terminals wait and are notified when complete. This eliminates the `could not acquire lock` errors from earlier versions. See `keychain man topic:coordination`.
 
 The key files specified on the command-line will be searched for in the *~/.ssh/* directory, and keychain will expect to find the private key file with the same name, as well as a *.pub* public key. Keychain will also see if any GnuPG keys are specified and, if so, ask GnuPG to exercise the requested operation so any required passphrase is prompted for and cached.
 
@@ -76,7 +76,7 @@ For GPG keys, Keychain exercises the requested capability so `gpg-agent` has the
 
 *Coordinated multi-terminal initialization (3.0.0_beta2+).* When multiple shells start simultaneously, Keychain 3.0.0_beta2+ uses a coordinated unlock protocol instead of the classic lock-timeout approach:
 
-1. All terminals that detect missing SSH keys display: `Press Enter to initialize keys`.
+1. All terminals that detect missing SSH keys display: `Press Enter to run ssh-add in this terminal`.
 2. Pressing Enter in *any* terminal designates it to run `ssh-add`.
 3. Other terminals wait automatically and are notified when initialization completes.
 4. When notified, waiting terminals print `Keys initialized by another terminal.` and configure their environment without prompting.
@@ -226,7 +226,7 @@ This is intentionally an SSH-only compatibility option. GPG key arguments are ig
 
 == @option immediate: begin coordinated SSH key activation without waiting for Enter
 
-When requested SSH keys are missing, start `ssh-add` without displaying `Press Enter to initialize keys`. Immediate invocations can prompt independently, so a hidden terminal's passphrase request does not prevent a visible terminal from loading keys. After another terminal completes loading, each invocation checks its own requested keys and cancels its unfinished `ssh-add` if those keys are now available.
+When requested SSH keys are missing, start `ssh-add` without displaying `Press Enter to run ssh-add in this terminal`. Immediate invocations can prompt independently, so a hidden terminal's passphrase request does not prevent a visible terminal from loading keys. After another terminal completes loading, each invocation checks its own requested keys and cancels its unfinished `ssh-add` if those keys are now available.
 
 This option does not suppress an `ssh-add` passphrase prompt, hide errors, disable coordination, or imply `--quiet`. For quiet automatic shell startup, use:
 
@@ -413,6 +413,12 @@ Disable ANSI color output. Useful when piping to a tool that doesn't strip escap
 
 Select the color / glyph theme. `legacy` is the keychain 2.x output style; `modern` is the 3.0 default. A once-forever lifestyle preference; usually set in `~/.keychainrc`.
 
+== @config output.animate: animate the initial activation prompt
+
+The default is `true`. On a suitable color terminal, the complete activation prompt appears immediately, then changes from subdued text to its final colors from left to right over about half a second. This happens once; it does not repeat while Keychain waits. Enter works throughout, and the animation does not delay coordination events.
+
+Set `animate = false` under `[output]` in `~/.keychainrc` for a static prompt with the same final colors. There is no corresponding command-line option. Disabled color, redirected output, an unsuitable terminal, or insufficient or unknown terminal width also produce a static prompt. Required prompts remain visible with `--quiet`.
+
 == @global no-gui: don't use GUI passphrase prompts
 
 Don't use GUI passphrase prompts (DISPLAY / SSH_ASKPASS). Force a TTY prompt instead. A once-forever lifestyle preference for headless or screen-shared environments.
@@ -493,13 +499,13 @@ This was especially problematic in Visual Studio Code: only one terminal is visi
 *User experience.* All terminals that detect missing SSH keys display:
 
 ```
-[ 🔑 Press Enter to initialize keys 🔑 ]
+ ▸ Press Enter to run ssh-add in this terminal
 ```
 
 Pressing Enter in any one terminal starts `ssh-add`. Other terminals show:
 
 ```
-[ Press Enter to move the passphrase request to this terminal ]
+ ▸ Press Enter to move the passphrase request to this terminal
 ```
 
 When initialization completes, waiting terminals wake automatically and print:

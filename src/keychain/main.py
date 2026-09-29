@@ -492,6 +492,7 @@ def main(argv: list[str] | None = None) -> None:
             json=bool(args.get_value("json")),
             color_stream=sys.stdout if args.action == "man" else None,
             debug_log=args.get_value("debug_log"),
+            animate=bool(args.get_value("animate")),
         )
     except KeychainError as exc:
         print(f"Error: {exc}", file=sys.stderr)

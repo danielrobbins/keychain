@@ -554,6 +554,13 @@ ROOT_ACTION.add_option(
 )
 ROOT_ACTION.add_option(option="--theme", type="str", default="modern", config_section="output")
 ROOT_ACTION.add_option(
+    varname="animate",
+    type="bool",
+    default=True,
+    config_section="output",
+    config_doc_tag="config:output.animate",
+)
+ROOT_ACTION.add_option(
     option="--no-gui",
     cli_aliases=("--nogui",),
     config_section="output",

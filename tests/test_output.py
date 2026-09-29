@@ -229,7 +229,7 @@ def test_ephemeral_prompt_bypasses_quiet(monkeypatch, capsys):
 
 def test_ephemeral_line_uses_clearable_terminal_control(monkeypatch, capsys):
     monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
-    monkeypatch.setattr(output_core.shutil, "get_terminal_size", lambda fallback: os.terminal_size((120, 24)))
+    monkeypatch.setattr(Output, "terminal_size", lambda self: os.terminal_size((120, 24)))
     monkeypatch.setenv("TERM", "xterm-256color")
     out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
 
@@ -241,7 +241,7 @@ def test_ephemeral_line_uses_clearable_terminal_control(monkeypatch, capsys):
 
 def test_ephemeral_line_can_clear_after_input_echo(monkeypatch, capsys):
     monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
-    monkeypatch.setattr(output_core.shutil, "get_terminal_size", lambda fallback: os.terminal_size((120, 24)))
+    monkeypatch.setattr(Output, "terminal_size", lambda self: os.terminal_size((120, 24)))
     monkeypatch.setenv("TERM", "xterm-256color")
     out = Output.build(quiet=False, debug=False, eval_mode=False, color=False)
 
@@ -259,6 +259,144 @@ def test_ephemeral_line_falls_back_for_non_tty(monkeypatch, capsys):
     assert out.ephemeral_line("prompt") is False
 
     assert capsys.readouterr().err == "prompt\n"
+
+
+@pytest.mark.parametrize("after_input", [False, True])
+def test_prompt_redraw_keeps_cursor_after_trailing_space(monkeypatch, capsys, after_input):
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+    monkeypatch.setattr(Output, "terminal_size", lambda self: os.terminal_size((120, 24)))
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+    assert out.ephemeral_line("Press Enter ")
+    assert out.ephemeral_line("Press Enter ", redraw=True)
+    out.clear_ephemeral_line(after_input=after_input)
+    expected = "\r\x1b[2KPress Enter \x1b7\rPress Enter \x1b8"
+    expected += ("\x1b[1A" if after_input else "") + "\r\x1b[2K"
+    assert capsys.readouterr().err == expected
+
+
+@pytest.mark.parametrize(
+    "animate,fits,color,count",
+    [(True, True, True, 13), (False, True, True, 1), (True, False, True, 1), (True, True, False, 1)],
+)
+def test_prompt_fade_keeps_all_text_visible(monkeypatch, animate, fits, color, count):
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    monkeypatch.setattr(output_core, "stderr_supports_unicode", lambda: True)
+    monkeypatch.setattr(Output, "_can_use_ephemeral_line", lambda self, text: fits)
+    out = Output.build(quiet=False, debug=False, eval_mode=False, color=color)
+    message = "to run ssh-add in this terminal"
+    frames = out.activation_prompt_frames(message, animate=animate)
+    assert len(frames) == count
+    prefix = f" {out.glyph('prompt')} "
+    assert frames[-1] == f"{prefix}{out.warn_text('Press Enter')} {message} "
+    assert all(output_core.strip_ansi(frame) == output_core.strip_ansi(frames[-1]) for frame in frames)
+    if count > 1:
+        assert frames[0] == f"{prefix}{out.dim('Press Enter ' + message)} "
+
+
+def test_prompt_animation_opt_out_preserves_color(monkeypatch):
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    monkeypatch.setattr(Output, "_can_use_ephemeral_line", lambda self, text: True)
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=True, animate=False)
+    frames = out.activation_prompt_frames("to run ssh-add in this terminal", animate=True)
+    assert len(frames) == 1
+    assert str(out.warn_text("Press Enter")) in frames[0]
+    assert "\x1b[" in frames[0]
+
+
+def test_prompt_timing_skips_overdue_frames_and_stops(monkeypatch, capsys):
+    monkeypatch.setattr(output_core.sys.stderr, "fileno", lambda: 2)
+    now = [10.0]
+    monkeypatch.setattr(output_core.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(Output, "terminal_size", lambda self: os.terminal_size((100, 24)))
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=True)
+    prompt = output_core.ActivationPrompt(out, "to run ssh-add in this terminal", animate=True)
+    assert prompt.delay() == pytest.approx(0.04)
+    now[0] += 0.25
+    prompt.redraw()
+    assert prompt.frame == 6
+    assert prompt.delay() == pytest.approx(0.03)
+    now[0] += 0.5
+    prompt.redraw()
+    assert prompt.frame == 12
+    assert prompt.delay() is None
+    assert capsys.readouterr().out == ""
+
+
+def test_resized_prompt_becomes_static_without_erasing_wrapped_lines(monkeypatch, capsys):
+    monkeypatch.setattr(output_core.sys.stderr, "fileno", lambda: 2)
+    size = [os.terminal_size((100, 24))]
+    monkeypatch.setattr(Output, "terminal_size", lambda self: size[0])
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+    monkeypatch.setattr(os, "isatty", lambda fd: True)
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=True)
+    prompt = output_core.ActivationPrompt(out, "to run ssh-add in this terminal", animate=True)
+    capsys.readouterr()
+    size[0] = os.terminal_size((20, 24))
+    prompt.redraw()
+    prompt.clear(after_input=True)
+    assert capsys.readouterr().err == f"\n{prompt.frames[-1]}\n"
+    assert prompt.delay() is None
+
+
+def test_geometry_uses_stderr_not_environment(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "999")
+    calls = []
+
+    def size(fd):
+        calls.append(fd)
+        return os.terminal_size((20, 24))
+
+    monkeypatch.setattr(os, "get_terminal_size", size)
+    with monkeypatch.context() as patch:
+        patch.setattr(output_core.sys.stderr, "fileno", lambda: 42)
+        assert Output().terminal_size().columns == 20
+        assert calls == [42]
+
+
+def test_unknown_geometry_disables_line_control(monkeypatch):
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+
+    def unavailable(fd):
+        raise OSError("not a terminal")
+
+    monkeypatch.setattr(os, "get_terminal_size", unavailable)
+    assert not Output()._can_use_ephemeral_line("Press Enter")
+
+
+@pytest.mark.parametrize("fallback", [None, "legacy", "encoding", "no-color", "non-tty", "json"])
+def test_prompt_glyphs_respect_output_policy(monkeypatch, fallback):
+    monkeypatch.setattr(os, "isatty", lambda fd: fallback != "non-tty")
+    monkeypatch.setattr(output_core, "stderr_supports_unicode", lambda: fallback != "encoding")
+    out = Output.build(
+        quiet=False,
+        debug=False,
+        eval_mode=False,
+        color=fallback != "no-color",
+        theme="legacy" if fallback == "legacy" else "modern",
+        json=fallback == "json",
+    )
+    expected = ">" if fallback else "\u25b8"
+    assert out.glyph("prompt") == expected
+    assert output_core.strip_ansi(out.glyph("info")) == ("*" if fallback else "\u25b8")
+    assert output_core.strip_ansi(out.glyph("bar")) == ("|" if fallback else "\u258c")
+
+
+@pytest.mark.parametrize("columns,clearable", [(18, False), (19, False), (20, True)])
+def test_prompt_width_controls_line_clearing(monkeypatch, capsys, columns, clearable):
+    monkeypatch.setattr(Output, "_terminal_control_enabled", lambda self: True)
+    monkeypatch.setattr(Output, "terminal_size", lambda self: os.terminal_size((columns, 24)))
+    out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+    prompt = " \u25b8 \x1b[33mPress Enter\x1b[0m "
+    assert output_core._visible_width(prompt) == 15
+    assert out.ephemeral_line(prompt) is clearable
+    assert capsys.readouterr().err == (f"\r\x1b[2K{prompt}" if clearable else f"{prompt}\n")
+
+
+@pytest.mark.parametrize("text,width", [(" \u25b8 Enter...", 11), ("Enter", 5), ("e\u0301", 1)])
+def test_prompt_width_for_text_glyphs(text, width):
+    assert output_core._visible_width(text) == width
 
 
 def test_info_suppressed_under_json(capsys):

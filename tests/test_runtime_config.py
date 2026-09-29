@@ -557,3 +557,20 @@ def test_apply_keychainrc_inverted_bool_true_keeps_positive_behavior(tmp_path, m
     args = RuntimeConfig.resolve(["-E"])
 
     assert args.get_value("nocolor") is False
+
+
+@pytest.mark.parametrize("setting,expected", [(None, True), ("false", False), ("true", True)])
+def test_animation_config_resolution(tmp_path, setting, expected):
+    if setting is not None:
+        (tmp_path / ".keychainrc").write_text(f"[output]\nanimate = {setting}\n")
+    args = RuntimeConfig.resolve(["add"])
+    args.apply_keychainrc({"HOME": str(tmp_path)})
+    assert args.get_value("animate") is expected
+    assert args.diagnostics()["effective"]["output.animate"]["source"] == (
+        "default" if setting is None else "keychainrc"
+    )
+
+
+def test_animation_is_config_only():
+    args = RuntimeConfig.resolve(["add", "--animate"])
+    assert args.parse_error and "Unrecognized option" in args.parse_error
