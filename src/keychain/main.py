@@ -480,17 +480,30 @@ def main(argv: list[str] | None = None) -> None:
 
         sys.exit(docs.run_explain(argv))
 
-    out = Output.build(
-        quiet=bool(args.get_value("quiet")) or args.action == "env",
-        debug=bool(args.get_value("debug")),
-        eval_mode=bool(args.get_value("eval")),
-        color=not bool(args.get_value("nocolor")),
-        theme=args.get_value("theme"),
-        json=bool(args.get_value("json")),
-        color_stream=sys.stdout if args.action == "man" else None,
-    )
+    try:
+        out = Output.build(
+            quiet=bool(args.get_value("quiet")) or args.action == "env",
+            debug=bool(args.get_value("debug")),
+            eval_mode=bool(args.get_value("eval")),
+            color=not bool(args.get_value("nocolor")),
+            theme=args.get_value("theme"),
+            json=bool(args.get_value("json")),
+            color_stream=sys.stdout if args.action == "man" else None,
+            debug_log=args.get_value("debug_log"),
+        )
+    except KeychainError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        _emit_eval_failure(bool(args.get_value("eval")))
+        sys.exit(1)
+    try:
+        _run(args, out)
+    finally:
+        out.close()
 
-    if out.debug_on:
+
+def _run(args: RuntimeConfig, out: Output) -> None:
+    out.debug(f"keychain {__version__}; action={args.action}")
+    if out.debug_enabled:
         configuration = args.diagnostics()
         overrides = ", ".join(
             f"{key}={entry['value']!r} ({entry['source']})"

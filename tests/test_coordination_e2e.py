@@ -236,6 +236,24 @@ def test_immediate_recovers_after_loading_process_is_killed(activation_session, 
     session.unlock(restarted)
 
 
+def test_debug_log_records_real_loading_without_recording_passphrase(activation_session):
+    session = activation_session
+    path = session.home / "debug.log"
+    session.options.extend(["--debug-log", str(path)])
+    terminal = session.start(quiet=True)
+    session.unlock(terminal)
+    content = path.read_text()
+    assert f"pid={terminal.proc.pid} tty=/dev/" in content
+    assert "ssh-add started:" in content
+    assert "ssh-add exited:" in content
+    assert "status=0" in content
+    assert PASSPHRASE not in content
+    assert "PRIVATE KEY" not in content
+    assert "Enter passphrase" not in content
+    assert "\x1b" not in content
+    assert b"ssh-add started:" not in terminal.output
+
+
 def test_waiting_terminal_recovers_when_loading_process_is_killed(activation_session):
     """The owner can also disappear after another terminal has begun waiting."""
     session = activation_session

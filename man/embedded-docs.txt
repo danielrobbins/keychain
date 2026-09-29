@@ -393,6 +393,18 @@ Silence routine Keychain messages and successful `ssh-add` reports. Required int
 
 Emit extra details about agent-discovery decision keychain makes: which pidfile candidates were considered, which sockets were probed, why one was selected, what `ssh -G` returned for each `host:` extkey, etc.
 
+== @global debug-log: append diagnostics to a private file
+
+Use `--debug-log FILE` to collect Keychain diagnostics during shell or graphical-login startup without redirecting terminal output. The file receives diagnostic details even without `--debug`, including routine messages hidden by `--quiet`. Normal console output and the shell assignments produced by `--eval` are unchanged.
+
+Records are plain text and include a UTC timestamp, process ID, and terminal name (`none` when unavailable). Existing records are preserved. The parent directory must already exist; the log must be a regular file owned by you, not a symlink or hard link. Keychain creates the file with private permissions and restricts an existing file to owner read/write access.
+
+```
+eval "$(keychain add --eval --debug-log ~/.keychain/debug.log id_ed25519)"
+```
+
+The log records Keychain's decisions, not terminal input, passphrases, or private-key contents. It does not capture prompts that `ssh-add` writes directly to its terminal. Review paths and configuration details before sharing a log in a bug report. Remove the option when troubleshooting is complete; Keychain does not rotate the log.
+
 == @global nocolor: disable ANSI color output
 
 Disable ANSI color output. Useful when piping to a tool that doesn't strip escape codes, or in log capture where color bytes muddy the file. The conventional `$NO_COLOR` environment variable (https://no-color.org) is also honored; the flag wins when both are set. `--no-color` is an accepted alias.
