@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .output.core import Output
+from .output.core import ActivationPrompt, Output
 from .paths import KeychainPaths
 from .util import KeychainError, LockFile, unlink_quiet
 
@@ -256,6 +256,7 @@ class ActivationWaiter:
         self.ignore_attempt = ""
         self.pending_takeover: set[str] = set()
         self._seen: set[str] = set()
+        self._prompt_shown = False
 
     def _close_watch(self) -> None:
         for fd in self.watches.values():
@@ -335,27 +336,37 @@ class ActivationWaiter:
                             if gate.acquired:
                                 return WaitResult("activate")
 
-                prompt = False
+                prompt = None
                 if tty is not None and not handoff:
                     text = (
-                        "Press Enter to move the passphrase request to this terminal"
+                        "to move the passphrase request to this terminal"
                         if active
-                        else "Press Enter to initialize keys"
+                        else "to run ssh-add in this terminal"
                     )
-                    prompt = self.coord.out.ephemeral_line(
-                        self.coord.out.warn_text(
-                            f"[ {self.coord.out.glyph('key')} {text} {self.coord.out.glyph('key')} ]"
-                        )
-                    )
+                    prompt = ActivationPrompt(self.coord.out, text, animate=not self._prompt_shown)
+                    self._prompt_shown = True
                 fds = [self.endpoint.read_fd, *self.watches.values()]
                 if wake_fd is not None:
                     fds.append(wake_fd)
                 if tty is not None and not handoff:
                     fds.append(tty.fileno())
-                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-                ready, _, _ = select.select(fds, [], [], remaining)
-                if prompt:
-                    self.coord.out.clear_ephemeral_line(after_input=tty.fileno() in ready if tty else False)
+                line = ""
+                try:
+                    # Display deadlines never trigger another shared-state check.
+                    while True:
+                        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                        delay = prompt.delay() if prompt else None
+                        interval = remaining if delay is None else delay if remaining is None else min(delay, remaining)
+                        ready, _, _ = select.select(fds, [], [], interval)
+                        if ready or delay is None or (deadline is not None and time.monotonic() >= deadline):
+                            break
+                        if prompt:
+                            prompt.redraw()
+                    if tty is not None and tty.fileno() in ready:
+                        line = tty.readline()
+                finally:
+                    if prompt and line in ("", "\n"):
+                        prompt.clear(after_input=line == "\n")
                 if not ready:
                     return WaitResult("activate" if handoff and not active else "timeout")
                 if wake_fd is not None and wake_fd in ready:
@@ -363,7 +374,6 @@ class ActivationWaiter:
                 if self.endpoint.read_fd in ready or any(fd in ready for fd in self.watches.values()):
                     continue
                 if tty is not None:
-                    line = tty.readline()
                     if not line:
                         raise KeychainError("Terminal closed while waiting to initialize keys")
                     if not active:

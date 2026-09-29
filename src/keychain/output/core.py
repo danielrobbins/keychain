@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sys
 import threading
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TextIO, Union
+from unicodedata import combining, east_asian_width
 
 from .debug import DebugLog
 
@@ -136,7 +137,7 @@ _GLYPHS_MODERN: dict[str, str] = {
     "debug": "\u22ef",  # ⋯
     "bar": "\u258c",  # ▌
     "arrow": "\u21b3",  # ↳
-    "key": "\U0001f511",  # 🔑
+    "prompt": "\u25b8",  # ▸
 }
 _GLYPHS_ASCII: dict[str, str] = {
     "info": "*",
@@ -147,7 +148,7 @@ _GLYPHS_ASCII: dict[str, str] = {
     "debug": ":",
     "bar": "|",
     "arrow": ">",
-    "key": "~",
+    "prompt": ">",
 }
 # Glyph -> palette color role (used to color the glyph itself).
 _GLYPH_COLOR: dict[str, str] = {
@@ -305,7 +306,8 @@ def _strip_doc_inline(text: str) -> str:
 
 
 def _visible_width(text: str) -> int:
-    return len(strip_ansi(text))
+    # Prompt glyphs are individual characters; wide emoji occupy two cells.
+    return sum(0 if combining(ch) else 2 if east_asian_width(ch) in ("W", "F") else 1 for ch in strip_ansi(text))
 
 
 @dataclass(frozen=True)
@@ -322,6 +324,7 @@ class Output:
     debug_on: bool = False
     eval_mode: bool = False
     json: bool = False
+    animate: bool = True
     theme: str = DEFAULT_THEME
     # Active Theme. Internal; call sites use role helpers / emitters.
     _theme: Theme = field(default=_NULL_THEME, repr=False)
@@ -343,6 +346,7 @@ class Output:
         json: bool = False,
         color_stream: TextIO | None = None,
         debug_log: str | None = None,
+        animate: bool = True,
     ) -> Output:
         # Theme is set exclusively via --theme CLI flag; no env var override.
         chosen = resolve_theme_name(theme)
@@ -374,6 +378,7 @@ class Output:
             debug_on=debug,
             eval_mode=eval_mode,
             json=json,
+            animate=animate,
             theme=chosen,
             _theme=active,
             _log=DebugLog(debug_log) if debug_log else None,
@@ -569,12 +574,28 @@ class Output:
         if not self._silent:
             print(_stringify(msg), file=sys.stderr)
 
-    def ephemeral_line(self, msg: Renderable) -> bool:
+    def activation_prompt_frames(self, message: str, *, animate: bool) -> tuple[str, ...]:
+        prefix = f" {self.glyph('prompt')} "
+        lead = "Press Enter"
+        body = f"{lead} {message}"
+        final = f"{prefix}{self.warn_text(lead)} {message} "
+        if not self.animate or not animate or not self._theme.roles["dim"] or not self._can_use_ephemeral_line(final):
+            return (final,)
+        frames = []
+        for step in range(13):
+            end = len(body) * step // 12
+            yellow = str(self.warn_text(body[: min(end, len(lead))])) if end else ""
+            plain = body[len(lead) : end]
+            grey = str(self.dim(body[end:])) if end < len(body) else ""
+            frames.append(f"{prefix}{yellow}{plain}{grey} ")
+        return tuple(frames)
+
+    def ephemeral_line(self, msg: Renderable, *, redraw: bool = False) -> bool:
         """Render a clearable stderr line for interactive prompts.
 
-        Returns ``True`` when the line was emitted without a newline and can be
-        cleared by :meth:`clear_ephemeral_line`. When terminal control is not
-        safe, falls back to :meth:`result` and returns ``False``.
+        Returns ``True`` when the line can be cleared without wrapping.
+        Redraw replaces the previous frame without recording it again.
+        When terminal control is unsafe, prints a static line and returns False.
         """
         if self._silent:
             return False
@@ -582,8 +603,10 @@ class Output:
         if not self._can_use_ephemeral_line(text):
             self.result(text)
             return False
-        self._record("prompt", text)
-        sys.stderr.write(f"\r\x1b[2K{text}")
+        if not redraw:
+            self._record("prompt", text)
+        # Recolor fixed-width text without erasing echoed input or moving its cursor.
+        sys.stderr.write(f"\x1b7\r{text}\x1b8" if redraw else f"\r\x1b[2K{text}")
         sys.stderr.flush()
         return True
 
@@ -654,8 +677,14 @@ class Output:
     def _can_use_ephemeral_line(self, text: str) -> bool:
         if not self._terminal_control_enabled():
             return False
-        columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+        columns = self.terminal_size().columns
         return _visible_width(text) < max(1, columns - 4)
+
+    def terminal_size(self) -> os.terminal_size:
+        try:
+            return os.get_terminal_size(sys.stderr.fileno())
+        except (OSError, ValueError):
+            return os.terminal_size((0, 0))
 
     def _terminal_control_enabled(self) -> bool:
         if self.json:
@@ -664,6 +693,45 @@ class Output:
         if not term or term == "dumb":
             return False
         try:
-            return bool(os.isatty(sys.stderr.fileno()))
-        except (OSError, ValueError):
+            import termios
+        except ImportError:
             return False
+        try:
+            fd = sys.stderr.fileno()
+            if not os.isatty(fd):
+                return False
+            flags = termios.tcgetattr(fd)[3]
+            return flags & (termios.ICANON | termios.ECHO) == (termios.ICANON | termios.ECHO)
+        except (termios.error, OSError, ValueError):
+            return False
+
+
+class ActivationPrompt:
+    """One prompt display; timing and terminal redraws never drive coordination."""
+
+    def __init__(self, out: Output, message: str, *, animate: bool):
+        self.out = out
+        self.frames = out.activation_prompt_frames(message, animate=animate)
+        self.size = out.terminal_size()
+        self.started = time.monotonic()
+        self.frame = 0
+        self.clearable = out.ephemeral_line(self.frames[0])
+
+    def delay(self) -> float | None:
+        if not self.clearable or self.frame == len(self.frames) - 1:
+            return None
+        return max(0.0, self.started + (self.frame + 1) * 0.04 - time.monotonic())
+
+    def redraw(self) -> None:
+        if self.out.terminal_size() != self.size:
+            # A wrapped old prompt cannot be safely erased. Leave it in scrollback.
+            if not self.out._silent:
+                print(f"\n{self.frames[-1]}", file=sys.stderr, flush=True)
+            self.clearable = False
+            return
+        self.frame = min(len(self.frames) - 1, int((time.monotonic() - self.started) / 0.04))
+        self.clearable = self.out.ephemeral_line(self.frames[self.frame], redraw=True)
+
+    def clear(self, *, after_input: bool = False) -> None:
+        if self.clearable and self.out.terminal_size() == self.size:
+            self.out.clear_ephemeral_line(after_input=after_input)

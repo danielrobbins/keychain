@@ -19,13 +19,15 @@ import pytest
 
 from keychain.coordination import ActivationLock
 from keychain.env import SshAgentRef
-from keychain.output.core import Output
+from keychain.output.core import THEMES, Output
 from keychain.paths import KeychainPaths
 from keychain.runtime import platform
 from keychain.util import LockFile
 
 if os.name != "nt":
+    import fcntl
     import pty
+    import struct
     import termios
 
 pytestmark = pytest.mark.skipif(
@@ -51,6 +53,7 @@ class Terminal:
     def __init__(self, command: list[str], env: dict[str, str], peers: list[Terminal]):
         self.peers = peers
         self.fd, slave = pty.openpty()
+        self.resize(int(env.get("COLUMNS", "100")))
         self.output = b""
         try:
             self.proc = subprocess.Popen(
@@ -61,6 +64,9 @@ class Terminal:
             raise
         finally:
             os.close(slave)
+
+    def resize(self, columns: int) -> None:
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
 
     def read(self, timeout: float = 0.05) -> None:
         # Real terminal windows drain output even while another window has focus.
@@ -417,11 +423,119 @@ def test_orphaned_ssh_add_keeps_lock_and_notifies_on_exit(activation_session, im
 def test_prompt_remains_visible_and_waits_for_input(activation_session, quiet):
     session = activation_session
     terminal = session.start(immediate=False, quiet=quiet)
-    terminal.expect("Press Enter to initialize keys")
+    terminal.expect(" > Press Enter to run ssh-add in this terminal ")
     assert b"Enter passphrase" not in terminal.output
     assert b"Keys need initialization" not in terminal.output
     terminal.send("\n")
     session.unlock(terminal)
+
+
+@pytest.mark.parametrize("columns", [30, 100], ids=["narrow", "wide"])
+@pytest.mark.parametrize("active", [False, True], ids=["initial", "takeover"])
+def test_prompt_glyph_and_clearing(activation_session, columns, active):
+    session = activation_session
+    session.options.remove("--no-color")
+    session.env.pop("NO_COLOR", None)
+    session.env.update(PYTHONIOENCODING="utf-8", COLUMNS=str(columns), LINES="24")
+    owner = session.start(quiet=True) if active else None
+    if owner:
+        owner.expect("Enter passphrase")
+    terminal = session.start(immediate=False, quiet=True)
+    glyph = "\u25b8"
+    highlighted = THEMES["modern"].render("warn", "Press Enter")
+    text = "to move the passphrase request to this terminal" if active else "to run ssh-add in this terminal"
+    terminal.expect(f" {glyph} {highlighted} {text} ")
+    if columns == 100 and not active:
+        grey = THEMES["modern"].render("dim", f"Press Enter {text}")
+        assert f" {glyph} {grey} ".encode() in terminal.output
+        length = len(terminal.output)
+        terminal.read(0.8)
+        assert len(terminal.output) == length, "animation must finish rather than repeat"
+    assert b"Enter passphrase" not in terminal.output
+    terminal.send("\n")
+    session.unlock(terminal)
+    if owner:
+        owner.finish()
+    assert (b"\x1b[1A\r\x1b[2K" in terminal.output) == (columns == 100)
+    assert b"\x1b[?25l" not in terminal.output
+
+
+@pytest.mark.parametrize("event", ["enter", "typed", "eof", "resize", "cancel", "complete"])
+def test_fade_remains_interruptible(activation_session, event):
+    session = activation_session
+    session.options.remove("--no-color")
+    session.env.pop("NO_COLOR", None)
+    session.env["PYTHONIOENCODING"] = "utf-8"
+    log = session.home / "prompt.log"
+    owner = session.start(quiet=True) if event == "complete" else None
+    if owner:
+        owner.expect("Enter passphrase")
+    terminal = session.start(immediate=False, quiet=True, extra_options=("--debug-log", str(log)))
+    message = "to move the passphrase request to this terminal" if owner else "to run ssh-add in this terminal"
+    terminal.expect(THEMES["modern"].render("dim", f"Press Enter {message}"))
+    if event == "eof":
+        terminal.send("\x04")
+        terminal.finish(success=False)
+        assert b"\x1b[1A" not in terminal.output
+        assert b"Terminal closed while waiting" in terminal.output
+    elif event == "cancel":
+        terminal.interrupt(signal.SIGINT)
+        assert termios.tcgetattr(terminal.fd)[3] & termios.ECHO
+    elif owner:
+        session.unlock(owner)
+        terminal.finish()
+        assert b"Enter passphrase" not in terminal.output
+    else:
+        if event == "resize":
+            terminal.resize(20)
+            terminal.expect(THEMES["modern"].render("warn", "Press Enter"))
+        elif event == "typed":
+            terminal.send("testing")
+            terminal.expect("testing")
+            terminal.expect(THEMES["modern"].render("warn", "Press Enter") + " to run ssh-add in this terminal ")
+        terminal.send("\n")
+        session.unlock(terminal)
+        if event == "resize":
+            assert b"\x1b[1A" not in terminal.output
+    assert log.read_text().count("Press Enter") == 1
+
+
+@pytest.mark.parametrize("reason", ["config", "no-echo"])
+def test_static_prompt_keeps_final_color_and_accepts_enter(activation_session, reason):
+    session = activation_session
+    session.options.remove("--no-color")
+    session.env.pop("NO_COLOR", None)
+    session.env["PYTHONIOENCODING"] = "utf-8"
+    bootstrap = ""
+    if reason == "config":
+        (session.home / ".keychainrc").write_text("[output]\nanimate = false\n")
+    else:
+        bootstrap = "attrs = termios.tcgetattr(0); attrs[3] &= ~termios.ECHO; termios.tcsetattr(0, termios.TCSANOW, attrs)"
+    terminal = session.start(immediate=False, quiet=True, bootstrap=bootstrap)
+    terminal.expect(THEMES["modern"].render("warn", "Press Enter") + " to run ssh-add in this terminal ")
+    assert THEMES["modern"].render("dim", "Press Enter").encode() not in terminal.output
+    terminal.send("\n")
+    session.unlock(terminal)
+    assert b"\x1b7" not in terminal.output
+    if reason == "no-echo":
+        assert b"\x1b[1A" not in terminal.output
+
+
+def test_prompt_fade_does_not_replay_after_coordination_changes(activation_session):
+    session = activation_session
+    session.options.remove("--no-color")
+    session.env.pop("NO_COLOR", None)
+    session.env["PYTHONIOENCODING"] = "utf-8"
+    owner = session.start(quiet=True)
+    owner.expect("Enter passphrase")
+    waiter = session.start(immediate=False, quiet=True)
+    grey = THEMES["modern"].render("dim", "Press Enter to move the passphrase request to this terminal")
+    waiter.expect(grey)
+    owner.interrupt(signal.SIGKILL)
+    waiter.expect(THEMES["modern"].render("warn", "Press Enter") + " to run ssh-add in this terminal ")
+    assert THEMES["modern"].render("dim", "Press Enter to run ssh-add in this terminal").encode() not in waiter.output
+    waiter.send("\n")
+    session.unlock(waiter)
 
 
 def test_regular_waiter_returns_to_prompt_after_owner_is_killed(activation_session):
@@ -431,7 +545,7 @@ def test_regular_waiter_returns_to_prompt_after_owner_is_killed(activation_sessi
     waiter = session.start(immediate=False)
     waiter.expect("Press Enter to move")
     owner.interrupt(signal.SIGKILL)
-    waiter.expect("Press Enter to initialize keys")
+    waiter.expect("Press Enter to run ssh-add in this terminal")
     assert b"Enter passphrase" not in waiter.output
     waiter.send("\n")
     session.unlock(waiter)

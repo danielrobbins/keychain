@@ -154,9 +154,9 @@ When multiple terminals start simultaneously (like when VS Code reconnects to WS
 **Keychain 3 supports a new, robust coordinated activation sequence.** All terminals cooperate:
 
 ```
-Terminal 1:  [ 🔑 Press Enter to initialize keys 🔑 ]
-Terminal 2:  [ 🔑 Press Enter to initialize keys 🔑 ]
-Terminal 3:  [ 🔑 Press Enter to initialize keys 🔑 ]
+Terminal 1:  ▸ Press Enter to run ssh-add in this terminal
+Terminal 2:  ▸ Press Enter to run ssh-add in this terminal
+Terminal 3:  ▸ Press Enter to run ssh-add in this terminal
 ```
 
 Press Enter in **any** terminal. That terminal runs `ssh-add` and prompts for your passphrase. The other terminals wait automatically and are notified when complete:
