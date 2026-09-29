@@ -92,14 +92,15 @@ class LockFile:
     state is exposed via :attr:`acquired` and the lock is released on exit.
     """
 
-    __slots__ = ("path", "no_lock", "wait", "out", "acquired", "_fd", "_token")
+    __slots__ = ("path", "no_lock", "wait", "out", "acquired", "_fd", "_token", "shared")
 
-    def __init__(self, path: PathLike, no_lock: bool, wait: int, out: Output) -> None:
+    def __init__(self, path: PathLike, no_lock: bool, wait: int, out: Output, *, shared: bool = False) -> None:
         self.path = Path(path)
         self.no_lock = no_lock
         self.wait = max(0, int(wait))
         self.out = out
         self.acquired = False
+        self.shared = shared
         self._fd = -1
         self._token = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(8)}"
 
@@ -133,13 +134,14 @@ class LockFile:
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(str(self.path), flags, 0o600)
         try:
-            if not self._try_lock(fd):
+            if not self._try_lock(fd, shared=self.shared):
                 os.close(fd)
                 return False
             if hasattr(os, "fchmod"):
                 os.fchmod(fd, 0o600)
-            os.ftruncate(fd, 0)
-            os.write(fd, self._token.encode())
+            if not self.shared:
+                os.ftruncate(fd, 0)
+                os.write(fd, self._token.encode())
         except Exception:
             os.close(fd)
             raise
@@ -148,7 +150,7 @@ class LockFile:
         return True
 
     @staticmethod
-    def _try_lock(fd: int) -> bool:
+    def _try_lock(fd: int, *, shared: bool = False) -> bool:
         try:
             if sys.platform == "win32":
                 if os.fstat(fd).st_size == 0:
@@ -156,7 +158,7 @@ class LockFile:
                 os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
             else:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except OSError as exc:
             if exc.errno in (errno.EACCES, errno.EAGAIN):
                 return False

@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 class SshAddPlan:
     commands: list[list[str]]
     env: dict[str, str]
+    fingerprints: frozenset[str] = frozenset()
+
+    def keys_available(self) -> bool:
+        if not self.fingerprints:
+            return False
+        loaded, status = ssh_l(self.env, timeout=1)
+        return status == 0 and self.fingerprints.issubset(loaded)
 
 
 def _suppress_gui(env: dict[str, str]) -> None:
@@ -190,10 +197,10 @@ def extract_fingerprints(text: str) -> list[str]:
     return fps
 
 
-def ssh_l(env: Mapping[str, str]) -> tuple[list[str], int]:
+def ssh_l(env: Mapping[str, str], *, timeout: float | None = None) -> tuple[list[str], int]:
     """Run ``ssh-add -l``; return (fingerprints, retcode)."""
     try:
-        r = run(["ssh-add", "-l"], env=dict(env))
+        r = run(["ssh-add", "-l"], env=dict(env), timeout=timeout)
     except (FileNotFoundError, OSError):
         return [], 2
     if r.returncode == 0:
@@ -630,11 +637,14 @@ class SshAgent:
         if bool(a.get_value("confirm")):
             base_cmd.append("-c")
         commands: list[list[str]] = []
+        fingerprints = [self.fingerprint(key) for key in missing]
         if missing:
             commands.append([*base_cmd, *missing])
         for provider in pkcs11:
             commands.append([*base_cmd, "-s", provider])
-        return SshAddPlan(commands, run_env)
+            fingerprints.extend(pkcs11_provider_fingerprints(provider, out) or [None])
+        expected = frozenset(fp for fp in fingerprints if fp) if all(fingerprints) else frozenset()
+        return SshAddPlan(commands, run_env, expected)
 
     def load(self, missing: list[str]) -> bool:
         plan = self.prepare_load(missing)

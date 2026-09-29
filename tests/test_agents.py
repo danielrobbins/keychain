@@ -155,6 +155,8 @@ class TestSshAgentLoadOutput:
         agent = agents.SshAgent(kstate, Output.build(quiet=quiet, debug=False, eval_mode=False, color=False))
         agent.env = SshAgentRef(sock="/tmp/agent.sock", pid="1111")
         monkeypatch.setattr(agent, "_validate_candidate", lambda *_args, **_kwargs: agent.env)
+        monkeypatch.setattr(agent, "fingerprint", lambda key: f"SHA256:{key}")
+        monkeypatch.setattr(agents, "pkcs11_provider_fingerprints", lambda *_args: ["SHA256:provider"])
         monkeypatch.setattr(agents.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
         return agent
 
@@ -275,6 +277,50 @@ class TestSshAgentLoadOutput:
         monkeypatch.setattr(agents, "pkcs11_provider_fingerprints", lambda *_a, **_k: ["SHA256:other"])
 
         assert agent.list_missing_pkcs11(["/usr/lib/pkcs11/opensc-pkcs11.so"]) == ["/usr/lib/pkcs11/opensc-pkcs11.so"]
+
+    def test_prepare_load_records_all_expected_fingerprints(self, monkeypatch):
+        plan = self._agent(monkeypatch).prepare_load(["key-A", "key-B"], ["provider"], announce=False)
+        assert plan.fingerprints == {"SHA256:key-A", "SHA256:key-B", "SHA256:provider"}
+
+    @pytest.mark.parametrize("unknown", ["file", "provider"])
+    def test_unknown_fingerprint_disables_peer_cancellation(self, monkeypatch, unknown):
+        agent = self._agent(monkeypatch)
+        if unknown == "file":
+            monkeypatch.setattr(agent, "fingerprint", lambda _key: None)
+        else:
+            monkeypatch.setattr(agents, "pkcs11_provider_fingerprints", lambda *_args: [])
+        plan = agent.prepare_load(["key-A"], ["provider"], announce=False)
+        assert plan.fingerprints == frozenset()
+        monkeypatch.setattr(agents, "ssh_l", lambda *_a, **_k: pytest.fail("cannot verify unknown keys"))
+        assert not plan.keys_available()
+
+
+@pytest.mark.parametrize(
+    "loaded,status,expected",
+    [(["A", "B"], 0, True), (["A"], 0, False), (["A", "B"], 1, False), ([], 2, False)],
+)
+def test_load_plan_checks_all_keys_with_bounded_query(monkeypatch, loaded, status, expected):
+    env = {"SSH_AUTH_SOCK": "/selected-agent.sock"}
+
+    def query(actual_env, *, timeout):
+        assert actual_env == env
+        assert timeout == 1
+        return loaded, status
+
+    monkeypatch.setattr(agents, "ssh_l", query)
+    plan = agents.SshAddPlan([], env, frozenset({"A", "B"}))
+    assert plan.keys_available() is expected
+
+
+def test_agent_listing_passes_timeout_to_subprocess(monkeypatch):
+    def query(cmd, **kwargs):
+        assert cmd == ["ssh-add", "-l"]
+        assert kwargs["timeout"] == 1
+        raise subprocess.TimeoutExpired(cmd, 1)
+
+    monkeypatch.setattr(agents, "run", query)
+    with pytest.raises(subprocess.TimeoutExpired):
+        agents.ssh_l({}, timeout=1)
 
 
 # ---------------------------------------------------------------------------

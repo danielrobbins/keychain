@@ -26,6 +26,7 @@ from keychain.util import LockFile
 
 if os.name != "nt":
     import pty
+    import termios
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt"
@@ -151,8 +152,9 @@ class ActivationSession:
         shell: bool = False,
         bootstrap: str = "",
         key: Path | None = None,
+        extra_options: tuple[str, ...] = (),
     ) -> Terminal:
-        options = [*self.options]
+        options = [*self.options, *extra_options]
         if immediate:
             options.append("--immediate")
         if quiet:
@@ -274,11 +276,11 @@ def test_waiter_observes_successful_loading(activation_session, immediate):
     owner = session.start()
     owner.expect("Enter passphrase")
     waiter = session.start(immediate=immediate)
-    session.wait_until_registered(waiter)
+    waiter.expect("Enter passphrase" if immediate else "Press Enter to move")
 
     session.unlock(owner)
     waiter.finish()
-    assert b"Enter passphrase" not in waiter.output
+    assert (b"Enter passphrase" in waiter.output) == immediate
     assert session.state()["status"] == "success"
     assert list(session.paths.waiters_dir.glob("wait.*.fifo")) == []
 
@@ -311,9 +313,9 @@ def test_immediate_waiter_loads_a_different_real_key(activation_session):
     owner = session.start()
     owner.expect("Enter passphrase")
     waiter = session.start(key=other_key)
-    session.wait_until_registered(waiter)
-    session.unlock(owner)
     waiter.finish()
+    assert owner.proc.poll() is None
+    session.unlock(owner)
     result = session.run(["ssh-add", "-L"])
     assert result.returncode == 0, result.stderr
     loaded = {line.split()[1] for line in result.stdout.splitlines()}
@@ -324,6 +326,8 @@ def test_wipe_waits_for_exclusive_access_to_real_agent(activation_session):
     session = activation_session
     owner = session.start()
     owner.expect("Enter passphrase")
+    second = session.start()
+    second.expect("Enter passphrase")
     command = [
         sys.executable,
         "-m",
@@ -339,6 +343,7 @@ def test_wipe_waits_for_exclusive_access_to_real_agent(activation_session):
     result = session.run(command)
     assert result.returncode != 0 and "activation lock" in result.stderr, result.stdout + result.stderr
     session.unlock(owner)
+    second.finish()
     result = session.run(command)
     assert result.returncode == 0, result.stdout + result.stderr
     result = session.run(["ssh-add", "-l"])
@@ -351,13 +356,13 @@ def test_normal_interruption_notifies_waiters_and_allows_retry(activation_sessio
     owner = session.start(quiet=True)
     owner.expect("Enter passphrase")
     waiter = session.start(quiet=True)
-    session.wait_until_registered(waiter)
+    waiter.expect("Enter passphrase")
     owner.interrupt(getattr(signal, signame))
-    waiter.finish(success=False)
+    session.unlock(waiter)
     session.assert_lock_available()
-    assert session.state()["status"] == "failed"
+    assert session.state()["status"] == "success"
 
-    session.unlock(session.start(quiet=True))
+    session.start(quiet=True).finish()
 
 
 def test_completed_state_does_not_replace_agent_key_query(activation_session):
@@ -379,7 +384,7 @@ def test_waiter_recovers_if_its_registration_is_lost(activation_session, damage)
     waiter = session.start(immediate=False)
     # This prompt is emitted after registration and after reading the active owner.
     # Observing it avoids racing the file damage against the initial registration.
-    waiter.expect("Type 'takeover'")
+    waiter.expect("Press Enter to move")
     if damage == "remove":
         session.paths.state_file.unlink()
     else:
@@ -389,7 +394,8 @@ def test_waiter_recovers_if_its_registration_is_lost(activation_session, damage)
     waiter.finish()
 
 
-def test_orphaned_ssh_add_keeps_lock_and_notifies_on_exit(activation_session):
+@pytest.mark.parametrize("immediate", [False, True])
+def test_orphaned_ssh_add_keeps_lock_and_notifies_on_exit(activation_session, immediate):
     session = activation_session
     owner = session.start(shell=True)
     owner.expect("Enter passphrase")
@@ -399,11 +405,11 @@ def test_orphaned_ssh_add_keeps_lock_and_notifies_on_exit(activation_session):
 
     with ActivationLock(session.paths.activation_lockf, False, Output.silent()) as lock:
         assert not lock.acquired, "surviving ssh-add must keep the activation lock"
-    waiter = session.start()
-    session.wait_until_registered(waiter)
+    waiter = session.start(immediate=immediate)
+    waiter.expect("Enter passphrase" if immediate else "Press Enter to move")
     owner.send(PASSPHRASE + "\n")
     waiter.finish()
-    assert b"Enter passphrase" not in waiter.output
+    assert (b"Enter passphrase" in waiter.output) == immediate
     session.assert_lock_available()
 
 
@@ -423,7 +429,7 @@ def test_regular_waiter_returns_to_prompt_after_owner_is_killed(activation_sessi
     owner = session.start()
     owner.expect("Enter passphrase")
     waiter = session.start(immediate=False)
-    waiter.expect("Type 'takeover'")
+    waiter.expect("Press Enter to move")
     owner.interrupt(signal.SIGKILL)
     waiter.expect("Press Enter to initialize keys")
     assert b"Enter passphrase" not in waiter.output
@@ -436,30 +442,84 @@ def test_real_takeover_reaps_first_child_and_completes_both_terminals(activation
     owner = session.start()
     owner.expect("Enter passphrase")
     waiter = session.start(immediate=False)
-    waiter.expect("Type 'takeover'")
-    waiter.send("takeover\n")
+    waiter.expect("Press Enter to move")
+    waiter.send("\n")
     session.unlock(waiter)
     owner.finish()
     assert owner.output.count(b"Enter passphrase") == 1
+    assert b"Passphrase request moved here from another terminal" in waiter.output
+    assert b"Passphrase request moved to another terminal" in owner.output
+    assert termios.tcgetattr(owner.fd)[3] & termios.ECHO
     assert list(session.paths.waiters_dir.iterdir()) == []
 
 
-def test_five_simultaneous_immediate_terminals_run_one_ssh_add(activation_session):
+def test_five_immediate_terminals_cancel_all_redundant_prompts(activation_session):
     session = activation_session
     terminals = [session.start(quiet=True) for _ in range(5)]
     for terminal in terminals:
-        session.wait_until_registered(terminal)
-    deadline = time.monotonic() + DEADLINE
-    owners = []
-    while not owners and time.monotonic() < deadline:
-        for terminal in terminals:
-            terminal.read()
-        owners = [terminal for terminal in terminals if b"Enter passphrase" in terminal.output]
-    assert len(owners) == 1
-    session.unlock(owners[0])
+        terminal.expect("Enter passphrase")
+    session.unlock(terminals[-1])
     for terminal in terminals:
         terminal.finish()
-    assert sum(terminal.output.count(b"Enter passphrase") for terminal in terminals) == 1
+        assert termios.tcgetattr(terminal.fd)[3] & termios.ECHO
+    assert sum(terminal.output.count(b"Enter passphrase") for terminal in terminals) == 5
+    assert all(b"canceled this passphrase request" in terminal.output for terminal in terminals[:-1])
+    assert list(session.paths.waiters_dir.iterdir()) == []
+    session.assert_lock_available()
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_visible_immediate_terminal_finishes_hidden_prompt(activation_session, quiet):
+    """The WSL/Fedora case: never provide input to the first terminal."""
+    session = activation_session
+    hidden = session.start(quiet=quiet)
+    hidden.expect("Enter passphrase")
+    visible = session.start(quiet=quiet)
+    session.unlock(visible)
+    hidden.finish()
+    assert hidden.output.count(b"Enter passphrase") == 1
+    assert b"canceled this passphrase request" in hidden.output
+    assert termios.tcgetattr(hidden.fd)[3] & termios.ECHO
+    assert list(session.paths.waiters_dir.iterdir()) == []
+
+
+def test_enter_moves_all_concurrent_prompts_to_one_terminal(activation_session):
+    session = activation_session
+    hidden = [session.start(quiet=True) for _ in range(3)]
+    for terminal in hidden:
+        terminal.expect("Enter passphrase")
+    visible = session.start(immediate=False, quiet=True)
+    visible.expect("Press Enter to move")
+    visible.send("\n")
+    session.unlock(visible)
+    for terminal in hidden:
+        terminal.finish()
+        assert terminal.output.count(b"Enter passphrase") == 1
+    assert b"Passphrase request moved here" in visible.output
+    session.assert_lock_available()
+
+
+def test_simultaneous_success_reports_each_invocations_settings(activation_session):
+    session = activation_session
+    first = session.start(extra_options=("--confirm", "--timeout", "10"))
+    first.expect("Enter passphrase")
+    second = session.start(extra_options=("--timeout", "20"))
+    second.expect("Enter passphrase")
+    # Pause the first parent, not its ssh-add, so both additions can complete
+    # before either parent can cancel the other's redundant prompt.
+    os.kill(first.proc.pid, signal.SIGSTOP)
+    try:
+        first.send(PASSPHRASE + "\n")
+        first.expect("Identity added")
+        session.unlock(second)
+    finally:
+        os.kill(first.proc.pid, signal.SIGCONT)
+    first.finish()
+    assert b"confirmation required; lifetime 10 minutes" in first.output
+    assert b"confirmation not required; lifetime 20 minutes" in second.output
+    result = session.run(["ssh-add", "-T", str(session.key.with_suffix(".pub"))])
+    assert result.returncode == 0, result.stdout + result.stderr
+    session.assert_lock_available()
 
 
 def test_parent_only_termination_reaps_child_and_notifies_failure(activation_session):
@@ -468,12 +528,12 @@ def test_parent_only_termination_reaps_child_and_notifies_failure(activation_ses
     owner.expect("Enter passphrase")
     parent = int(owner.output.split(b"KEYCHAIN_PID=", 1)[1].splitlines()[0])
     waiter = session.start()
-    session.wait_until_registered(waiter)
+    waiter.expect("Enter passphrase")
     os.kill(parent, signal.SIGTERM)
     owner.expect("KEYCHAIN_EXITED")
-    waiter.finish(success=False)
+    session.unlock(waiter)
     session.assert_lock_available()
-    session.unlock(session.start())
+    session.start().finish()
 
 
 def test_old_json_loading_flag_cannot_block_new_activation(activation_session):
@@ -494,7 +554,7 @@ def test_death_between_result_save_and_notification_wakes_waiter(activation_sess
     owner = session.start(bootstrap=bootstrap)
     owner.expect("Enter passphrase")
     waiter = session.start(immediate=False)
-    waiter.expect("Type 'takeover'")
+    waiter.expect("Press Enter to move")
     owner.send(PASSPHRASE + "\n")
     owner.finish(success=False)
     assert session.state()["status"] == "success"
@@ -507,12 +567,12 @@ def test_successive_takeovers_keep_all_three_terminals_waiting(activation_sessio
     first = session.start()
     first.expect("Enter passphrase")
     second = session.start(immediate=False)
-    second.expect("Type 'takeover'")
-    second.send("takeover\n")
+    second.expect("Press Enter to move")
+    second.send("\n")
     second.expect("Enter passphrase")
     third = session.start(immediate=False)
-    third.expect("Type 'takeover'")
-    third.send("takeover\n")
+    third.expect("Press Enter to move")
+    third.send("\n")
     session.unlock(third)
     first.finish()
     second.finish()

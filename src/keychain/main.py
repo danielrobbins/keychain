@@ -323,38 +323,28 @@ class KeychainApp:
             self.kstate.ssh.announce_load(missing.ssh, missing.pkcs11)
             immediate = self.args.get_value("activation") == "immediate"
             handoff = False
-            takeover_attempt = ""
             while True:
                 result = waiter.wait(immediate=immediate, interactive=not immediate, handoff=handoff)
                 handoff = False
                 if result.action == "takeover":
-                    takeover_attempt = waiter.attempt
                     result = waiter.request_takeover()
-                    if result.action == "unavailable":
-                        takeover_attempt = ""
                     if result.action in ("unavailable", "timeout"):
-                        self.out.note("Activation owner did not cancel; still waiting.")
+                        self.out.note("Passphrase request could not be moved yet; still waiting.")
                         continue
+                if result.message.get("takeover"):
+                    self.out.result("Passphrase request moved here from another terminal.")
                 if result.action == "notified":
-                    takeover = bool(takeover_attempt and result.message.get("attempt") == takeover_attempt)
-                    if takeover:
-                        takeover_attempt = ""
                     status = str(result.message.get("status", ""))
                     missing = self._missing_ssh_keys_after_notification(requested, status=status)
                     if not missing.any:
                         self.out.info("Keys initialized by another terminal.")
                         return
                     if status == "canceled":
-                        if not takeover:
-                            handoff = True
-                            continue
+                        handoff = True
+                        continue
                     elif status == "abandoned":
                         if not immediate:
                             continue
-                    elif immediate and status != "success":
-                        raise KeychainError(
-                            "Requested SSH keys remain unavailable after activation in another terminal"
-                        )
                     elif not immediate:
                         self.out.note(
                             "Key initialization failed in another terminal."
@@ -430,7 +420,7 @@ class KeychainApp:
         *,
         wipe_pending: bool = False,
     ) -> str:
-        with _activation_signals(), coord.activation(waiter) as owner:
+        with _activation_signals(), coord.activation(waiter, exclusive=wipe_pending) as owner:
             if not owner.acquired:
                 self.out.info("Another terminal is initializing keys; waiting for completion.")
                 return "busy"
@@ -446,11 +436,23 @@ class KeychainApp:
             plan = self.kstate.ssh.prepare_load(missing.ssh, missing.pkcs11, announce=waiter is None)
             if plan is None:
                 raise KeychainError("Unable to add keys")
-            status = owner.run_ssh_add(plan.commands, plan.env)
+            status = owner.run_ssh_add(
+                plan.commands,
+                plan.env,
+                keys_available=plan.keys_available,
+            )
             if status == "canceled":
-                self.out.note("Another terminal took over key initialization; waiting for completion.")
+                self.out.result("Passphrase request moved to another terminal; waiting for keys.")
+            elif status == "satisfied":
+                self.out.result("Keys loaded in another terminal; canceled this passphrase request.")
+                return "success"
             elif status != "success":
                 raise KeychainError("Unable to add keys")
+            else:
+                confirmation = "required" if self.args.get_value("confirm") else "not required"
+                timeout = self.args.get_value("timeout")
+                lifetime = f"{timeout} minutes" if timeout is not None else "agent default"
+                self.out.info(f"SSH key settings applied: confirmation {confirmation}; lifetime {lifetime}.")
             return status
 
     def _warm_gpg_keys(self, requested: keys.ResolvedKeys) -> None:

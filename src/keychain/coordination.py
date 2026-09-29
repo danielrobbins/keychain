@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Event-driven activation: OS locks exclude loaders; FIFO closure wakes waiters."""
+"""Event-driven key loading: per-attempt locks and FIFOs, with exclusive wiping."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -151,8 +152,8 @@ class WaitResult:
 
 
 class ActivationLock(LockFile):
-    def __init__(self, path: Path, no_lock: bool, out: Output) -> None:
-        super().__init__(path, no_lock, 0, out)
+    def __init__(self, path: Path, no_lock: bool, out: Output, *, shared: bool = False) -> None:
+        super().__init__(path, no_lock, 0, out, shared=shared)
 
     def __enter__(self) -> ActivationLock:
         self.try_acquire()
@@ -170,8 +171,11 @@ class ActivationCoordinator:
     def state_lock(self) -> LockFile:
         return LockFile(self.paths.state_lockf, self.no_lock, self.lockwait, Output.silent())
 
-    def activation_lock(self) -> ActivationLock:
-        return ActivationLock(self.paths.activation_lockf, self.no_lock, self.out)
+    def activation_lock(self, *, shared: bool = False) -> ActivationLock:
+        return ActivationLock(self.paths.activation_lockf, self.no_lock, self.out, shared=shared)
+
+    def attempt_lock(self, attempt: str) -> ActivationLock:
+        return ActivationLock(self.paths.waiters_dir / f"load.{attempt}.lock", self.no_lock, self.out)
 
     def load_state(self) -> CoordinationState:
         return CoordinationState.load(self.paths.state_file)
@@ -200,66 +204,91 @@ class ActivationCoordinator:
         for path in self.paths.waiters_dir.glob("wait.*.fifo"):
             WaiterEndpoint.send(path, {"attempt": attempt, "status": status})
 
-    def activation(self, waiter: ActivationWaiter | None = None) -> ActivationOwner:
-        return ActivationOwner(self, waiter)
+    def activation(self, waiter: ActivationWaiter | None = None, *, exclusive: bool = False) -> ActivationOwner:
+        return ActivationOwner(self, waiter, exclusive=exclusive)
 
-    def discard_attempts(self) -> None:
-        """Called with both locks held: no previous loader can still be running."""
-        for kind in ("life", "cancel"):
-            for path in self.paths.waiters_dir.glob(f"{kind}.*.fifo"):
-                unlink_quiet(path)
-
-    def observe(self) -> tuple[str, int]:
-        """Called under the state lock; the activation lock establishes liveness."""
-        with self.activation_lock() as lock:
-            if lock.acquired:
-                self.discard_attempts()
-                return "", -1
-        for path in self.paths.waiters_dir.glob("life.*.fifo"):
-            attempt = path.name.split(".")[1]
-            if not CoordinationState.from_dict({"attempt": attempt, "status": "loading"}).attempt:
-                continue
-            try:
-                fd = _open_fifo(path, os.O_RDONLY)
-            except OSError:
-                continue
-            # The loader could die between the first lock probe and opening this reader.
-            with self.activation_lock() as lock:
-                if lock.acquired:
-                    os.close(fd)
-                    self.discard_attempts()
-                    return "", -1
-            return attempt, fd
-        raise KeychainError("Key loading is locked but its lifetime notification is unavailable")
+    def observe(self, *, exclude: str = "") -> dict[str, int]:
+        """Called under the state lock; each attempt's lock establishes liveness."""
+        watches: dict[str, int] = {}
+        attempts = {
+            path.name.split(".")[1]
+            for pattern in ("load.*.lock", "life.*.fifo", "cancel.*.fifo")
+            for path in self.paths.waiters_dir.glob(pattern)
+        }
+        try:
+            for attempt in sorted(attempts):
+                if (
+                    attempt == exclude
+                    or not CoordinationState.from_dict({"attempt": attempt, "status": "loading"}).attempt
+                ):
+                    continue
+                path = self.paths.waiters_dir / f"load.{attempt}.lock"
+                with self.attempt_lock(attempt) as lock:
+                    if lock.acquired:
+                        unlink_quiet(
+                            path,
+                            self.paths.waiters_dir / f"life.{attempt}.fifo",
+                            self.paths.waiters_dir / f"cancel.{attempt}.fifo",
+                        )
+                        continue
+                watches[attempt] = _open_fifo(self.paths.waiters_dir / f"life.{attempt}.fifo", os.O_RDONLY)
+                with self.attempt_lock(attempt) as lock:
+                    if lock.acquired:
+                        os.close(watches.pop(attempt))
+                        unlink_quiet(
+                            path,
+                            self.paths.waiters_dir / f"life.{attempt}.fifo",
+                            self.paths.waiters_dir / f"cancel.{attempt}.fifo",
+                        )
+        except BaseException as exc:
+            for fd in watches.values():
+                os.close(fd)
+            if isinstance(exc, OSError):
+                raise KeychainError("Key loading is locked but its lifetime notification is unavailable") from exc
+            raise
+        return watches
 
 
 class ActivationWaiter:
     def __init__(self, coord: ActivationCoordinator, endpoint: WaiterEndpoint) -> None:
         self.coord, self.endpoint = coord, endpoint
-        self.attempt = ""
-        self.life_fd = -1
+        self.watches: dict[str, int] = {}
         self.ignore_attempt = ""
+        self.pending_takeover: set[str] = set()
+        self._seen: set[str] = set()
 
     def _close_watch(self) -> None:
-        if self.life_fd >= 0:
-            os.close(self.life_fd)
-            self.life_fd = -1
+        for fd in self.watches.values():
+            os.close(fd)
+        self.watches.clear()
+
+    def watch(self) -> None:
+        self._close_watch()
+        self.watches = self.coord.observe(exclude=self.ignore_attempt)
 
     def cleanup(self) -> None:
         self._close_watch()
         self.endpoint.cleanup()
 
-    def _completion(self) -> WaitResult:
+    def _completion(self, attempt: str) -> WaitResult:
         record = self.coord.load_state()
-        status = record.status if record.attempt == self.attempt else "unknown"
+        status = record.status if record.attempt == attempt else "unknown"
         if status == "loading":
             status = "abandoned"
-        self._close_watch()
-        self.ignore_attempt = self.attempt
-        return WaitResult("notified", {"attempt": self.attempt, "status": status})
+        fd = self.watches.pop(attempt, -1)
+        if fd >= 0:
+            os.close(fd)
+        self._seen.discard(attempt)
+        return WaitResult("notified", {"attempt": attempt, "status": status})
 
     def wait(
-        self, *, immediate: bool = False, interactive: bool = False, handoff: bool = False, timeout: float | None = None
+        self,
+        *,
+        immediate: bool = False,
+        interactive: bool = False,
+        handoff: bool = False,
+        timeout: float | None = None,
+        wake_fd: int | None = None,
     ) -> WaitResult:
         if handoff:
             timeout = 1.0
@@ -274,30 +303,42 @@ class ActivationWaiter:
                         if not attempt or attempt == self.ignore_attempt:
                             continue
                         if status in ("success", "failed", "canceled"):
-                            self._close_watch()
-                            self.attempt = self.ignore_attempt = attempt
+                            self._seen.discard(attempt)
+                            fd = self.watches.pop(attempt, -1)
+                            if fd >= 0:
+                                os.close(fd)
                             return WaitResult("notified", message)
-                        if status == "loading" and self.life_fd < 0:
-                            self.attempt = attempt
-                    if self.life_fd >= 0 and select.select([self.life_fd], [], [], 0)[0]:
-                        return self._completion()
-                    if self.life_fd < 0:
-                        attempt, fd = self.coord.observe()
-                        if fd >= 0:
-                            self.attempt, self.life_fd = attempt, fd
-                        elif self.attempt and self.attempt != self.ignore_attempt:
-                            return self._completion()
-                    active = self.life_fd >= 0
+                        self._seen.add(attempt)
+                    for attempt, fd in list(self.watches.items()):
+                        if select.select([fd], [], [], 0)[0]:
+                            return self._completion(attempt)
+                    self.watch()
+                    missing = self._seen.difference(self.watches)
+                    if missing:
+                        return self._completion(next(iter(missing)))
+                    self._seen.update(self.watches)
+                    active = bool(self.watches)
+                    if not active:
+                        with self.coord.activation_lock(shared=True) as gate:
+                            if not gate.acquired:
+                                raise KeychainError(
+                                    "Key loading is locked but its lifetime notification is unavailable"
+                                )
+                    if self.pending_takeover and not self.pending_takeover.intersection(self.watches):
+                        self.pending_takeover.clear()
+                        return WaitResult("activate", {"takeover": True})
                     if handoff and active:
                         # The successor is here: wait for its lifetime, not a timer.
-                        handoff, deadline = False, None
-                    if not active and not handoff and (immediate or (not interactive and timeout is None)):
-                        return WaitResult("activate")
+                        deadline = None
+                    if not handoff and (immediate or (not active and not interactive and timeout is None)):
+                        with self.coord.activation_lock(shared=True) as gate:
+                            if gate.acquired:
+                                return WaitResult("activate")
 
                 prompt = False
                 if tty is not None and not handoff:
                     text = (
-                        "Type 'takeover' to initialize keys in this terminal; Enter to wait"
+                        "Press Enter to move the passphrase request to this terminal"
                         if active
                         else "Press Enter to initialize keys"
                     )
@@ -306,9 +347,9 @@ class ActivationWaiter:
                             f"[ {self.coord.out.glyph('key')} {text} {self.coord.out.glyph('key')} ]"
                         )
                     )
-                fds = [self.endpoint.read_fd]
-                if self.life_fd >= 0:
-                    fds.append(self.life_fd)
+                fds = [self.endpoint.read_fd, *self.watches.values()]
+                if wake_fd is not None:
+                    fds.append(wake_fd)
                 if tty is not None and not handoff:
                     fds.append(tty.fileno())
                 remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
@@ -317,7 +358,9 @@ class ActivationWaiter:
                     self.coord.out.clear_ephemeral_line(after_input=tty.fileno() in ready if tty else False)
                 if not ready:
                     return WaitResult("activate" if handoff and not active else "timeout")
-                if self.endpoint.read_fd in ready or self.life_fd in ready:
+                if wake_fd is not None and wake_fd in ready:
+                    return WaitResult("cancel")
+                if self.endpoint.read_fd in ready or any(fd in ready for fd in self.watches.values()):
                     continue
                 if tty is not None:
                     line = tty.readline()
@@ -325,32 +368,45 @@ class ActivationWaiter:
                         raise KeychainError("Terminal closed while waiting to initialize keys")
                     if not active:
                         return WaitResult("activate")
-                    if line.strip().lower() == "takeover":
+                    if not line.strip():
                         return WaitResult("takeover")
 
     def request_takeover(self) -> WaitResult:
         with self.coord.state_lock():
-            if self.life_fd < 0:
+            self.watch()
+            if not self.watches:
                 return WaitResult("activate")
-            path = self.coord.paths.waiters_dir / f"cancel.{self.attempt}.fifo"
-            if not WaiterEndpoint.send(path, {"status": "cancel"}):
-                return WaitResult("unavailable")
-        return self.wait(timeout=_CHILD_TERMINATE_TIMEOUT + 2.0)
+            self.pending_takeover = set(self.watches)
+            for attempt in self.watches:
+                path = self.coord.paths.waiters_dir / f"cancel.{attempt}.fifo"
+                if not WaiterEndpoint.send(path, {"status": "cancel"}):
+                    self.pending_takeover.clear()
+                    return WaitResult("unavailable")
+        deadline = time.monotonic() + _CHILD_TERMINATE_TIMEOUT + 2.0
+        while True:
+            result = self.wait(timeout=max(0.0, deadline - time.monotonic()))
+            if result.action != "notified":
+                return result
 
 
 class ActivationOwner:
     """The activation lock and lifetime writer both remain open in ssh-add."""
 
-    def __init__(self, coord: ActivationCoordinator, waiter: ActivationWaiter | None) -> None:
+    def __init__(
+        self, coord: ActivationCoordinator, waiter: ActivationWaiter | None, *, exclusive: bool = False
+    ) -> None:
         self.coord, self.waiter = coord, waiter
-        self.lock = coord.activation_lock()
         self.attempt = secrets.token_hex(16)
+        self.gate = coord.activation_lock(shared=not exclusive)
+        self.lock = coord.attempt_lock(self.attempt)
         self.status = "failed"
         self.life: WaiterEndpoint | None = None
         self.cancel: WaiterEndpoint | None = None
         self.proc: subprocess.Popen[bytes] | None = None
         self._stop = threading.Event()
         self._canceled = threading.Event()
+        self._satisfied = threading.Event()
+        self._keys_available: Callable[[], bool] | None = None
         self._thread: threading.Thread | None = None
         self._proc_lock = threading.Lock()
 
@@ -361,16 +417,19 @@ class ActivationOwner:
     def __enter__(self) -> ActivationOwner:
         try:
             with self.coord.state_lock():
-                if not self.lock.try_acquire():
+                if not self.gate.try_acquire():
                     return self
+                self.coord.paths.waiters_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                self.lock.try_acquire()
                 if not self.coord.no_lock and hasattr(os, "mkfifo"):
-                    self.coord.discard_attempts()
+                    for fd in self.coord.observe(exclude=self.attempt).values():
+                        os.close(fd)
                     self.life = self.coord.endpoint(f"life.{self.attempt}")
                     self.cancel = self.coord.endpoint(f"cancel.{self.attempt}")
                     CoordinationState(self.attempt, "loading").save(self.coord.paths.state_file)
                     if self.waiter is not None:
                         self.waiter._close_watch()
-                        self.waiter.attempt = self.waiter.ignore_attempt = self.attempt
+                        self.waiter.ignore_attempt = self.attempt
                     # Every existing waiter is notified before a child can be started.
                     self.coord.notify_waiters(self.attempt, "loading")
             self.coord.out.debug(f"Activation started: attempt={self.attempt}")
@@ -401,12 +460,22 @@ class ActivationOwner:
 
     def _cleanup(self) -> None:
         self.lock.release()
+        self.gate.release()
         for endpoint in (self.life, self.cancel):
             if endpoint is not None:
                 endpoint.cleanup(preserve_writers=endpoint is self.life)
         self.life = self.cancel = None
+        if not (self.coord.paths.waiters_dir / f"life.{self.attempt}.fifo").exists():
+            unlink_quiet(self.lock.path)
 
-    def run_ssh_add(self, commands: list[list[str]], env: dict[str, str]) -> str:
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        return self.lock.pass_fds + self.gate.pass_fds + ((self.life.keepalive_fd,) if self.life else ())
+
+    def run_ssh_add(
+        self, commands: list[list[str]], env: dict[str, str], *, keys_available: Callable[[], bool] | None = None
+    ) -> str:
+        self._keys_available = keys_available
         if self.cancel is not None:
             self._thread = threading.Thread(target=self._cancel_loop, name="keychain-cancel-listener", daemon=True)
             self._thread.start()
@@ -414,6 +483,9 @@ class ActivationOwner:
             self.status = self._run_child(command, env)
             if self.status != "success":
                 break
+        if self._satisfied.is_set() and self.status != "success":
+            self.status = "success"
+            return "satisfied"
         return self.status
 
     def _run_child(self, cmd: list[str], env: dict[str, str]) -> str:
@@ -421,7 +493,7 @@ class ActivationOwner:
             with contextlib.ExitStack() as stack:
                 kwargs: dict[str, Any] = {"env": env, "close_fds": True}
                 if os.name != "nt":
-                    kwargs["pass_fds"] = self.lock.pass_fds + ((self.life.keepalive_fd,) if self.life else ())
+                    kwargs["pass_fds"] = self.pass_fds
                     try:
                         tty = stack.enter_context(open("/dev/tty", "rb+", buffering=0))
                     except OSError:
@@ -429,7 +501,7 @@ class ActivationOwner:
                     else:
                         kwargs.update(stdin=tty, stdout=tty, stderr=tty)
                 with self._proc_lock:
-                    if self._canceled.is_set():
+                    if self._canceled.is_set() or self._satisfied.is_set():
                         return "canceled"
                     self.proc = subprocess.Popen(cmd, **kwargs)
                 self.coord.out.debug(f"ssh-add started: pid={self.proc.pid} attempt={self.attempt}")
@@ -438,19 +510,41 @@ class ActivationOwner:
         except OSError as exc:
             self.coord.out.warn(f"ssh-add failed to start: {exc}")
             return "failed"
-        if self._canceled.is_set():
+        if rc == 0:
+            return "success"
+        if self._canceled.is_set() or self._satisfied.is_set():
             return "canceled"
-        if rc != 0:
-            self.coord.out.warn(f"ssh-add failed (return code: {rc})")
-            return "failed"
-        return "success"
+        self.coord.out.warn(f"ssh-add failed (return code: {rc})")
+        return "failed"
 
     def _cancel_loop(self) -> None:
         endpoint = self.cancel
         if endpoint is None:
             return
+        monitor_peers = self.waiter
         while not self._stop.is_set():
-            if not select.select([endpoint.read_fd], [], [], 0.5)[0]:
+            if monitor_peers is not None:
+                try:
+                    result = monitor_peers.wait(timeout=0.5, wake_fd=endpoint.read_fd)
+                except (KeychainError, OSError) as exc:
+                    self.coord.out.warn(
+                        f"Cannot monitor other terminals; this passphrase request remains active: {exc}"
+                    )
+                    monitor_peers = None
+                    continue
+                if result.action == "notified" and self._keys_available is not None:
+                    try:
+                        available = self._keys_available()
+                    except (KeychainError, OSError, subprocess.TimeoutExpired) as exc:
+                        self.coord.out.debug(f"Cannot verify keys after peer completion: {exc}")
+                        continue
+                    if available:
+                        self._satisfied.set()
+                        self._cancel_child()
+                        return
+                if result.action != "cancel":
+                    continue
+            elif not select.select([endpoint.read_fd], [], [], 0.5)[0]:
                 continue
             if endpoint.read_message().get("status") == "cancel":
                 self.coord.out.debug(f"Activation cancellation requested: attempt={self.attempt}")

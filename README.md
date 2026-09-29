@@ -166,7 +166,7 @@ Terminal 2:  Keys initialized by another terminal.
 Terminal 3:  Keys initialized by another terminal.
 ```
 
-**Stuck prompt?** Type `takeover` in any waiting terminal to cancel the stuck process and take over.
+**Stuck prompt?** Press Enter in any waiting terminal to move the passphrase request there. Keychain cancels the previous request before starting its replacement.
 
 This is a new feature for Keychain 3 and differs from the default behavior of Keychain 2. For legacy automatic shell startup without Keychain's preliminary Enter prompt, add `--immediate`. OS packagers can make this the default behavior at build-time if desired (see [Build-Time Activation Default](#build-time-activation-default)).
 
