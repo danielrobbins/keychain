@@ -113,9 +113,9 @@ class FishPidfile(Pidfile):
     def render(self, env: SshAgentRef) -> str:
         parts = []
         if env.sock:
-            parts.append(f"set -e SSH_AUTH_SOCK; set -x -U SSH_AUTH_SOCK {_quote(env.sock, fish=True)};")
+            parts.append(f"set -e SSH_AUTH_SOCK; set -x -g SSH_AUTH_SOCK {_quote(env.sock, fish=True)};")
         if env.pid:
-            parts.append(f"set -e SSH_AGENT_PID; set -x -U SSH_AGENT_PID {_quote(env.pid, fish=True)};")
+            parts.append(f"set -e SSH_AGENT_PID; set -x -g SSH_AGENT_PID {_quote(env.pid, fish=True)};")
         return ("\n".join(parts) + "\n") if parts else ""
 
 
