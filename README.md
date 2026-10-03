@@ -74,10 +74,55 @@ Keychain 3 is designed for POSIX-like systems with Python 3.9+ and OpenSSH, and 
 
 ## 60-Second Quick Start
 
-Here's the fastest way to get started. Add this line to your `~/.bash_profile`, `~/.zshrc`, or equivalent:
+Choose the recipe for your shell and replace the example filenames in `KEYCHAIN_KEYS` with your keys. Keep one key per line and quote filenames containing spaces. Interactive terminals load your keys; non-interactive login shells establish the agent environment without prompting, so graphical login does not wait for input.
+
+### Bash
+
+Add this to `~/.bash_profile`, keeping any existing configuration:
 
 ```bash
-eval "$(keychain add --eval ~/.ssh/id_ed25519)"
+KEYCHAIN_KEYS=(
+    ~/.ssh/id_ed25519
+    ~/.ssh/id_rsa
+)
+
+if [[ $- == *i* ]]; then
+    eval "$(keychain add --eval "${KEYCHAIN_KEYS[@]}")"
+else
+    eval "$(keychain add --eval --noask)"
+fi
+```
+
+For a complete alternative using `.bashrc`, run `keychain man topic:env`.
+
+### Zsh
+
+Add this to `~/.zshrc`, which is read only by interactive shells:
+
+```zsh
+KEYCHAIN_KEYS=(
+    ~/.ssh/id_ed25519
+    ~/.ssh/id_rsa
+)
+eval "$(keychain add --eval "${KEYCHAIN_KEYS[@]}")"
+```
+
+For agent setup during non-interactive login, see `keychain man topic:env`.
+
+### Fish
+
+Add this to `~/.config/fish/config.fish`, keeping any existing configuration:
+
+```fish
+set KEYCHAIN_KEYS \
+    ~/.ssh/id_ed25519 \
+    ~/.ssh/id_rsa
+
+if status is-interactive
+    eval "$(keychain add --eval $KEYCHAIN_KEYS)"
+else if status is-login
+    eval "$(keychain add --eval --noask)"
+end
 ```
 
 **What just happened?**
@@ -224,13 +269,9 @@ Add `--json` for machine-readable output suitable for bug reports or automation.
 
 ### First-Time Setup
 
-Add to your shell startup file (`~/.bash_profile`, `~/.zshrc`, etc.):
+Use the recipe for your shell in [60-Second Quick Start](#60-second-quick-start), and edit `KEYCHAIN_KEYS` to select your keys. The startup checks keep key-loading prompts in interactive terminals.
 
-```bash
-eval "$(keychain add --eval ~/.ssh/id_ed25519)"
-```
-
-Next login: you'll be prompted once, then all subsequent shells reconnect automatically.
+Next interactive login: you'll be prompted once, then subsequent shells reconnect to the same agent.
 
 ### Adding Another Key
 
@@ -342,7 +383,7 @@ Keychain will enumerate the token's keys and load the provider via `ssh-add -s`.
 
 ### systemd Integration
 
-Need your user services to access the SSH agent?
+Need your user services to access the SSH agent? From an interactive terminal, run:
 
 ```bash
 eval "$(keychain add --eval --systemd ~/.ssh/id_ed25519)"
@@ -350,17 +391,19 @@ eval "$(keychain add --eval --systemd ~/.ssh/id_ed25519)"
 
 This pushes the agent environment to `systemctl --user`, making it available to all your user services.
 
+For automatic startup, add `--systemd` to both Keychain invocations in the Bash or fish Quick Start recipe. The non-interactive branch retains `--noask` so it can publish the agent environment without prompting.
+
 ## Upgrading from Keychain 2.x
 
 **Good news:** Your existing shell snippets still work.
 
-Keychain 3 maintains full backward compatibility with the 2.x command-line interface. Your `~/.bash_profile` line:
+Keychain 3 accepts the traditional 2.x invocation:
 
 ```bash
 eval `keychain --eval --quiet id_rsa`
 ```
 
-continues to work exactly as before.
+The flags remain supported. For shell startup, use the guarded recipes in [60-Second Quick Start](#60-second-quick-start): an unconditional invocation can wait for input during a non-interactive login, in Keychain 2 as well as Keychain 3.
 
 **What's new:**
 
@@ -369,7 +412,7 @@ continues to work exactly as before.
 - Embedded documentation (`keychain man`) replaces the need for external man pages
 - `.keychainrc` replaces environment variables for persistent preferences
 
-**Migration tip:** When ready, update your shell snippet to the new syntax:
+**Migration tip:** The equivalent commands below show the syntax change. For your startup file, use the full recipe above rather than copying either command unconditionally:
 
 ```bash
 # Old (still works)

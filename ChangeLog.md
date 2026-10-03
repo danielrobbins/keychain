@@ -1,5 +1,9 @@
 # ChangeLog
 
+## Unreleased
+
+- Corrected Bash and fish shell startup guidance so graphical login can finish without waiting for an inaccessible key-loading prompt. The recipes keep the editable key list separate from the startup checks; interactive terminals still load keys normally (#245).
+
 ## 3.0.6
 
 Keychain 3.0.6 focuses on making Keychain's coordinated startup feel natural and get out of your way, building on feedback from people using it in their daily workflows.

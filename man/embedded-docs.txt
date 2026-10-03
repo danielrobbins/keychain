@@ -44,7 +44,7 @@ Keychain supports most UNIX-like operating systems and intentionally limits its 
 
 == @topic usage: General Usage [category=intro, priority=45]
 
-Typically, you configure keychain to run when you first log in to a system. If you are using Bourne shell or bash, you will create a *~/.profile* or *~/.bash_profile* file and include the following line in it:
+Typically, you configure Keychain to run from your shell startup files. Use the shell-specific recipes in `keychain man topic:env` so interactive terminals can load keys while non-interactive login shells establish the agent environment without prompting. To load a key from an interactive Bourne-compatible shell, run:
 
 ```
 eval "$(keychain add id_rsa --eval)"
@@ -198,11 +198,13 @@ On a terminal, Keychain uses `$PAGER`, then `less`, then `more`. Color is retain
 
 This is a foundational keychain feature. If you're using Keychain on a POSIX system, you'll likely want to use this flag in your shell startup files (e.g. *~/.bash_profile*) to ensure that every new shell session can find and use `ssh-agent` without manual intervention.
 
-Here's how it works. When you pass `--eval`, keychain will print out shell commands to set environment variables that will allow future invocations of `ssh` and `scp` to find the running `ssh-agent`. By using your shell's built-in *eval* command to execute keychain's output, you effectively "import" the emitted environment variables into your current shell session. Keychain automatically detects the calling shell and emits the appropriate syntax for that shell. This means you can use the snippet in any POSIX shell without worrying about compatibility issues. Typical invocation in a *~/.bash_profile*:
+Here's how it works. When you pass `--eval`, Keychain prints shell commands that set the environment variables needed by `ssh` and `scp` to find the running `ssh-agent`. Your shell's built-in *eval* executes those commands in the current shell. Keychain emits the appropriate environment syntax for the selected shell, but the surrounding command substitution must also use that shell's syntax. From an interactive Bash or Zsh terminal, run:
 
 ```
-eval $(keychain add --eval id_ed25519)
+eval "$(keychain add --eval id_ed25519)"
 ```
+
+The shell runs Keychain before `eval` processes its output, so `--eval` does not prevent a key-loading prompt. For automatic startup, use the guarded recipes in `keychain man topic:env`.
 
 If you just want to retrieve the agent environment without adding any keys, use the `keychain env --target eval` action instead, or source the appropriate pidfile.
 
@@ -210,11 +212,13 @@ If you just want to retrieve the agent environment without adding any keys, use 
 
 After loading keys, push `SSH_AUTH_SOCK` and `SSH_AGENT_PID` into the calling user's systemd user environment block using `systemctl --user set-environment`. This makes the agent environment available to all child systemd units (services, timers) without requiring them to source a pidfile.
 
-Use this option when your user session is managed by systemd and you need background services to access the SSH agent. For example, add it to your shell startup alongside `--eval`:
+Use this option when your user session is managed by systemd and you need background services to access the SSH agent. From an interactive Bash or Zsh terminal, run:
 
 ```
-eval $(keychain add --eval --systemd id_ed25519)
+eval "$(keychain add --eval --systemd id_ed25519)"
 ```
+
+For automatic startup, add `--systemd` to both Keychain invocations in the Bash or fish recipe in `keychain man topic:env`. Keep `--noask` in the non-interactive branch so publishing the agent environment does not prompt for keys.
 
 The `--systemd` flag is a side-effecting operation that runs `systemctl` directly; it does not print any shell code. If you only need to update the systemd environment without loading keys, use `keychain env --target systemd` instead, which prints the agent environment in systemd `EnvironmentFile=` format (bare `KEY=value` lines).
 
@@ -228,7 +232,7 @@ This is intentionally an SSH-only compatibility option. GPG key arguments are ig
 
 When requested SSH keys are missing, start `ssh-add` without displaying `Press Enter to run ssh-add in this terminal`. Immediate invocations can prompt independently, so a hidden terminal's passphrase request does not prevent a visible terminal from loading keys. After another terminal completes loading, each invocation checks its own requested keys and cancels its unfinished `ssh-add` if those keys are now available.
 
-This option does not suppress an `ssh-add` passphrase prompt, hide errors, disable coordination, or imply `--quiet`. For quiet automatic shell startup, use:
+This option does not suppress an `ssh-add` passphrase prompt, hide errors, disable coordination, or imply `--quiet`. For quiet automatic activation, add `--quiet --immediate` to the interactive branch of your startup recipe (see `keychain man topic:env`). The corresponding command in an interactive Bash or Zsh terminal is:
 
 ```
 eval "$(keychain add --eval --quiet --immediate id_ed25519)"
@@ -402,6 +406,8 @@ Records are plain text and include a UTC timestamp, process ID, and terminal nam
 ```
 eval "$(keychain add --eval --debug-log ~/.keychain/debug.log id_ed25519)"
 ```
+
+For shell startup, add `--debug-log FILE` to both branches of the Bash or fish recipe in `keychain man topic:env`, retaining `--noask` in the non-interactive branch.
 
 The log records Keychain's decisions, not terminal input, passphrases, or private-key contents. It does not capture prompts that `ssh-add` writes directly to its terminal. Review paths and configuration details before sharing a log in a bug report. Remove the option when troubleshooting is complete; Keychain does not rotate the log.
 
@@ -613,13 +619,81 @@ The coordination state file is a result record, not a list of live processes or 
 
 == @topic env: Environment emission and shell integration [category=reference, priority=50]
 
-Keychain's primary job is to set `SSH_AUTH_SOCK` and `SSH_AGENT_PID` in your shell environment so that `ssh`, `scp`, and related tools can find the running agent. The most common approach is to use `eval` in your shell startup file. Add a line to your `~/.bash_profile`, `~/.zprofile`, or equivalent, such as:
+Keychain sets `SSH_AUTH_SOCK` and `SSH_AGENT_PID` so `ssh`, `scp`, and related tools can find the running agent. The `--eval` flag emits environment assignments for your shell to execute. Interactive terminals load your keys; non-interactive login shells establish the agent environment without prompting. This distinction lets graphical-session startup finish even when it runs a login shell whose terminal you cannot access.
+
+Choose the recipe for your shell and replace the filenames in `KEYCHAIN_KEYS` with your keys. Keep one key per line and quote filenames containing spaces. The key list is a shell variable and does not need to be exported. Keep unrelated existing configuration, and replace any older Keychain startup invocation rather than adding a second one.
+
+*Bash startup.* Add this to `~/.bash_profile`, keeping any existing configuration:
 
 ```
-eval $(keychain add --eval id_ed25519)
+KEYCHAIN_KEYS=(
+    ~/.ssh/id_ed25519
+    ~/.ssh/id_rsa
+)
+
+if [[ $- == *i* ]]; then
+    eval "$(keychain add --eval "${KEYCHAIN_KEYS[@]}")"
+else
+    eval "$(keychain add --eval --noask)"
+fi
 ```
 
-The `--eval` flag (or `env --target eval`) detects your shell and prints the appropriate syntax (Bourne, C-shell, or fish). This approach loads your keys and sets the environment in one step.
+Bash reads `.bash_profile` for login shells, including non-interactive ones. The `i` in `$-` identifies an interactive shell; `--noask` skips key loading in the other branch.
+
+*Zsh startup.* Add this to `~/.zshrc`, which is read only by interactive shells:
+
+```
+KEYCHAIN_KEYS=(
+    ~/.ssh/id_ed25519
+    ~/.ssh/id_rsa
+)
+eval "$(keychain add --eval "${KEYCHAIN_KEYS[@]}")"
+```
+
+If your graphical session also needs the agent environment, add `eval "$(keychain add --eval --noask)"` to `~/.zprofile`. That login-shell file can run non-interactively; key loading belongs in `.zshrc`.
+
+*Fish startup.* Add this to `~/.config/fish/config.fish`, keeping any existing configuration:
+
+```
+set KEYCHAIN_KEYS \
+    ~/.ssh/id_ed25519 \
+    ~/.ssh/id_rsa
+
+if status is-interactive
+    eval "$(keychain add --eval $KEYCHAIN_KEYS)"
+else if status is-login
+    eval "$(keychain add --eval --noask)"
+end
+```
+
+Fish reads `config.fish` for every shell. This recipe loads keys only in interactive shells, uses `--noask` for non-interactive login shells, and skips Keychain in other non-interactive shells. This avoids the inaccessible startup prompt reported with SDDM graphical login.
+
+*Bash alternative: load keys from .bashrc.* Use this arrangement if you want both interactive login shells and interactive non-login terminals to run Keychain. In `~/.bash_profile`, source `.bashrc` for interactive logins and establish the agent environment for non-interactive logins:
+
+```
+if [[ $- == *i* ]]; then
+    if [[ -f ~/.bashrc ]]; then
+        source ~/.bashrc
+    fi
+else
+    eval "$(keychain add --eval --noask)"
+fi
+```
+
+In `~/.bashrc`, keep the key list and interactive key loading together:
+
+```
+KEYCHAIN_KEYS=(
+    ~/.ssh/id_ed25519
+    ~/.ssh/id_rsa
+)
+
+if [[ $- == *i* ]]; then
+    eval "$(keychain add --eval "${KEYCHAIN_KEYS[@]}")"
+fi
+```
+
+Place the `.bashrc` block after any existing early return for non-interactive shells. If `.bash_profile` already sources `.bashrc`, use the conditional source above in place of that existing source command. Keychain then runs once per interactive shell, while non-interactive logins still receive the agent environment without loading keys.
 
 *Alternate Option 1: Source the per-host pidfile directly.* If you prefer not to invoke Keychain in every shell, source the pidfile that Keychain writes after the first run. For Bourne-style shells, run `. ~/.keychain/$(hostname)-sh`; for fish, run `source ~/.keychain/$(hostname)-fish`. This is faster because it avoids a Python invocation, but it requires that Keychain has already run at least once to create the pidfile.
 

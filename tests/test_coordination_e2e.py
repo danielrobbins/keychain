@@ -6,7 +6,9 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -228,6 +230,94 @@ def activation_session():
                 session.env.update(session.agent.as_dict())
             if session.agent:
                 session.run(["ssh-agent", "-k"])
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="Bash login startup requires bash")
+@pytest.mark.parametrize(
+    ("document", "split"),
+    [("README.md", False), ("man/embedded-docs.txt", False), ("man/embedded-docs.txt", True)],
+    ids=["readme", "manual", "manual-bashrc-alternative"],
+)
+@pytest.mark.parametrize("interactive", [False, True], ids=["noninteractive-login", "interactive-login"])
+@pytest.mark.parametrize("immediate", [False, True], ids=["enter-activation", "immediate-activation"])
+@pytest.mark.parametrize("guarded", [False, True], ids=["unconditional-startup", "guarded-startup"])
+def test_bash_login_startup_with_terminal(activation_session, document, split, interactive, immediate, guarded):
+    session = activation_session
+    bash = shutil.which("bash")
+    session.env["SHELL"] = bash
+    sshdir = session.home / ".ssh"
+    sshdir.mkdir()
+    (sshdir / "id_ed25519").symlink_to(session.key)
+    second_key = sshdir / "id_rsa"
+    result = session.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(second_key)])
+    assert result.returncode == 0, result.stderr
+    options = [*session.options, *(["--immediate"] if immediate else [])]
+    invocation = 'eval "$(keychain add --eval ~/.ssh/id_ed25519)"'
+    if guarded:
+        text = (ROOT / document).read_text(encoding="utf-8")
+        blocks = re.findall(r"```(?:bash)?\n(.*?)\n```", text, re.DOTALL)
+        recipes = [block for block in blocks if block.startswith("KEYCHAIN_KEYS=") and "\nif [[ $- " in block]
+        if split:
+            invocation = next(block for block in blocks if block.startswith("if [[ $- ") and "source ~/.bashrc" in block)
+            (session.home / ".bashrc").write_text(recipes[-1], encoding="utf-8")
+        else:
+            invocation = recipes[0]
+    profile = session.home / ".bash_profile"
+    profile.write_text(
+        'keychain() { printf "invoked\\n" >> "$HOME/invocations"; '
+        f'command {shlex.quote(sys.executable)} -m keychain "$@" {shlex.join(options)}; }}\n'
+        + invocation
+        + "\n",
+        encoding="utf-8",
+    )
+    # Skip the host's /etc/profile, which may alter HOME or run unrelated login
+    # hooks. Explicitly source our profile in a real Bash login shell.
+    interactive_check = "==" if interactive else "!="
+    script = (
+        "shopt -q login_shell || exit 90; "
+        f"[[ $- {interactive_check} *i* ]] || exit 91; "
+        'printf "LOGIN_STARTED\\n"; '
+        'source "$HOME/.bash_profile"; '
+        'printf "LOGIN_FINISHED\\n"'
+    )
+    entry = "import fcntl, os, sys, termios; fcntl.ioctl(0, termios.TIOCSCTTY, 0); os.execv(sys.argv[1], sys.argv[1:])"
+    terminal = Terminal(
+        [
+            sys.executable,
+            "-c",
+            entry,
+            bash,
+            "--noprofile",
+            "--norc",
+            "--login",
+            *(["-i"] if interactive else []),
+            "-c",
+            script,
+        ],
+        session.env,
+        session.terminals,
+    )
+    session.terminals.append(terminal)
+    terminal.expect("LOGIN_STARTED")
+    if guarded and not interactive:
+        terminal.finish()
+        assert b"LOGIN_FINISHED" in terminal.output
+        assert b"Press Enter" not in terminal.output
+        assert b"Enter passphrase" not in terminal.output
+        result = session.run(["ssh-add", "-l"])
+        assert result.returncode == 1, result.stdout + result.stderr
+    else:
+        terminal.expect("Enter passphrase" if immediate else "Press Enter to run ssh-add")
+        assert terminal.proc.poll() is None
+        assert b"LOGIN_FINISHED" not in terminal.output
+        if not immediate:
+            terminal.send("\n")
+        session.unlock(terminal)
+        assert b"LOGIN_FINISHED" in terminal.output
+        if guarded:
+            public_key = second_key.with_suffix(".pub").read_text().split()[1]
+            assert public_key in session.run(["ssh-add", "-L"]).stdout
+    assert (session.home / "invocations").read_text().splitlines() == ["invoked"]
 
 
 @pytest.mark.parametrize("quiet", [False, True], ids=["normal", "quiet"])
