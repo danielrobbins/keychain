@@ -182,8 +182,8 @@ class TestKeychainPathsWriteRead:
         kp = KeychainPaths(keydir=tmp_path, host="box")
         kp.write(SshAgentRef.from_text(AGENT_SH_OUTPUT), _out())
         fish = kp.pidfile_path("fish").read_text()
-        assert "set -x -U SSH_AUTH_SOCK" in fish
-        assert "set -x -U SSH_AGENT_PID" in fish
+        assert "set -x -g SSH_AUTH_SOCK" in fish
+        assert "set -x -g SSH_AGENT_PID" in fish
 
     def test_clear_removes_pidfiles(self, short_keydir):
         kp = KeychainPaths(keydir=short_keydir, host="box")
@@ -218,6 +218,27 @@ class TestKeychainPathsWriteRead:
 
 
 class TestKeychainPathsRenderEnv:
+    @pytest.mark.parametrize(
+        ("shell", "cleanup"),
+        [("sh", "unset SSH_AGENT_PID;"), ("csh", "unsetenv SSH_AGENT_PID;"), ("fish", "set -x -g SSH_AGENT_PID '';")],
+    )
+    def test_socket_only_output_clears_stale_pid(self, tmp_path, shell, cleanup):
+        paths = KeychainPaths(keydir=tmp_path, host="box")
+        assert cleanup in paths.render_env(SshAgentRef(sock="/tmp/live.sock"), shell)
+        assert paths.render_env(SshAgentRef(), shell) == ""
+
+    @pytest.mark.skipif(os.name == "nt", reason="requires a Bourne shell")
+    def test_socket_only_sh_output_removes_inherited_pid(self, tmp_path):
+        rendered = KeychainPaths(keydir=tmp_path, host="box").render_env(SshAgentRef(sock="/tmp/live.sock"), "sh")
+        result = subprocess.run(
+            ["sh", "-c", rendered + 'test "$SSH_AUTH_SOCK" = /tmp/live.sock && test "${SSH_AGENT_PID+x}" != x'],
+            env={**os.environ, "SSH_AUTH_SOCK": "/tmp/old.sock", "SSH_AGENT_PID": "9999"},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+
     def test_sh_output_renders_passed_env_not_pidfile(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path, host="box")
         kp.write(SshAgentRef(sock="/tmp/stale.sock", pid="9999"), _out())
@@ -244,8 +265,8 @@ class TestKeychainPathsRenderEnv:
 
         rendered = kp.render_env(SshAgentRef(sock="/tmp/live.sock", pid="1111"), "fish")
 
-        assert "set -x -U SSH_AUTH_SOCK '/tmp/live.sock';" in rendered
-        assert "set -x -U SSH_AGENT_PID '1111';" in rendered
+        assert "set -x -g SSH_AUTH_SOCK '/tmp/live.sock';" in rendered
+        assert "set -x -g SSH_AGENT_PID '1111';" in rendered
         assert "/tmp/stale.sock" not in rendered
 
     def test_eval_output_uses_shell_but_renders_passed_env(self, tmp_path):
@@ -258,8 +279,8 @@ class TestKeychainPathsRenderEnv:
             {"SHELL": "/usr/bin/fish"},
         )
 
-        assert "set -x -U SSH_AUTH_SOCK '/tmp/live.sock';" in rendered
-        assert "set -x -U SSH_AGENT_PID '1111';" in rendered
+        assert "set -x -g SSH_AUTH_SOCK '/tmp/live.sock';" in rendered
+        assert "set -x -g SSH_AGENT_PID '1111';" in rendered
         assert "/tmp/stale.sock" not in rendered
 
     def test_shell_renderers_quote_hostile_values(self, tmp_path):
@@ -269,7 +290,7 @@ class TestKeychainPathsRenderEnv:
 
         assert f"SSH_AUTH_SOCK={shlex.quote(value)};" in kp.render_env(env, "sh")
         assert f"setenv SSH_AUTH_SOCK {shlex.quote(value)};" in kp.render_env(env, "csh")
-        assert "set -x -U SSH_AUTH_SOCK '/tmp/$(touch /tmp/keychain-pwn)/agent\\'quoted';" in kp.render_env(env, "fish")
+        assert "set -x -g SSH_AUTH_SOCK '/tmp/$(touch /tmp/keychain-pwn)/agent\\'quoted';" in kp.render_env(env, "fish")
 
     @pytest.mark.skipif(os.name == "nt", reason="requires a Bourne shell")
     def test_sh_output_treats_hostile_socket_as_data(self, tmp_path):
