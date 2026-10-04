@@ -1,8 +1,13 @@
 # ChangeLog
 
-## Unreleased
+## 3.0.7
 
+Keychain 3.0.7 is a maintenance release focused on fish shell fixes, reliable shell startup and keeping each terminal's SSH agent environment consistent.
+
+- Fish agent variables now apply only to the current shell and its child processes, rather than being persisted and shared with other fish sessions. Thanks to Joseph Helfer (@jojhelfer) for the original fix in PR #250.
+- Selecting an agent with no local PID, such as a forwarded agent, now clears a previous agent's PID from the exported shell environment instead of leaving a misleading value behind.
 - Corrected Bash and fish shell startup guidance so graphical login can finish without waiting for an inaccessible key-loading prompt. The recipes keep the editable key list separate from the startup checks; interactive terminals still load keys normally (#245).
+- Extended cross-platform testing to Python 3.15 release candidates and corrected a race in test cleanup when an exiting SSH agent removes its socket.
 
 ## 3.0.6
 
