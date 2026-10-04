@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import json
 import os
 import shutil
@@ -154,7 +155,49 @@ def playbook(tmp_path, monkeypatch, capsys):
     finally:
         runner.cleanup_agents()
         if home != tmp_path:
-            shutil.rmtree(home)
+            remove_test_home(home)
+
+
+def remove_test_home(home: Path) -> None:
+    def onerror(_function, path, exc_info):
+        error = exc_info[1]
+        if not isinstance(error, FileNotFoundError) or Path(path) == home:
+            raise error
+
+    # An exiting ssh-agent can unlink its socket while the tree is being removed.
+    shutil.rmtree(home, onerror=onerror)
+
+
+@pytest.mark.parametrize("error_type", [FileNotFoundError, PermissionError])
+def test_test_home_cleanup_handles_only_disappearing_files(tmp_path, monkeypatch, error_type):
+    home = tmp_path / "isolated-home"
+    home.mkdir()
+    socket = home / "agent.sock"
+    socket.touch()
+    real_unlink = os.unlink
+
+    def racing_unlink(path, *args, **kwargs):
+        if Path(path).name == "agent.sock":
+            if error_type is FileNotFoundError:
+                real_unlink(path, *args, **kwargs)
+            code = errno.ENOENT if error_type is FileNotFoundError else errno.EACCES
+            raise error_type(code, os.strerror(code), str(path))
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(os, "unlink", racing_unlink)
+        if error_type is PermissionError:
+            with pytest.raises(PermissionError) as caught:
+                remove_test_home(home)
+            assert caught.value.errno == errno.EACCES
+        else:
+            remove_test_home(home)
+            assert not home.exists()
+
+
+def test_test_home_cleanup_reports_missing_top_level_directory(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        remove_test_home(tmp_path / "missing-home")
 
 
 def test_playbook_cleanup_preserves_agents_outside_isolated_home(playbook, monkeypatch) -> None:
