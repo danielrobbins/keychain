@@ -5,6 +5,7 @@
 # Targets:
 #   make precompiled-pyz - build for the interpreter selected by PYTHON
 #   make keychain.pyz   — build the zipapp
+#   make keychain.1     — build the man page from the embedded docs
 #   make clean          — remove build artifacts
 
 V := $(shell cat VERSION)
@@ -15,10 +16,14 @@ PYZ_STAGE = build/$@-stage
 
 .PHONY : all clean keychain.pyz keychain-precompiled.pyz precompiled-pyz release-artifacts
 
-all : keychain.pyz
+all : keychain.pyz keychain.1
 
 src/keychain/docs/_doc_texts.json : man/embedded-docs.txt scripts/build_doc_texts.py
 	"$(PYTHON)" scripts/build_doc_texts.py
+
+keychain.1 : src/keychain/docs/_doc_texts.json $(shell find src/keychain -name '*.py')
+	PYTHONPATH=src "$(PYTHON)" -m keychain man --roff > $@.tmp
+	mv $@.tmp $@
 
 precompiled-pyz : keychain-precompiled.pyz
 
@@ -51,5 +56,5 @@ release-artifacts : dist/keychain-$(V).pyz dist/SHA256SUMS
 	cd dist && sha256sum -c SHA256SUMS
 
 clean :
-	rm -rf dist build keychain.pyz keychain-precompiled.pyz src/keychain/docs/_doc_texts.json
+	rm -rf dist build keychain.pyz keychain-precompiled.pyz keychain.1 keychain.1.tmp src/keychain/docs/_doc_texts.json
 	find src -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true

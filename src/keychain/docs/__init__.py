@@ -1185,6 +1185,12 @@ def run_man(args, out) -> int:
         out.write(_render_list_from_index(index, out) + "\n")
         return 0
 
+    if bool(args.get_value("roff")):
+        from .roff import render_manual
+
+        sys.stdout.write(render_manual(index))
+        return 0
+
     topics = list(args.get_value("topics") or [])
     # Default width cap: 80 cols is readable; terminal width is a fallback.
     width = int(args.get_value("width") or 80)

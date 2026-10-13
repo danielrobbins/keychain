@@ -3,6 +3,7 @@
 keychain.iml
 /keychain
 /keychain.1
+/keychain.1.tmp
 /keychain.txt
 /lint_out.txt
 /pytest_out.txt

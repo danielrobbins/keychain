@@ -285,7 +285,7 @@ def _stringify(parts: Renderable) -> str:
     return "".join(str(p) for p in parts)
 
 
-def _split_doc_inline(text: str) -> list[tuple[str, str]]:
+def split_doc_inline(text: str) -> list[tuple[str, str]]:
     parts: list[tuple[str, str]] = []
     pos = 0
     for match in _DOC_INLINE_MARKUP_RE.finditer(text):
@@ -302,7 +302,7 @@ def _split_doc_inline(text: str) -> list[tuple[str, str]]:
 
 
 def _strip_doc_inline(text: str) -> str:
-    return "".join(chunk for chunk, _kind in _split_doc_inline(text))
+    return "".join(chunk for chunk, _kind in split_doc_inline(text))
 
 
 def _visible_width(text: str) -> int:
@@ -494,7 +494,7 @@ class Output:
         emph_on = self._theme.roles.get("doc_emph", "")
         off = self._theme.reset
         out: list[str] = []
-        for chunk, kind in _split_doc_inline(text):
+        for chunk, kind in split_doc_inline(text):
             if kind == "code":
                 out.append(f"{code_on}{chunk}{off}")
             elif kind == "emph":
@@ -515,7 +515,7 @@ class Output:
         line_has_text = bool(prefix)
         pending_space = ""
 
-        for chunk, kind in _split_doc_inline(text):
+        for chunk, kind in split_doc_inline(text):
             for token in re.findall(r"\s+|\S+", chunk):
                 if token.isspace():
                     pending_space = " "

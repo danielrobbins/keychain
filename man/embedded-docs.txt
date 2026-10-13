@@ -381,6 +381,14 @@ Skip the automatic `$PAGER` invocation even when stdout is a terminal.
 
 Explicit wrap width. Defaults to `$COLUMNS` then 80.
 
+== @option man-roff: emit the manual as roff man page source
+
+Write the manual as roff `man(7)` source, for installation as `keychain.1`. Never paged, and `--width` does not apply. `$SOURCE_DATE_EPOCH` pins the header date.
+
+```
+keychain man --roff > keychain.1
+```
+
 == @global help: print help
 
 Print the top-level help cheat sheet, or action-specific help when followed by an action path. `-h` is an alias.
