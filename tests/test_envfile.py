@@ -53,7 +53,7 @@ class TestEnvAction:
         keydir = tmp_path / ".keychain"
         keydir.mkdir(mode=0o700)
         # Create a fake socket file the validity probe will accept by also
-        # patching ssh_socket_valid below.
+        # patching validate_ssh_socket below.
         sock = tmp_path / "agent.sock"
         sock.write_bytes(b"")
         pidfile = keydir / "myhost-sh"

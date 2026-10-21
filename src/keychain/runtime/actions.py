@@ -155,12 +155,6 @@ class Option(Element):
         return out
 
     @property
-    def argparse_flags(self) -> list[str]:
-        flags = [self.option] if self.option else []
-        flags.extend(self.cli_aliases)
-        return flags
-
-    @property
     def takes_value(self) -> bool:
         return self.type != "bool" and self.cli_const is None
 

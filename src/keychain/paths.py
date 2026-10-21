@@ -226,10 +226,6 @@ class KeychainPaths:
         return tuple(self.keydir / f"{self.host}{pf_cls.suffix}" for pf_cls in _PID_FACTORIES.values())
 
     @property
-    def lockf(self):
-        return self.keydir / f"{self.host}-lockf"
-
-    @property
     def state_file(self) -> Path:
         return self.keydir / f"{self.host}.state.json"
 

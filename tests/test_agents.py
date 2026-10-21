@@ -607,12 +607,12 @@ class TestSshAgentStop:
 
 
 # ---------------------------------------------------------------------------
-# ssh_socket_valid (owner check)
+# validate_ssh_socket (owner check)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX-only: socket owner check")
-class TestSshSocketValid:
+class TestValidateSshSocket:
     def test_real_socket_owned_by_us_is_valid(self, tmp_path, monkeypatch):
         """Verify a real AF_UNIX socket owned by the current user is accepted because that is the expected shape of a usable SSH agent socket."""
         # macOS caps AF_UNIX paths at 104 bytes (Linux: 108); GitHub Actions
@@ -624,7 +624,6 @@ class TestSshSocketValid:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.bind("agent.sock")
         try:
-            assert agents.ssh_socket_valid(str(sock_path)) is True
             assert agents.validate_ssh_socket(str(sock_path)) == agents.SocketValidation(str(sock_path), True)
         finally:
             s.close()
@@ -633,7 +632,6 @@ class TestSshSocketValid:
         """Verify regular files are rejected because only socket filesystem entries can back SSH_AUTH_SOCK."""
         f = tmp_path / "not_a_socket"
         f.write_text("x")
-        assert agents.ssh_socket_valid(str(f)) is False
         assert agents.validate_ssh_socket(str(f)).reason == "not-socket"
         assert agents.validate_ssh_socket(str(f)).severity == "warn"
 
@@ -646,7 +644,6 @@ class TestSshSocketValid:
         s.bind("agent.sock")
         try:
             link_path.symlink_to(sock_path)
-            assert agents.ssh_socket_valid(str(link_path)) is False
             assert agents.validate_ssh_socket(str(link_path)).reason == "symlink"
             assert agents.validate_ssh_socket(str(link_path)).severity == "err"
         finally:
@@ -654,12 +651,10 @@ class TestSshSocketValid:
 
     def test_missing_path_is_not_valid(self, tmp_path):
         """Verify missing paths are rejected because a nonexistent socket cannot connect to an agent."""
-        assert agents.ssh_socket_valid(str(tmp_path / "nope")) is False
         assert agents.validate_ssh_socket(str(tmp_path / "nope")).reason == "missing"
 
     def test_empty_path_is_not_valid(self):
         """Verify the empty path is rejected because there is no socket location to validate."""
-        assert agents.ssh_socket_valid("") is False
         assert agents.validate_ssh_socket("").reason == "empty"
 
     def test_foreign_owner_rejected(self, tmp_path, monkeypatch):
@@ -672,7 +667,6 @@ class TestSshSocketValid:
             # Pretend our uid is one we definitely don't match.
             real_uid = os.getuid()
             monkeypatch.setattr(os, "getuid", lambda: real_uid + 99999)
-            assert agents.ssh_socket_valid(str(sock_path)) is False
             assert agents.validate_ssh_socket(str(sock_path)).reason == "foreign-owner"
             assert agents.validate_ssh_socket(str(sock_path)).severity == "err"
         finally:
