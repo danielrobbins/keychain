@@ -24,11 +24,63 @@ subprocesses or to emit as shell eval output.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 _ENV_KEYS = ("SSH_AUTH_SOCK", "SSH_AGENT_PID")
+
+
+# ``VAR=value; export VAR`` as printed by ``ssh-agent -s`` (value unquoted) and
+# as written to the pidfile (value shell-quoted).  The value runs up to the
+# *last* ``; export VAR`` so that a ``;`` inside the path is kept.
+_EXPORT_RE = re.compile(r"^(SSH_AUTH_SOCK|SSH_AGENT_PID)=(.*);\s*export\s+\1\s*;?$")
+
+
+def _unquote(value: str) -> str:
+    """Undo shell quoting if *value* is exactly one quoted word; else keep it raw.
+
+    ``ssh-agent`` prints paths unquoted, so a bare value is taken literally.
+    """
+    if value[:1] in ("'", '"'):
+        try:
+            words = shlex.split(value)
+        except ValueError:
+            return value
+        if len(words) == 1:
+            return words[0]
+    return value
+
+
+def _split_commands(line: str) -> list[list[str]]:
+    """Split one pidfile line on unquoted ``;`` into lists of shell words.
+
+    A ``;`` inside quotes belongs to the value (a socket path under a
+    directory such as ``/tmp/a;b`` is quoted by the writer), so the line
+    cannot simply be split on every ``;``.
+    """
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";")
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        # Unbalanced quote: fall back to per-segment parsing so one bad
+        # segment does not hide the others.
+        commands = []
+        for part in line.split(";"):
+            try:
+                commands.append(shlex.split(part))
+            except ValueError:
+                continue
+        return commands
+    commands = [[]]
+    for token in tokens:
+        if token == ";":
+            commands.append([])
+        else:
+            commands[-1].append(token)
+    return commands
 
 
 @dataclass(frozen=True)
@@ -73,11 +125,11 @@ class SshAgentRef:
             line = raw.strip()
             if not line or line.startswith("echo "):
                 continue
-            for part in line.split(";"):
-                try:
-                    words = shlex.split(part)
-                except ValueError:
-                    continue
+            exported = _EXPORT_RE.match(line)
+            if exported:
+                values[exported.group(1)] = _unquote(exported.group(2))
+                continue
+            for words in _split_commands(line):
                 key, sep, value = (words[0] if len(words) == 1 else "").partition("=")
                 if sep and key in _ENV_KEYS:
                     values[key] = value
