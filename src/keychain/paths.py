@@ -34,11 +34,16 @@ def _validate_value(value: str) -> None:
         raise KeychainError("Agent environment values cannot contain NUL or line breaks")
 
 
-def _quote(value: str, *, fish: bool = False) -> str:
+def _quote(value: str, *, fish: bool = False, csh: bool = False) -> str:
     _validate_value(value)
     if fish:
         return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-    return shlex.quote(value)
+    quoted = shlex.quote(value)
+    if csh:
+        # csh performs history substitution even inside single quotes; a
+        # backslash before "!" suppresses it and is itself removed.
+        quoted = quoted.replace("!", "\\!")
+    return quoted
 
 
 @dataclass(frozen=True)
@@ -103,9 +108,9 @@ class CshPidfile(Pidfile):
     def render(self, env: SshAgentRef) -> str:
         parts = []
         if env.sock:
-            parts.append(f"setenv SSH_AUTH_SOCK {_quote(env.sock)};")
+            parts.append(f"setenv SSH_AUTH_SOCK {_quote(env.sock, csh=True)};")
         if env.pid:
-            parts.append(f"setenv SSH_AGENT_PID {_quote(env.pid)};")
+            parts.append(f"setenv SSH_AGENT_PID {_quote(env.pid, csh=True)};")
         elif env.sock:
             parts.append("unsetenv SSH_AGENT_PID;")
         return ("\n".join(parts) + "\n") if parts else ""
