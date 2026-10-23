@@ -1,5 +1,14 @@
 # ChangeLog
 
+## 3.0.8
+
+This release improves reliability in less common shell setups and makes Keychain's documentation available through standard system tools.
+
+- Semicolons, quotes or spaces in an agent's socket path could prevent Keychain from reconnecting to it, causing repeated invocations to start additional agents. Keychain now preserves the exact path when starting and reusing agents, including custom socket paths (PR #271).
+- In csh and tcsh, a socket path containing `!` could trigger shell history expansion instead of setting the agent environment correctly. Keychain now escapes these characters so the shell receives the intended path (PR #272).
+- A conventional `man keychain` page can now be installed alongside Keychain. It is generated from the same documentation as the built-in `keychain man`, so both stay in sync. `keychain man --roff` generates the page, `make install-man` supports installation and package staging, and release downloads include `keychain.1` with its checksum. Thanks to Andrew Davis (@Davis-A) for the original contribution in PR #269.
+- Expanded tests using real agents, shells and rendered manual pages, and removed unused internal code (PR #273). Thanks to @tarilka0gg for contributing the path fixes, tests and cleanup.
+
 ## 3.0.7
 
 Keychain 3.0.7 is a maintenance release focused on fish shell fixes, reliable shell startup and keeping each terminal's SSH agent environment consistent.
