@@ -13,8 +13,8 @@ Keychain reads these from three sources, each handled by a separate factory:
   which parses the sh-syntax lines.
 * **inherited shell environment** — use :meth:`SshAgentRef.from_env`, which reads
   the two keys directly from an env dict (e.g. the process's ``os.environ``).
-* **spawning a new agent** — the agent subprocess writes its own pidfile;
-  the caller re-parses it with :meth:`SshAgentRef.from_text`.
+* **spawning a new agent** — use :meth:`SshAgentRef.from_agent_output` with
+  the requested socket address; only the PID is read from ``ssh-agent -s``.
 
 Once constructed, :meth:`SshAgentRef.overlay` produces a copy of a base
 environment with the agent variables set correctly, ready to pass to
@@ -24,6 +24,7 @@ subprocesses or to emit as shell eval output.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -73,15 +74,25 @@ class SshAgentRef:
             line = raw.strip()
             if not line or line.startswith("echo "):
                 continue
-            for part in line.split(";"):
-                try:
-                    words = shlex.split(part)
-                except ValueError:
-                    continue
-                key, sep, value = (words[0] if len(words) == 1 else "").partition("=")
-                if sep and key in _ENV_KEYS:
-                    values[key] = value
+            lexer = shlex.shlex(line, posix=True)
+            lexer.whitespace += ";"
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            try:
+                for word in lexer:
+                    key, sep, value = word.partition("=")
+                    if sep and key in _ENV_KEYS:
+                        values[key] = value
+            except ValueError:
+                continue
         return cls.from_env(values)
+
+    @classmethod
+    def from_agent_output(cls, text: str, sock: str) -> SshAgentRef:
+        """Combine the requested socket with the PID, ignoring socket output quoting."""
+        # The PID follows the socket output, which could itself contain newlines.
+        pids = re.findall(r"^SSH_AGENT_PID=([1-9][0-9]*); export SSH_AGENT_PID;$", text, re.M)
+        return cls(sock, pids[-1]) if pids else cls()
 
     @property
     def display_pid(self) -> str:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import getopt
 import os
 import re
 import shlex
@@ -493,6 +494,13 @@ class SshAgent:
                     cmd += ["-a", ssh_agent_socket]
                 # KEYCHAIN_SSH_AGENT_ARGS is injected by config.py only with --allow-env / -E.
                 cmd += _split_agent_args(self.keychain_state.env.get("KEYCHAIN_SSH_AGENT_ARGS", ""), "SSH")
+                # OpenSSH's last -a wins, including joined/grouped forms in extra arguments.
+                # Its option grammar also includes Apple's launchd flag (-l).
+                try:
+                    options, _ = getopt.getopt(cmd[1:], "cDdksTuUVlA:E:a:O:P:t:")
+                except getopt.GetoptError as exc:
+                    raise KeychainError(f"Invalid SSH agent arguments: {exc}") from exc
+                ssh_agent_socket = dict(options)["-a"]
                 spawn_env = dict(self.keychain_state.env)
                 if native_confirm:
                     askpass = spawn_env.get("SSH_ASKPASS")
@@ -509,9 +517,9 @@ class SshAgent:
                     if detail:
                         raise KeychainError(f"ssh-agent failed to start: {detail}")
                     raise KeychainError(f"ssh-agent failed to start with exit status {r.returncode}")
-                spawned = SshAgentRef.from_text(r.stdout)
+                spawned = SshAgentRef.from_agent_output(r.stdout, ssh_agent_socket)
                 if not spawned:
-                    raise KeychainError("ssh-agent started but did not return its socket information")
+                    raise KeychainError("ssh-agent started but did not return a valid PID")
                 paths.write(spawned, self.out)
                 self.env = spawned
                 self.env_source = "spawned"
