@@ -195,8 +195,15 @@ class ActivationSession:
         pytest.fail(f"Waiter never registered:\n{terminal.output.decode(errors='replace')}")
 
     def assert_lock_available(self) -> None:
-        with ActivationLock(self.paths.activation_lockf, False, Output.silent()) as lock:
-            assert lock.acquired, "the terminated process still holds the activation lock"
+        # Reaping Keychain does not wait for ssh-add to close its inherited lock.
+        deadline = time.monotonic() + DEADLINE
+        while True:
+            with ActivationLock(self.paths.activation_lockf, False, Output.silent()) as lock:
+                if lock.acquired:
+                    return
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, f"activation lock is still held after {DEADLINE} seconds"
+            time.sleep(min(0.05, remaining))
 
     def unlock(self, terminal: Terminal) -> None:
         terminal.expect("Enter passphrase")
@@ -205,6 +212,47 @@ class ActivationSession:
         result = self.run(["ssh-add", "-L"])
         public_key = self.key.with_suffix(".pub").read_text(encoding="utf-8").split()[1]
         assert result.returncode == 0 and public_key in result.stdout, result.stdout + result.stderr
+
+
+def test_lock_check_waits_for_release(tmp_path, monkeypatch):
+    session = ActivationSession(tmp_path)
+    session.paths.keydir.mkdir()
+    waits = []
+    with ActivationLock(session.paths.activation_lockf, False, Output.silent()) as owner:
+        assert owner.acquired
+
+        def release_after_wait(delay):
+            waits.append(delay)
+            owner.release()
+
+        monkeypatch.setattr(time, "sleep", release_after_wait)
+        session.assert_lock_available()
+        # The successful check must release its own lock and need no further wait.
+        session.assert_lock_available()
+    assert len(waits) == 1
+    assert 0 < waits[0] <= DEADLINE
+
+
+def test_lock_check_fails_when_lock_stays_held(tmp_path, monkeypatch):
+    session = ActivationSession(tmp_path)
+    session.paths.keydir.mkdir()
+    elapsed = 0.0
+
+    def advance_time(delay):
+        nonlocal elapsed
+        assert delay > 0
+        elapsed += delay
+        assert elapsed <= DEADLINE, "lock check exceeded its deadline"
+
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed)
+    monkeypatch.setattr(time, "sleep", advance_time)
+    with ActivationLock(session.paths.activation_lockf, False, Output.silent()) as owner:
+        assert owner.acquired
+        with pytest.raises(AssertionError, match="activation lock"):
+            session.assert_lock_available()
+        assert elapsed == pytest.approx(DEADLINE)
+        with ActivationLock(session.paths.activation_lockf, False, Output.silent()) as contender:
+            assert not contender.acquired, "lock check must not release another owner's lock"
 
 
 @pytest.fixture
