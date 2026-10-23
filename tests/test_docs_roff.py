@@ -105,16 +105,18 @@ def test_date_ignores_a_malformed_source_date_epoch(monkeypatch):
     assert re.match(r"^\d{4}-\d{2}-\d{2}$", roff._page_date())
 
 
-def test_cli_emits_the_page_unpaged():
+@pytest.mark.parametrize("encoding", ["ascii", "cp1252", "utf-8"])
+def test_cli_emits_the_page_unpaged(encoding, monkeypatch):
+    monkeypatch.setenv("PYTHONIOENCODING", encoding)
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
     result = subprocess.run(
         [sys.executable, "-m", "keychain", "man", "--roff"],
         capture_output=True,
-        text=True,
         timeout=60,
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith(".TH KEYCHAIN 1 ")
+    assert result.stdout.decode("utf-8") == roff.render_manual()
 
 
 @pytest.mark.skipif(shutil.which("groff") is None, reason="groff not installed")

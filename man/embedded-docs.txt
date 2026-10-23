@@ -383,7 +383,7 @@ Explicit wrap width. Defaults to `$COLUMNS` then 80.
 
 == @option man-roff: emit the manual as roff man page source
 
-Write the manual as roff `man(7)` source, for installation as `keychain.1`. Never paged, and `--width` does not apply. `$SOURCE_DATE_EPOCH` pins the header date.
+Write the manual as UTF-8 roff `man(7)` source, for installation as `keychain.1`. Never paged, and `--width` does not apply. `$SOURCE_DATE_EPOCH` pins the header date.
 
 ```
 keychain man --roff > keychain.1

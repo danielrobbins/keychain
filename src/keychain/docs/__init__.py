@@ -1188,7 +1188,7 @@ def run_man(args, out) -> int:
     if bool(args.get_value("roff")):
         from .roff import render_manual
 
-        sys.stdout.write(render_manual(index))
+        sys.stdout.buffer.write(render_manual(index).encode("utf-8"))
         return 0
 
     topics = list(args.get_value("topics") or [])
