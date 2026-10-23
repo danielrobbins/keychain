@@ -442,6 +442,20 @@ The build frontend (`build`) is a build-time dependency. For offline builds, pro
 
 The portable zipapp remains a source-only, single-file alternative that runs across supported Python versions. A normal Python installation lets the distribution manage interpreter-specific bytecode without putting it in the zipapp.
 
+### Manual Page
+
+`keychain man --roff` generates a conventional UTF-8 man page from the same documentation used by `keychain man`. Releases include `keychain.1` alongside the zipapp, with both files covered by `SHA256SUMS`. From a source checkout, `make keychain.1` builds it; `make` builds both the zipapp and manual.
+
+To stage the manual for a distribution package:
+
+```bash
+make install-man PREFIX=/usr DESTDIR="$PWD/package"
+```
+
+This installs only the manual, at `package/usr/share/man/man1/keychain.1`, with mode `0644`. Without overrides, the destination is `/usr/local/share/man/man1/keychain.1`; `MANDIR` overrides the manual directory, and `DESTDIR` supplies a staging root without changing the final installation path. Installing into a system directory may require elevated privileges.
+
+A Python wheel installation does not install the conventional man page. Package maintainers can install the supplied page separately or generate it with the installed `keychain man --roff` command. Set `SOURCE_DATE_EPOCH` when generating the page to fix its header date for reproducible builds; release builds use the release commit's timestamp. `groff` is used for rendering tests, not required to generate the page.
+
 ### Precompiled Zipapp
 
 If you control which Python interpreter will run Keychain, you can build `keychain-precompiled.pyz`. It contains the same application as the portable zipapp, plus Python bytecode compiled ahead of time for your selected interpreter. This is useful for local installations as well as distribution packages:

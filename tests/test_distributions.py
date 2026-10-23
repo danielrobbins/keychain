@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Build and exercise distribution artifacts outside the source checkout."""
 
+import hashlib
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -53,6 +55,47 @@ def test_man_page_rebuilds_when_version_changes(distribution_tree, monkeypatch):
     (tree / "VERSION").write_text("9.9.9\n")
     run(["make", "--what-if=VERSION", "keychain.1", f"PYTHON={sys.executable}"], tree)
     assert '"2023-11-14" "keychain 9.9.9"' in page.read_text()
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("make"), reason="release Makefile requires POSIX tools")
+def test_release_artifacts_include_matching_manual(distribution_tree, monkeypatch):
+    tree = distribution_tree
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    run(["make", "-j2", "release-artifacts", f"PYTHON={sys.executable}"], tree)
+    version = (tree / "VERSION").read_text().strip()
+    dist = tree / "dist"
+    page = dist / "keychain.1"
+    artifact = dist / f"keychain-{version}.pyz"
+    assert page.is_file()
+    assert f'"2023-11-14" "keychain {version}"' in page.read_text(encoding="utf-8")
+    assert run([sys.executable, "-I", str(artifact), "man", "--roff"], tree.parent) == page.read_text(encoding="utf-8")
+
+    checksums = {name: digest for digest, name in (line.split() for line in (dist / "SHA256SUMS").read_text().splitlines())}
+    assert set(checksums) == {artifact.name, page.name}
+    for name, digest in checksums.items():
+        assert digest == hashlib.sha256((dist / name).read_bytes()).hexdigest()
+
+    run(["make", "clean"], tree)
+    assert not page.exists()
+    assert not (tree / "keychain.1").exists()
+
+
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("make"), reason="man-page installation requires POSIX tools")
+@pytest.mark.parametrize("options, destination", [
+    ([], "usr/local/share/man/man1/keychain.1"),
+    (["PREFIX=/usr"], "usr/share/man/man1/keychain.1"),
+    (["PREFIX=/opt/Keychain Suite"], "opt/Keychain Suite/share/man/man1/keychain.1"),
+    (["PREFIX=/usr", "MANDIR=/opt/manual pages"], "opt/manual pages/man1/keychain.1"),
+])
+def test_install_man_stages_only_manual(distribution_tree, options, destination):
+    tree = distribution_tree
+    stage = tree.parent / "package staging"
+    run(["make", "install-man", f"DESTDIR={stage}", f"PYTHON={sys.executable}", *options], tree)
+    installed = stage / destination
+    assert installed.read_bytes() == (tree / "keychain.1").read_bytes()
+    assert stat.S_IMODE(installed.stat().st_mode) == 0o644
+    assert [path for path in stage.rglob("*") if path.is_file()] == [installed]
+    assert not (tree / "keychain.pyz").exists()
 
 
 @pytest.mark.skipif(os.name == "nt" or not shutil.which("make"), reason="zipapp Makefile requires POSIX tools")

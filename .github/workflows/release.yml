@@ -52,6 +52,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
+          sudo apt-get update && sudo apt-get install -y groff
           python -m pip install --upgrade pip
           python -m pip install -e '.[dev]'
 
@@ -60,11 +61,13 @@ jobs:
 
       - name: Build release artifacts
         run: |
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           make clean
           make release-artifacts
           ./dist/keychain-${{ steps.version.outputs.version }}.pyz version 2>&1 | tee .version-smoke.txt
           grep -F "keychain ${{ steps.version.outputs.version }}" .version-smoke.txt
           ./dist/keychain-${{ steps.version.outputs.version }}.pyz man --list >/dev/null
+          ./dist/keychain-${{ steps.version.outputs.version }}.pyz man --roff | cmp - dist/keychain.1
 
       - name: Prepare release notes
         run: |
@@ -85,6 +88,7 @@ jobs:
           name: keychain-${{ steps.version.outputs.version }}
           path: |
             dist/keychain-${{ steps.version.outputs.version }}.pyz
+            dist/keychain.1
             dist/SHA256SUMS
             release-notes.md
 
@@ -110,6 +114,7 @@ jobs:
           if gh release view "${version}" >/dev/null 2>&1; then
             gh release upload "${version}" \
               "dist/keychain-${version}.pyz" \
+              dist/keychain.1 \
               dist/SHA256SUMS \
               --clobber
           else
@@ -123,6 +128,7 @@ jobs:
             fi
             gh release create "${version}" \
               "dist/keychain-${version}.pyz" \
+              dist/keychain.1 \
               dist/SHA256SUMS \
               "${args[@]}"
           fi

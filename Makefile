@@ -6,15 +6,19 @@
 #   make precompiled-pyz - build for the interpreter selected by PYTHON
 #   make keychain.pyz   — build the zipapp
 #   make keychain.1     — build the man page from the embedded docs
+#   make install-man   - install the man page (PREFIX, MANDIR, DESTDIR supported)
 #   make clean          — remove build artifacts
 
 V := $(shell cat VERSION)
 PYTHON ?= python3
+PREFIX ?= /usr/local
+MANDIR ?= $(PREFIX)/share/man
+INSTALL ?= install
 DEFAULT_ACTIVATION ?= prompt
 PYZ_INTERPRETER ?= /usr/bin/env python3
 PYZ_STAGE = build/$@-stage
 
-.PHONY : all clean keychain.pyz keychain-precompiled.pyz precompiled-pyz release-artifacts
+.PHONY : all clean install-man keychain.pyz keychain-precompiled.pyz precompiled-pyz release-artifacts
 
 all : keychain.pyz keychain.1
 
@@ -24,6 +28,10 @@ src/keychain/docs/_doc_texts.json : man/embedded-docs.txt scripts/build_doc_text
 keychain.1 : VERSION src/keychain/docs/_doc_texts.json $(shell find src/keychain -name '*.py')
 	PYTHONPATH=src "$(PYTHON)" -m keychain man --roff > $@.tmp
 	mv $@.tmp $@
+
+install-man : keychain.1
+	$(INSTALL) -d "$(DESTDIR)$(MANDIR)/man1"
+	$(INSTALL) -m 644 keychain.1 "$(DESTDIR)$(MANDIR)/man1/keychain.1"
 
 precompiled-pyz : keychain-precompiled.pyz
 
@@ -49,10 +57,13 @@ dist :
 dist/keychain-$(V).pyz : keychain.pyz | dist
 	cp keychain.pyz dist/keychain-$(V).pyz
 
-dist/SHA256SUMS : dist/keychain-$(V).pyz
-	cd dist && sha256sum keychain-$(V).pyz > SHA256SUMS
+dist/keychain.1 : keychain.1 | dist
+	cp keychain.1 dist/keychain.1
 
-release-artifacts : dist/keychain-$(V).pyz dist/SHA256SUMS
+dist/SHA256SUMS : dist/keychain-$(V).pyz dist/keychain.1
+	cd dist && sha256sum keychain-$(V).pyz keychain.1 > SHA256SUMS
+
+release-artifacts : dist/keychain-$(V).pyz dist/keychain.1 dist/SHA256SUMS
 	cd dist && sha256sum -c SHA256SUMS
 
 clean :
