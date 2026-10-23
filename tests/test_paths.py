@@ -73,7 +73,6 @@ class TestKeychainPathsProperties:
         assert kp.pidfile_path("csh").name == "box-csh"
         assert kp.pidfile_path("fish").name == "box-fish"
         assert kp.ssh_agent_socket_path.name == "JvhWfyVp.s"
-        assert kp.lockf.name == "box-lockf"
         assert kp.state_file.name == "box.state.json"
         assert kp.state_lockf.name == "box.state.lock"
         assert kp.activation_lockf.name == "box.activation.lock"

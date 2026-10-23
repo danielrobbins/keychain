@@ -96,9 +96,6 @@ class SshAgentRef:
         except ValueError:
             return None
 
-    def with_sock(self, sock: str) -> SshAgentRef:
-        return SshAgentRef(sock, self.pid, self.forwarded)
-
     def as_dict(self) -> dict[str, str]:
         """Return only the agent keys that are set, as a plain dict.
 

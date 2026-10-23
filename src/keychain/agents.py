@@ -176,11 +176,6 @@ def validate_ssh_socket(sock: str) -> SocketValidation:
     return SocketValidation(sock, True)
 
 
-def ssh_socket_valid(sock: str) -> bool:
-    """True if *sock* is a UNIX socket owned by the current user."""
-    return validate_ssh_socket(sock).valid
-
-
 # ---------------------------------------------------------------------------
 # Fingerprints
 # ---------------------------------------------------------------------------
