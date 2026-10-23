@@ -41,6 +41,20 @@ def run(argv, cwd):
     return result.stdout + result.stderr
 
 
+@pytest.mark.skipif(os.name == "nt" or not shutil.which("make"), reason="man-page Makefile requires POSIX tools")
+def test_man_page_rebuilds_when_version_changes(distribution_tree, monkeypatch):
+    tree = distribution_tree
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "1700000000")
+    run(["make", "keychain.1", f"PYTHON={sys.executable}"], tree)
+    page = tree / "keychain.1"
+    version = (tree / "VERSION").read_text().strip()
+    assert f'"2023-11-14" "keychain {version}"' in page.read_text()
+
+    (tree / "VERSION").write_text("9.9.9\n")
+    run(["make", "--what-if=VERSION", "keychain.1", f"PYTHON={sys.executable}"], tree)
+    assert '"2023-11-14" "keychain 9.9.9"' in page.read_text()
+
+
 @pytest.mark.skipif(os.name == "nt" or not shutil.which("make"), reason="zipapp Makefile requires POSIX tools")
 def test_portable_zipapp_excludes_bytecode_and_runs(distribution_tree):
     tree = distribution_tree

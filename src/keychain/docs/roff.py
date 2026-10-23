@@ -30,8 +30,8 @@ _LITERAL = "    "
 
 
 def _escape(text: str) -> str:
-    # "-" is a hyphen in roff; option names need the minus sign to stay searchable.
-    return text.replace("\\", "\\e").replace("-", "\\-")
+    # Preserve searchable options and copyable shell characters instead of typographic glyphs.
+    return text.replace("\\", "\\e").replace("-", "\\-").replace("'", "\\[aq]").replace("~", "\\[ti]")
 
 
 def _protect(text: str) -> str:

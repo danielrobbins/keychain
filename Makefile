@@ -21,7 +21,7 @@ all : keychain.pyz keychain.1
 src/keychain/docs/_doc_texts.json : man/embedded-docs.txt scripts/build_doc_texts.py
 	"$(PYTHON)" scripts/build_doc_texts.py
 
-keychain.1 : src/keychain/docs/_doc_texts.json $(shell find src/keychain -name '*.py')
+keychain.1 : VERSION src/keychain/docs/_doc_texts.json $(shell find src/keychain -name '*.py')
 	PYTHONPATH=src "$(PYTHON)" -m keychain man --roff > $@.tmp
 	mv $@.tmp $@
 

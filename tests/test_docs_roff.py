@@ -49,7 +49,7 @@ def test_every_manual_section_becomes_a_heading(page):
 
     for title in SECTION_TITLES:
         assert title in heads
-    assert "CONFIG KEYS (~/.keychainrc)" in heads
+    assert "CONFIG KEYS (\\[ti]/.keychainrc)" in heads
 
 
 def test_option_names_use_the_minus_escape(page):
@@ -131,3 +131,39 @@ def test_groff_reports_no_warnings(page, tmp_path):
 
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+@pytest.mark.skipif(shutil.which("groff") is None, reason="groff not installed")
+@pytest.mark.parametrize("style", ["literal", "inline"])
+def test_rendered_commands_keep_shell_characters(style):
+    command = "source ~/.keychain/host-sh; printf '%s\\n' '$HOME'"
+    writer = roff._Writer()
+    writer.request(".TH TEST 1")
+    body = f"```\n{command}\n```" if style == "literal" else f"`{command}`"
+    roff._render_body(body, writer)
+    result = subprocess.run(
+        ["groff", "-man", "-Tutf8", "-k", "-P-c", "-P-b", "-P-u"],
+        input="\n".join(writer.lines) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert command in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("groff") is None, reason="groff not installed")
+def test_rendered_manual_preserves_shell_startup_paths(page):
+    result = subprocess.run(
+        ["groff", "-man", "-Tutf8", "-k", "-P-c", "-P-b", "-P-u"],
+        input=page,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "~/.ssh/id_ed25519" in result.stdout
+    assert "source ~/.bashrc" in result.stdout
