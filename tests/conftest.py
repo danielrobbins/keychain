@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,9 @@ if str(SRC) not in sys.path:
 
 
 def pytest_configure() -> None:
+    # Child interpreters must import this checkout too, even without an editable install.
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    os.environ["PYTHONPATH"] = str(SRC) + (os.pathsep + pythonpath if pythonpath else "")
     subprocess.run([sys.executable, str(ROOT / "scripts" / "build_doc_texts.py")], check=True)
 
 

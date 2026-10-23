@@ -21,3 +21,14 @@ def test_module_imports_in_fresh_interpreter(module):
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_child_interpreter_imports_this_checkout_from_another_directory(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-c", "import keychain; print(keychain.__file__)"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == keychain.__file__
