@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Tests for :mod:`keychain.runtime` platform detection."""
 
+import os
 import re
 from types import SimpleNamespace
 
@@ -110,7 +111,13 @@ def test_process_list_with_illumos_ps(monkeypatch, uid, expected):
 
 @pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])
 @pytest.mark.parametrize("uid, expected", [(1000, [123, 789]), (2000, [456]), (None, [123, 456, 789])])
-def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected):
+@pytest.mark.parametrize("columns", [None, "20", "80"])
+def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected, columns):
+    if columns is None:
+        monkeypatch.delenv("COLUMNS", raising=False)
+    else:
+        monkeypatch.setenv("COLUMNS", columns)
+    parent_env = dict(os.environ)
     stdout = (
         b"      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n"
         b"      123       1     123      52000     ?       1000 15:39:13 /usr/bin/ssh-agent\n"
@@ -123,12 +130,14 @@ def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected):
 
     def fake_popen(cmd, **kwargs):
         assert cmd == ["ps", "-e", "-l"]
+        assert kwargs["env"] == {key: value for key, value in parent_env.items() if key != "COLUMNS"}
         return SimpleNamespace(communicate=lambda: (stdout, None))
 
     monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
     p = platform.detect(platform_override=name, has_ps=True)
 
     assert p.process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=uid) == expected
+    assert dict(os.environ) == parent_env
 
 
 @pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])

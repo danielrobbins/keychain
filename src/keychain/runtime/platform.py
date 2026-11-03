@@ -15,6 +15,7 @@ need to override it can call :func:`reset` and then :func:`detect` with a
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -70,6 +71,8 @@ class _PosixPlatform(Platform):
                 ["ps", "-e", "-l"] if cygwin_ps else ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                # Cygwin/MSYS ps truncates command names to COLUMNS even in a pipe.
+                env={key: value for key, value in os.environ.items() if key != "COLUMNS"},
             )
             stdout, _ = proc.communicate()
         except OSError:
