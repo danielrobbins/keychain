@@ -83,7 +83,7 @@ class _PosixPlatform(Platform):
                 )
                 if not match:
                     continue
-                parts = match.groups()
+                parts = list(match.groups())
             else:
                 parts = line.split(None, 2)
             if len(parts) < 3:
