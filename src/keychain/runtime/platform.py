@@ -61,12 +61,13 @@ class _PosixPlatform(Platform):
 
     def process_list(self, pattern: re.Pattern, uid: int | None = None) -> list[int]:
         pids: list[int] = []
+        cygwin_ps = self.name == "cygwin" or self.name.startswith("msys")
         try:
             proc = subprocess.Popen(
                 # illumos/Solaris treats everything after '=' in one -o
                 # argument as header text, including commas. Separate -o
                 # options preserve all three columns across POSIX hosts.
-                ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
+                ["ps", "-e", "-l"] if cygwin_ps else ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
             )
@@ -74,7 +75,17 @@ class _PosixPlatform(Platform):
         except OSError:
             return pids
         for line in stdout.decode(errors="replace").splitlines():
-            parts = line.split(None, 2)
+            if cygwin_ps:
+                # ps -l starts with a status character. STIME is eight characters
+                # wide, including spaces in dates such as "  Nov  1".
+                match = re.match(
+                    r"^.\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\S+\s+(\d+) .{8} (.+)$", line
+                )
+                if not match:
+                    continue
+                parts = match.groups()
+            else:
+                parts = line.split(None, 2)
             if len(parts) < 3:
                 continue
             try:

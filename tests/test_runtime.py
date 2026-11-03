@@ -106,3 +106,44 @@ def test_process_list_with_illumos_ps(monkeypatch, uid, expected):
     p = platform.detect(platform_override="sunos5", has_ps=True)
 
     assert p.process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=uid) == expected
+
+
+@pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])
+@pytest.mark.parametrize("uid, expected", [(1000, [123, 789]), (2000, [456]), (None, [123, 456, 789])])
+def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected):
+    stdout = (
+        "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n"
+        "      123       1     123      52000     ?       1000 15:39:13 /usr/bin/ssh-agent\n"
+        "S     456       1     456      53000     ?       2000 15:39:13 /usr/bin/ssh-agent\n"
+        "I     789       1     789      54000     ?       1000 15:39:13 /path with spaces/ssh-agent\n"
+        "      987       1     987      55000     ?       1000 15:39:13 /usr/bin/ssh-agent-helper\n"
+        "      988       1     988      56000     ?       1000 15:39:13 /usr/bin/ssh-agent <defunct>\n"
+        "invalid row\n"
+    ).encode()
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["ps", "-e", "-l"]
+        return SimpleNamespace(communicate=lambda: (stdout, None))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
+    p = platform.detect(platform_override=name, has_ps=True)
+
+    assert p.process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=uid) == expected
+
+
+@pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])
+@pytest.mark.parametrize("stime", ["15:39:13", "  Nov  1", "  Nov 12"])
+def test_process_list_with_cygwin_stime(monkeypatch, name, stime):
+    stdout = (
+        "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n"
+        f"      123       1     123      52000     ?       1000 {stime} /path with spaces/ssh-agent\n"
+    ).encode()
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["ps", "-e", "-l"]
+        return SimpleNamespace(communicate=lambda: (stdout, None))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
+    p = platform.detect(platform_override=name, has_ps=True)
+
+    assert p.process_list(re.compile(r"^/path with spaces/ssh-agent$"), uid=1000) == [123]
