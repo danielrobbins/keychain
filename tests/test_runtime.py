@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Tests for :mod:`keychain.runtime` platform detection."""
 
+import os
 import re
 from types import SimpleNamespace
 
 import pytest
 
 from keychain.runtime import platform
+from keychain.util import KeychainError
 
 
 @pytest.fixture(autouse=True)
@@ -69,8 +71,7 @@ def test_unsupported_process_list_raises():
 
 
 def test_supported_process_list_returns_list():
-    # Use the host's actual ``ps`` if available; otherwise the Popen call
-    # raises OSError and the method returns an empty list.
+    # Exercise the host's real discovery mechanism, not just a parser fixture.
     p = platform.detect()
     if not p.supported:
         pytest.skip("host platform unsupported")
@@ -100,9 +101,91 @@ def test_process_list_with_illumos_ps(monkeypatch, uid, expected):
         lines = [" ".join(headers)] if any(headers) else []
         lines.extend(" ".join(row[field] for field in fields) for row in rows)
         stdout = ("\n".join(lines) + "\n").encode()
-        return SimpleNamespace(communicate=lambda: (stdout, None))
+        return SimpleNamespace(returncode=0, communicate=lambda: (stdout, b""))
 
     monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
     p = platform.detect(platform_override="sunos5", has_ps=True)
 
     assert p.process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=uid) == expected
+
+
+@pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])
+@pytest.mark.parametrize("uid, expected", [(1000, [123, 789]), (2000, [456]), (None, [123, 456, 789])])
+@pytest.mark.parametrize("columns", [None, "20", "80"])
+def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected, columns):
+    if columns is None:
+        monkeypatch.delenv("COLUMNS", raising=False)
+    else:
+        monkeypatch.setenv("COLUMNS", columns)
+    parent_env = dict(os.environ)
+    stdout = (
+        b"      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n"
+        b"      123       1     123      52000     ?       1000 15:39:13 /usr/bin/ssh-agent\n"
+        b"S     456       1     456      53000     ?       2000 15:39:13 /usr/bin/ssh-agent\n"
+        b"I     789       1     789      54000     ?       1000 15:39:13 /path with spaces/ssh-agent\n"
+        b"      987       1     987      55000     ?       1000 15:39:13 /usr/bin/ssh-agent-helper\n"
+        b"      988       1     988      56000     ?       1000 15:39:13 /usr/bin/ssh-agent <defunct>\n"
+        b"invalid row\n"
+    )
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["ps", "-e", "-l"]
+        assert kwargs["env"] == {key: value for key, value in parent_env.items() if key != "COLUMNS"}
+        return SimpleNamespace(returncode=0, communicate=lambda: (stdout, b""))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
+    p = platform.detect(platform_override=name, has_ps=True)
+
+    assert p.process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=uid) == expected
+    assert dict(os.environ) == parent_env
+
+
+@pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])
+@pytest.mark.parametrize("stime", ["15:39:13", "  Nov  1", "  Nov 12"])
+def test_process_list_with_cygwin_stime(monkeypatch, name, stime):
+    stdout = (
+        "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n"
+        f"      123       1     123      52000     ?       1000 {stime} /path with spaces/ssh-agent\n"
+    ).encode()
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["ps", "-e", "-l"]
+        return SimpleNamespace(returncode=0, communicate=lambda: (stdout, b""))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
+    p = platform.detect(platform_override=name, has_ps=True)
+
+    assert p.process_list(re.compile(r"^/path with spaces/ssh-agent$"), uid=1000) == [123]
+
+
+@pytest.mark.parametrize("name", ["sunos5", "darwin", "cygwin", "msys2"])
+@pytest.mark.parametrize("status", [1, 2, -15])
+@pytest.mark.parametrize("stderr", [b"ps: unsupported option\n", b"", b"invalid byte: \xff"])
+def test_failed_ps_is_not_an_empty_process_list(monkeypatch, name, status, stderr):
+    def fake_popen(_cmd, **kwargs):
+        assert kwargs["stderr"] == platform.subprocess.PIPE
+        return SimpleNamespace(returncode=status, communicate=lambda: (b"123 1000 ssh-agent\n", stderr))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
+    with pytest.raises(KeychainError, match=f"Process discovery failed: ps exited with status {status}") as exc:
+        platform._PosixPlatform(name).process_list(re.compile("ssh-agent"))
+    assert (stderr.decode(errors="replace").strip() or "no error output") in str(exc.value)
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError("ps missing"), PermissionError("ps not executable")])
+def test_ps_launch_failure_is_fatal(monkeypatch, error):
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fail)
+    with pytest.raises(KeychainError, match="Process discovery failed: cannot run ps"):
+        platform._PosixPlatform("cygwin").process_list(re.compile("ssh-agent"))
+
+
+@pytest.mark.parametrize("stdout", [b"", b"123 1000 other-command\n"])
+def test_successful_ps_without_matching_agents_is_valid(monkeypatch, stdout):
+    monkeypatch.setattr(
+        platform.subprocess, "Popen",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
+    )
+    assert platform._PosixPlatform("sunos5").process_list(re.compile("ssh-agent")) == []

@@ -93,6 +93,32 @@ jobs:
       - name: pytest
         run: python -m pytest -v --tb=short --cov=src/keychain --cov-branch --cov-report=term-missing:skip-covered
 
+  # MSYS2's POSIX Python and OpenSSH, not setup-python's native Windows build.
+  test-msys2:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        with:
+          msystem: UCRT64
+          path-type: strict
+          update: true
+          install: python python-pytest openssh
+      - name: verify POSIX runtime and tools
+        run: |
+          /usr/bin/python -c 'import os, sys; print(sys.version, sys.platform); assert os.name == "posix" and sys.platform.startswith(("cygwin", "msys"))'
+          command -v python ps ssh-agent ssh-add ssh-keygen
+          ps --version
+          ssh -V
+          pacman -Q python openssh msys2-runtime
+      - name: process discovery and real agent lifecycle
+        run: |
+          /usr/bin/python -m pytest -v --tb=short tests/test_runtime.py tests/test_cli_startup.py tests/test_agent_lifecycle_e2e.py
+
   # -------------------------------------------------------------------------
   # Production-target authenticity: Rocky Linux 8 + python3.9 module.
   #
@@ -199,12 +225,14 @@ jobs:
     needs:
       - static-analysis
       - test-fast
+      - test-msys2
       - test-rocky8-py39
       - test-full-sweep
     runs-on: ubuntu-latest
     env:
       STATIC_ANALYSIS_RESULT: ${{ needs.static-analysis.result }}
       TEST_FAST_RESULT: ${{ needs.test-fast.result }}
+      TEST_MSYS2_RESULT: ${{ needs.test-msys2.result }}
       TEST_ROCKY8_RESULT: ${{ needs.test-rocky8-py39.result }}
       TEST_FULL_SWEEP_RESULT: ${{ needs.test-full-sweep.result }}
       TEST_FULL_SWEEP_REQUIRED: >-
@@ -219,6 +247,7 @@ jobs:
         run: |
           echo "static-analysis: ${STATIC_ANALYSIS_RESULT}"
           echo "test-fast: ${TEST_FAST_RESULT}"
+          echo "test-msys2: ${TEST_MSYS2_RESULT}"
           echo "test-rocky8-py39: ${TEST_ROCKY8_RESULT}"
           echo "test-full-sweep: ${TEST_FULL_SWEEP_RESULT} (required: ${TEST_FULL_SWEEP_REQUIRED})"
 
@@ -227,6 +256,7 @@ jobs:
           for result in \
             "${STATIC_ANALYSIS_RESULT}" \
             "${TEST_FAST_RESULT}" \
+            "${TEST_MSYS2_RESULT}" \
             "${TEST_ROCKY8_RESULT}"
           do
             if [ "${result}" != "success" ]; then
