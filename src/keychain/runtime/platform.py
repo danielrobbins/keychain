@@ -20,6 +20,8 @@ import re
 import shutil
 import subprocess
 
+from ..util import KeychainError
+
 
 class Platform:
     """Resolved host environment.
@@ -96,20 +98,36 @@ class _PosixPlatform(Platform):
                 except OSError:
                     continue  # exited mid-scan, or process details are restricted
             return pids
+        cygwin_ps = self.name == "cygwin" or self.name.startswith("msys")
         try:
             proc = subprocess.Popen(
                 # illumos/Solaris treats everything after '=' in one -o
                 # argument as header text, including commas. Separate -o
                 # options preserve all three columns across POSIX hosts.
-                ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
+                ["ps", "-e", "-l"] if cygwin_ps else ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                # Cygwin/MSYS ps truncates command names to COLUMNS even in a pipe.
+                env={key: value for key, value in os.environ.items() if key != "COLUMNS"},
             )
-            stdout, _ = proc.communicate()
-        except OSError:
-            return pids
+            stdout, stderr = proc.communicate()
+        except OSError as exc:
+            raise KeychainError(f"Process discovery failed: cannot run ps: {exc}") from exc
+        if proc.returncode:
+            detail = stderr.decode(errors="replace").strip() or "no error output"
+            raise KeychainError(f"Process discovery failed: ps exited with status {proc.returncode}: {detail}")
         for line in stdout.decode(errors="replace").splitlines():
-            parts = line.split(None, 2)
+            if cygwin_ps:
+                # ps -l starts with a status character. STIME is eight characters
+                # wide, including spaces in dates such as "  Nov  1".
+                match = re.match(
+                    r"^.\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\S+\s+(\d+) .{8} (.+)$", line
+                )
+                if not match:
+                    continue
+                parts = list(match.groups())
+            else:
+                parts = line.split(None, 2)
             if len(parts) < 3:
                 continue
             try:

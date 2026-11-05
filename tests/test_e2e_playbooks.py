@@ -381,6 +381,8 @@ def test_wipe_routes_ssh_and_gpg_targets(playbook: PlaybookRunner, monkeypatch):
     monkeypatch.setattr(platform, "detect", lambda *_args, **_kwargs: platform._classify("linux", has_ps=True))
     monkeypatch.setattr(agents.SshAgent, "wipe", lambda self: calls.append("ssh"))
     monkeypatch.setattr(agents.GpgOperations, "wipe", lambda self: calls.append("gpg"))
+    # This routing-only test starts no agents, including during fixture cleanup.
+    monkeypatch.setattr(agents, "findpids", lambda _prog: [])
 
     playbook.set_host("testhost")
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """CLI startup behavior tests."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,9 +9,47 @@ from types import SimpleNamespace
 
 import pytest
 
-from keychain import main
+from keychain import agents, main
+from keychain.paths import KeychainPaths
 from keychain.util import KeychainError
 from tests.support import set_home
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX file ownership")
+@pytest.mark.parametrize("action", [["add", "--noask", "--eval"], ["env"], ["agent", "stop"]])
+@pytest.mark.parametrize("failure", ["exit", "launch"])
+def test_failed_discovery_preserves_agent_reference(tmp_path, monkeypatch, capsys, action, failure):
+    set_home(monkeypatch, tmp_path, patch_path_home=True)
+    monkeypatch.delenv("KEYCHAIN_CONFIG", raising=False)
+    monkeypatch.delenv("KEYCHAIN_SSH_AGENT_ARGS", raising=False)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.delenv("SSH_AGENT_PID", raising=False)
+    paths = KeychainPaths.build(str(tmp_path / ".keychain"), True, "test")
+    paths.keydir.mkdir(mode=0o700)
+    pidfile = paths.pidfile_path("sh")
+    contents = "SSH_AUTH_SOCK=/test.sock; export SSH_AUTH_SOCK;\nSSH_AGENT_PID=123; export SSH_AGENT_PID;\n"
+    pidfile.write_text(contents)
+    pidfile.chmod(0o600)
+    monkeypatch.setattr(main.platform, "_cached", main.platform._PosixPlatform("cygwin"))
+    monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
+
+    def fail_ps(cmd, **_kwargs):
+        assert cmd == ["ps", "-e", "-l"], "must not launch a replacement agent"
+        if failure == "launch":
+            raise FileNotFoundError("test ps missing")
+        return SimpleNamespace(returncode=1, communicate=lambda: (b"", b"test ps failure"))
+
+    monkeypatch.setattr(main.platform.subprocess, "Popen", fail_ps)
+    monkeypatch.setattr(agents.os, "kill", lambda *_a: pytest.fail("must not signal an agent"))
+    with pytest.raises(SystemExit) as exc:
+        main.main([*action, "--nocolor", "--host", "test", "--dir", str(paths.keydir), "--absolute"])
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert "Process discovery failed" in captured.err
+    assert "test ps" in captured.err
+    assert "Traceback" not in captured.err
+    assert captured.out.strip() == ("false;" if "--eval" in action else "")
+    assert pidfile.read_text() == contents
 
 
 def test_debug_reports_loaded_keychainrc_even_when_quiet(tmp_path, monkeypatch, capsys):
