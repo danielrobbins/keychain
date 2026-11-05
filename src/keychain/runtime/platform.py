@@ -18,9 +18,11 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import stat
 import subprocess
+from pathlib import Path
 
-from ..util import KeychainError
+from ..util import KeychainError, write_atomic
 
 
 class Platform:
@@ -35,6 +37,10 @@ class Platform:
 
     name = "unknown"
     reason = ""
+    confirm_requires_own_agent = False
+
+    def configure_ssh_confirmation(self, env: dict[str, str], keydir: Path) -> None:
+        """Prepare a new agent's confirmation environment; normally no changes."""
 
     @property
     def supported(self) -> bool:
@@ -113,6 +119,37 @@ class _PsPlatform(Platform):
 class _BSDPlatform(_PsPlatform):
     # BSD ps supports unlimited width; System V ps does not share this option.
     ps_command = ("ps", "-ww", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm=")
+
+
+class _DarwinPlatform(_BSDPlatform):
+    # A pre-existing inherited agent cannot acquire our askpass environment.
+    confirm_requires_own_agent = True
+    _ASKPASS = """\
+#!/bin/sh
+[ "${SSH_ASKPASS_PROMPT-}" = "confirm" ] || exit 1
+exec /usr/bin/osascript - "$1" <<'APPLESCRIPT'
+on run argv
+    try
+        set answer to display dialog (item 1 of argv) with title "Keychain SSH Confirmation" buttons {"Deny", "Allow"} default button "Deny" cancel button "Deny"
+        if button returned of answer is "Allow" then return "yes"
+    on error number -128
+    end try
+    error number 1
+end run
+APPLESCRIPT
+"""
+
+    def configure_ssh_confirmation(self, env: dict[str, str], keydir: Path) -> None:
+        if not env.get("SSH_ASKPASS"):
+            path = keydir / "ssh-askpass-macos"
+            try:
+                installed = path.read_text(encoding="utf-8") == self._ASKPASS and stat.S_IMODE(path.stat().st_mode) == 0o700
+            except OSError:
+                installed = False
+            if not installed:
+                write_atomic(path, self._ASKPASS, 0o700)
+            env["SSH_ASKPASS"] = str(path)
+        env["SSH_ASKPASS_REQUIRE"] = "force"
 
 
 class _SolarisPlatform(_PsPlatform):
@@ -219,7 +256,8 @@ def _classify(platform_name: str, has_ps: bool | None = None) -> Platform:
     implementation: type[_PsPlatform] = _PsPlatform
     for prefixes, candidate in (
         (("linux", "android"), _LinuxPlatform),
-        (("darwin", "freebsd", "openbsd", "netbsd", "dragonfly"), _BSDPlatform),
+        (("darwin",), _DarwinPlatform),
+        (("freebsd", "openbsd", "netbsd", "dragonfly"), _BSDPlatform),
         (("sunos",), _SolarisPlatform),
         (("cygwin", "msys"), _CygwinPlatform),
     ):

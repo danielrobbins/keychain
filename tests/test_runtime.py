@@ -77,9 +77,44 @@ def test_detection_is_cached():
     assert first is second
 
 
+@pytest.mark.parametrize("name", ["linux", "freebsd14", "openbsd8", "sunos5", "cygwin", "msys2"])
+def test_confirmation_environment_is_unchanged_outside_macos(name, tmp_path):
+    p = platform._classify(name, has_ps=True)
+    env = {"SSH_ASKPASS": "/custom/askpass", "SSH_ASKPASS_REQUIRE": "prefer"}
+    p.configure_ssh_confirmation(env, tmp_path)
+    assert not p.confirm_requires_own_agent
+    assert env == {"SSH_ASKPASS": "/custom/askpass", "SSH_ASKPASS_REQUIRE": "prefer"}
+    assert not list(tmp_path.iterdir())
+
+
+def test_macos_confirmation_preserves_explicit_helper(tmp_path):
+    p = platform._classify("darwin", has_ps=True)
+    p.name = "freebsd14"  # Behavior belongs to the class, not the display label.
+    env = {"SSH_ASKPASS": "/custom/askpass"}
+    p.configure_ssh_confirmation(env, tmp_path)
+    assert p.confirm_requires_own_agent
+    assert env == {"SSH_ASKPASS": "/custom/askpass", "SSH_ASKPASS_REQUIRE": "force"}
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX helper permissions")
+def test_macos_confirmation_repairs_helper_and_avoids_rewrites(tmp_path, monkeypatch):
+    p = platform._classify("darwin", has_ps=True)
+    helper = tmp_path / "ssh-askpass-macos"
+    helper.write_text("stale helper")
+    helper.chmod(0o755)
+    env = {}
+    p.configure_ssh_confirmation(env, tmp_path)
+    assert helper.read_text() == p._ASKPASS
+    assert helper.stat().st_mode & 0o777 == 0o700
+    assert env == {"SSH_ASKPASS": str(helper), "SSH_ASKPASS_REQUIRE": "force"}
+    monkeypatch.setattr(platform, "write_atomic", lambda *_a: pytest.fail("helper is already current"))
+    p.configure_ssh_confirmation({}, tmp_path)
+
+
 @pytest.mark.parametrize("name, implementation", [
     ("linux", platform._LinuxPlatform), ("android", platform._LinuxPlatform),
-    ("darwin", platform._BSDPlatform), ("freebsd14", platform._BSDPlatform),
+    ("darwin", platform._DarwinPlatform), ("freebsd14", platform._BSDPlatform),
     ("openbsd7", platform._BSDPlatform), ("netbsd10", platform._BSDPlatform),
     ("dragonfly6", platform._BSDPlatform), ("sunos5", platform._SolarisPlatform),
     ("cygwin", platform._CygwinPlatform), ("msys2", platform._CygwinPlatform),
