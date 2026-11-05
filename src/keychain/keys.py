@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,25 +51,29 @@ class ResolvedKeys:
 
 
 def all_host_identities(out: Output) -> ResolvedKeys:
-    """Return resolved IdentityFiles for every Host block in ``~/.ssh/config``.
+    """Resolve identities for concrete hosts, or a lone catch-all Host block.
 
-    Per-host expansion is delegated to ``ssh -G`` (via :func:`expand_host`)
-    so ``~``, ``${VAR}``, ``%d``/``%u``/``%h``, quoted args, ``Match``, and
-    ``Include`` are handled exactly as OpenSSH does -- no parallel parser.
+    OpenSSH evaluates Host/Match/Include rules; expand_host handles the
+    home-directory prefixes left in its IdentityFile output.
     """
     config = Path.home() / ".ssh" / "config"
     if not config.is_file():
         out.warn("No ~/.ssh/config -- can't extract host identities")
         return ResolvedKeys()
     hosts: set[str] = set()
+    catch_all = False
     for line in config.read_text(encoding="utf-8", errors="replace").splitlines():
         s = line.strip()
         if not s or s.startswith("#") or not s.lower().startswith("host "):
             continue
         for pat in s.split()[1:]:
-            # Skip negations and pure wildcards: ssh -G needs a concrete name.
-            if not any(c in pat for c in "*?!"):
+            if pat == "*":
+                catch_all = True
+            elif not any(c in pat for c in "*?!"):
                 hosts.add(pat)
+    if not hosts and catch_all:
+        # Query the literal catch-all, not an invented destination hostname.
+        hosts.add("*")
     result = ResolvedKeys()
     for h in sorted(hosts):
         result.extend(expand_host(h))
@@ -131,7 +136,8 @@ def expand_host(hostname: str) -> ResolvedKeys:
     paths: list[str] = []
     for line in r.stdout.splitlines():
         if line.startswith("identityfile "):
-            paths.append(line.split(None, 1)[1])
+            # ssh -G selects identities but leaves home prefixes unexpanded.
+            paths.append(os.path.expanduser(line.split(None, 1)[1]))
     return keyf_expand(paths)
 
 

@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Tests for keychain.keys.all_host_identities (--confallhosts).
+"""SSH identity selection and path handling.
 
-Issue #198: tilde / ${VAR} / %d / quoted args were not expanded. The fix
-delegates per-host expansion to ``ssh -G`` (via ``expand_host``); these
-tests verify the host-enumeration step pulls the right names out of the
-config and that wildcard / negation patterns are skipped.
+OpenSSH evaluates configuration; Keychain enumerates concrete hosts (or the
+catch-all when there are none) and expands home-directory path prefixes.
+OpenSSH 7.3p1, 8.0p1, 9.0p1 and 10.2p1 source dumps IdentityFile values before
+the expansion in load_public_identity_files; -G alone does not expand paths.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 
 from keychain import keys
 from keychain.util import KeychainError
+from tests.support import set_home
 
 
 class _Out:
@@ -58,6 +59,23 @@ def test_concrete_hosts_enumerated(fake_home, captured_hosts):
     result = keys.all_host_identities(_Out())
     assert sorted(captured_hosts) == ["alpha", "beta", "gamma"]
     assert "/expanded/alpha" in result.ssh
+
+
+def test_catch_all_without_concrete_hosts_is_evaluated(fake_home, captured_hosts):
+    (fake_home / ".ssh" / "config").write_text("Host *\n    IdentityFile ~/.ssh/id_default\n")
+
+    result = keys.all_host_identities(_Out())
+
+    assert captured_hosts == ["*"]
+    assert result.ssh == ["/expanded/*"]
+
+
+@pytest.mark.parametrize("config", ["", "# no hosts\n", "Host *.example !excluded.example\n"])
+def test_no_catch_all_or_concrete_hosts_does_not_invent_a_host(fake_home, captured_hosts, config):
+    (fake_home / ".ssh" / "config").write_text(config)
+
+    assert keys.all_host_identities(_Out()) == keys.ResolvedKeys()
+    assert captured_hosts == []
 
 
 def test_wildcards_and_negations_skipped(fake_home, captured_hosts):
@@ -193,6 +211,19 @@ def test_expand_host_resolves_identityfiles_from_openssh(monkeypatch, tmp_path):
     monkeypatch.setattr(keys, "run", ssh_config)
 
     assert keys.expand_host("example.com").ssh == [str(first), str(second)]
+
+
+@pytest.mark.parametrize("home_prefix", [True, False])
+def test_expand_host_accepts_home_prefix_or_expanded_path(monkeypatch, tmp_path, home_prefix):
+    set_home(monkeypatch, tmp_path)
+    keyfile = tmp_path / "key with spaces"
+    keyfile.write_text("private", encoding="utf-8")
+    identity = "~/key with spaces" if home_prefix else str(keyfile)
+    monkeypatch.setattr(
+        keys, "run", lambda *_a, **_kw: subprocess.CompletedProcess([], 0, f"identityfile {identity}\n", "")
+    )
+
+    assert keys.expand_host("example.com").ssh == [str(keyfile)]
 
 
 def test_resolve_requested_keys_mixes_prefixed_and_bare(fake_home, monkeypatch):
