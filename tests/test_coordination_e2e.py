@@ -472,6 +472,7 @@ def test_wipe_waits_for_exclusive_access_to_real_agent(activation_session):
     owner.expect("Enter passphrase")
     second = session.start()
     second.expect("Enter passphrase")
+    # Allow brief state updates by live terminals; this test targets activation-lock contention.
     command = [
         sys.executable,
         "-m",
@@ -482,7 +483,7 @@ def test_wipe_waits_for_exclusive_access_to_real_agent(activation_session):
         "wipe",
         "--ssh",
         "--lockwait",
-        "0",
+        "1",
     ]
     result = session.run(command)
     assert result.returncode != 0 and "activation lock" in result.stderr, result.stdout + result.stderr
