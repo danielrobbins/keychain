@@ -218,6 +218,44 @@ def test_linux_ps_fallback_is_selected_once(monkeypatch, name):
     assert not p.process_details_unavailable(123)
 
 
+@pytest.mark.parametrize("displayed, expected", [
+    ("-2", 4294967294), ("-1", 4294967295), ("-2147483648", 2147483648),
+    ("501", 501), ("4294967294", 4294967294),
+])
+def test_macos_normalizes_signed_uids(monkeypatch, displayed, expected):
+    output = f"123 502 ssh-agent\n456 {displayed} ssh-agent\n789 {displayed} unrelated\n".encode()
+    monkeypatch.setattr(platform.subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(
+        returncode=0, communicate=lambda: (output, b""),
+    ))
+    p = platform._classify("darwin", has_ps=True)
+    p.name = "freebsd14"  # The selected implementation, not the label, owns normalization.
+    pattern = re.compile("^ssh-agent$")
+    assert p.process_list(pattern, expected) == [456]
+    assert p.process_list(pattern, 502) == [123]
+    assert p.process_list(pattern) == [123, 456]
+
+
+@pytest.mark.parametrize("record", [
+    "-2 501 ssh-agent", "+123 501 ssh-agent", "123 -2147483649 ssh-agent",
+    "123 --2 ssh-agent", "123 -2x ssh-agent", "123 +501 ssh-agent", "123 -2",
+])
+def test_macos_still_rejects_invalid_records(monkeypatch, record):
+    monkeypatch.setattr(platform.subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(
+        returncode=0, communicate=lambda: (f"456 501 ssh-agent\n{record}\n".encode(), b""),
+    ))
+    with pytest.raises(KeychainError, match="invalid record at line 2"):
+        platform._classify("darwin", has_ps=True).process_list(re.compile("ssh-agent"), 501)
+
+
+@pytest.mark.parametrize("name", ["freebsd14", "openbsd8", "netbsd10", "dragonfly6", "sunos5", "aix"])
+def test_signed_uid_normalization_is_macos_only(monkeypatch, name):
+    monkeypatch.setattr(platform.subprocess, "Popen", lambda *_a, **_kw: SimpleNamespace(
+        returncode=0, communicate=lambda: (b"123 -2 ssh-agent\n", b""),
+    ))
+    with pytest.raises(KeychainError, match="invalid record"):
+        platform._classify(name, has_ps=True).process_list(re.compile("ssh-agent"))
+
+
 def test_ps_dialects_do_not_change_each_others_commands(monkeypatch):
     seen = []
 

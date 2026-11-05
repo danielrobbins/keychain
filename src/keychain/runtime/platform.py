@@ -133,6 +133,15 @@ class _BSDPlatform(_PsPlatform):
 
 
 class _DarwinPlatform(_BSDPlatform):
+    def _parse_record(self, line: str) -> list[str]:
+        parts = super()._parse_record(line)
+        # Apple's ps prints uint32_t UIDs as signed decimals (nobody becomes -2).
+        if len(parts) == 3 and re.fullmatch(r"-[0-9]+", parts[1]):
+            uid = int(parts[1])
+            if -(1 << 31) <= uid < 0:
+                parts[1] = str(uid + (1 << 32))
+        return parts
+
     # A pre-existing inherited agent cannot acquire our askpass environment.
     confirm_requires_own_agent = True
     _ASKPASS = """\

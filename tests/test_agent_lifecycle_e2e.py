@@ -25,6 +25,46 @@ pytestmark = pytest.mark.skipif(
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Apple ps signed UID regression")
+def test_macos_agent_lifecycle_with_nobody_process(monkeypatch):
+    import pwd
+
+    sudo = shutil.which("sudo")
+    if not sudo or subprocess.run([sudo, "-n", "true"], capture_output=True, timeout=10).returncode:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("macOS CI must provide passwordless sudo for the nobody regression")
+        pytest.skip("requires passwordless sudo to start an unrelated nobody process")
+
+    # A bounded sleeper supplies a real negative UID without running Keychain as root.
+    started = subprocess.run(
+        [sudo, "-n", "-u", "nobody", "/bin/sh", "-c",
+         "/bin/sleep 120 </dev/null >/dev/null 2>&1 & echo $!"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert started.returncode == 0, started.stderr
+    pid = int(started.stdout.strip())
+    assert pid > 0
+    try:
+        pattern = re.compile(r"(?:^|/)sleep$")
+        deadline = time.monotonic() + 5
+        while True:
+            row = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "pid=", "-o", "uid=", "-o", "comm="],
+                capture_output=True, text=True, check=True, timeout=10,
+            ).stdout.split(None, 2)
+            if len(row) == 3 and pattern.search(row[2].strip()):
+                break
+            assert time.monotonic() < deadline, f"nobody process did not exec sleep: {row}"
+            time.sleep(0.05)
+        assert row[:2] == [str(pid), "-2"], row
+        platform.reset()
+        assert pid in platform.detect().process_list(pattern, pwd.getpwnam("nobody").pw_uid)
+        assert pid not in platform.detect().process_list(pattern, os.getuid())
+        test_agent_reuse_preserves_loaded_key(monkeypatch, None)
+    finally:
+        subprocess.run([sudo, "-n", "kill", "-TERM", str(pid)], capture_output=True, timeout=10)
+
+
 @pytest.mark.parametrize("columns", [None, "20", "80"])
 def test_agent_reuse_preserves_loaded_key(monkeypatch, columns):
     monkeypatch.setattr(platform, "_cached", None)
