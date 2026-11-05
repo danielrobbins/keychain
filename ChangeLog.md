@@ -1,5 +1,14 @@
 # ChangeLog
 
+## 3.0.10
+
+Keychain 3.0.10 fixes a macOS startup regression introduced in 3.0.9.
+
+- macOS can display some process owners, including `nobody`, as negative user IDs. Keychain's stricter process-list validation rejected these legitimate entries, aborting startup even when the process was unrelated to your SSH agent. Keychain now interprets these IDs correctly on macOS, without relaxing process-ID validation or changing discovery on other platforms (#279).
+- Added regression tests and a live macOS test covering agent startup, reuse and shutdown while a `nobody` process is running.
+
+Thanks to David Harrigan (@dharrigan) for reporting the regression and @asterbini for identifying the signed-ID parsing problem.
+
 ## 3.0.9
 
 Keychain 3.0.9 makes everyday shell startup faster and more dependable across operating systems, with more reliable agent discovery and tighter checks on saved state and command arguments.
