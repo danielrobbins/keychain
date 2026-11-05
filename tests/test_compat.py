@@ -84,15 +84,15 @@ class TestTranslate:
 
     def test_stop_with_value(self):
         # Legacy ``--stop X`` / ``-k X`` translates to the new ``agent stop``
-        # domain form (with --mine/--others flags; bare = all).
-        assert translate(["--stop", "all"]) == ["agent", "stop"]
-        assert translate(["--stop", "mine"]) == ["agent", "stop", "--mine"]
-        assert translate(["-k", "mine"]) == ["agent", "stop", "--mine"]
+        # domain form (bare = pidfile agent; --all = all of the user's agents).
+        assert translate(["--stop", "all"]) == ["agent", "stop", "--all"]
+        assert translate(["--stop", "mine"]) == ["agent", "stop"]
+        assert translate(["-k", "mine"]) == ["agent", "stop"]
         assert translate(["-k", "others"]) == ["agent", "stop", "--others"]
 
     def test_stop_with_equals(self):
         assert translate(["--stop=others"]) == ["agent", "stop", "--others"]
-        assert translate(["--stop=all"]) == ["agent", "stop"]
+        assert translate(["--stop=all"]) == ["agent", "stop", "--all"]
 
     def test_wipe_with_value(self):
         # ``--wipe ssh`` -> ``wipe --ssh``; ``--wipe gpg`` -> ``wipe --gpg``;

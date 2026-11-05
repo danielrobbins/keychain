@@ -188,9 +188,9 @@ class Compat:
                 if key in ("--stop", "-k"):
                     if subcmd is None:
                         subcmd = "agent"
-                        if value == "all":
+                        if value == "mine":
                             sub_args = ["stop"]
-                        elif value in ("mine", "others"):
+                        elif value in ("all", "others"):
                             sub_args = ["stop", f"--{value}"]
                         else:
                             sub_args = ["stop", value]

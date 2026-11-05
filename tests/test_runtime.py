@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """Tests for :mod:`keychain.runtime` platform detection."""
 
+import io
 import os
 import re
+import subprocess
+import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -77,6 +81,78 @@ def test_supported_process_list_returns_list():
         pytest.skip("host platform unsupported")
     result = p.process_list(re.compile("definitely-not-a-real-command"))
     assert isinstance(result, list)
+
+
+@pytest.mark.parametrize("state", ["R", "S", "D", "T", "t", "I", "Z", "X", "x"])
+@pytest.mark.parametrize("comm", ["ssh-agent", "ssh ) agent ("])
+def test_proc_discovery_checks_process_state(monkeypatch, state, comm):
+    reads = []
+
+    def read(path, **_kwargs):
+        reads.append(path)
+        return io.StringIO(
+            {
+                "/proc/123/comm": f"{comm}\n",
+                "/proc/123/stat": f"123 ({comm}) {state} 1 123 123 0\n",
+            }[path]
+        )
+
+    monkeypatch.setattr(platform.os.path, "isdir", lambda _path: True)
+    monkeypatch.setattr(platform.os, "listdir", lambda _path: ["self", "123"])
+    monkeypatch.setattr(platform.os, "stat", lambda _path: SimpleNamespace(st_uid=1000))
+    monkeypatch.setattr(platform, "open", read, raising=False)
+    monkeypatch.setattr(platform.subprocess, "Popen", lambda *_a, **_k: pytest.fail("must not run ps"))
+
+    p = platform._PosixPlatform("linux")
+    assert p.process_list(re.compile(re.escape(comm) + "$"), uid=1000) == ([] if state in ("Z", "X", "x") else [123])
+    assert reads == ["/proc/123/comm", "/proc/123/stat"]
+    reads.clear()
+    assert p.process_list(re.compile("unrelated-command"), uid=1000) == []
+    assert reads == ["/proc/123/comm"]
+    reads.clear()
+    assert p.process_list(re.compile(re.escape(comm) + "$"), uid=2000) == []
+    assert reads == []
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+def test_proc_discovery_skips_unreadable_state(monkeypatch, error):
+    def read(path, **_kwargs):
+        if path.endswith("/comm"):
+            return io.StringIO("ssh-agent\n")
+        raise error(path)
+
+    monkeypatch.setattr(platform.os.path, "isdir", lambda _path: True)
+    monkeypatch.setattr(platform.os, "listdir", lambda _path: ["123"])
+    monkeypatch.setattr(platform, "open", read, raising=False)
+    assert platform._PosixPlatform("linux").process_list(re.compile("ssh-agent")) == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux /proc and prctl")
+def test_proc_discovery_excludes_real_zombie():
+    # The child exits without being reaped, keeping its /proc entry available.
+    code = """
+import ctypes
+import os
+libc = ctypes.CDLL(None, use_errno=True)
+if libc.prctl(15, ctypes.c_char_p(b"ssh-agent"), 0, 0, 0) != 0:
+    raise OSError(ctypes.get_errno(), "PR_SET_NAME")
+os._exit(0)
+"""
+    with subprocess.Popen([sys.executable, "-c", code]) as child:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with open(f"/proc/{child.pid}/stat") as handle:
+                if handle.read().rpartition(")")[2].split()[0] == "Z":
+                    break
+            time.sleep(0.01)
+        else:
+            child.kill()
+            pytest.fail("child did not exit within 10 seconds")
+        with open(f"/proc/{child.pid}/comm") as handle:
+            assert handle.read().strip() == "ssh-agent"
+        assert child.pid not in platform._PosixPlatform("linux").process_list(
+            re.compile(r"^ssh-agent$"), uid=os.getuid()
+        )
 
 
 @pytest.mark.parametrize("uid, expected", [(1000, [123]), (2000, [456]), (None, [123, 456])])
