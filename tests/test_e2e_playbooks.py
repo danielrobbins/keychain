@@ -466,19 +466,22 @@ def test_clear_does_not_wipe_when_requested_keys_do_not_resolve(playbook: Playbo
 
 
 @OPENSSH_AGENT_ONLY
-def test_forget_removes_only_the_requested_ssh_identity(playbook: PlaybookRunner):
+@pytest.mark.parametrize("filename", ["id_forgotten", "-D"])
+def test_forget_removes_only_the_requested_ssh_identity(playbook: PlaybookRunner, filename):
     """Verify forget evicts the requested key without disturbing another identity."""
     host = "testhost"
     playbook.set_host(host)
-    forgotten_key = playbook.home / "id_forgotten"
+    forgotten_key = playbook.home / filename
     retained_key = playbook.home / "id_retained"
     forgotten_public = generate_ssh_key(forgotten_key)
     retained_public = generate_ssh_key(retained_key)
 
-    playbook.run("add", "--quiet", "--immediate", str(forgotten_key), str(retained_key))
+    playbook.monkeypatch.chdir(playbook.home)
+    key_arg = f"sshk:{filename}"
+    playbook.run("add", "--quiet", "--immediate", key_arg, str(retained_key))
     assert loaded_ssh_keys(playbook, host) == {forgotten_public, retained_public}
 
-    playbook.run("forget", "--quiet", str(forgotten_key))
+    playbook.run("forget", "--quiet", key_arg)
 
     assert loaded_ssh_keys(playbook, host) == {retained_public}
 
@@ -593,7 +596,7 @@ def test_confallhosts_catch_all_with_real_openssh(playbook: PlaybookRunner, home
     def isolated_ssh(command, **kwargs):
         # OpenSSH finds config through passwd, not HOME. Only redirect that file;
         # leave config evaluation and key loading to the real OpenSSH programs.
-        assert command == ["ssh", "-nG", "*"]
+        assert command == ["ssh", "-nG", "--", "*"]
         seen_hosts.append(command[-1])
         return run(["ssh", "-F", str(config), *command[1:]], **kwargs)
 

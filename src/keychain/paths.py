@@ -15,10 +15,10 @@ from .env import SshAgentRef
 from .output.core import Output
 from .util import (
     KeychainError,
-    get_owner,
+    current_uid,
     lax_perm_warning,
-    lax_perms,
     unlink_quiet,
+    user_name,
     write_atomic,
 )
 
@@ -190,6 +190,8 @@ class KeychainPaths:
         path, preserving the 2.x convention that ``--dir /tmp`` stored
         files under ``/tmp/.keychain``.
         """
+        if "/" in host or "\0" in host or host in ("", ".", ".."):
+            raise KeychainError(f"Invalid host name {host!r}: it is used in file names")
         if dir_opt:
             expanded = _expand_home(dir_opt)
             # Preserve historic behaviour: a path containing "/." is taken verbatim,
@@ -299,7 +301,7 @@ class KeychainPaths:
             raise KeychainError(f"can't write inside {self.keydir}")
         unlink_quiet(probe)
 
-    def security_audit(self, me: str, socket_path: str = "") -> list[SecurityCheck]:
+    def security_audit(self, socket_path: str = "") -> list[SecurityCheck]:
         paths: list[tuple[str, Path, bool]] = [("keydir", self.keydir, True)]
         paths.extend(
             ("pidfile" if fmt == "sh" else f"{fmt}_pidfile", self.pidfile_path(fmt), True) for fmt in self.pid_formats
@@ -315,38 +317,35 @@ class KeychainPaths:
         if socket_path:
             paths.append(("ssh_socket", Path(socket_path), False))
 
+        uid = current_uid()
         checks: list[SecurityCheck] = []
         for label, path, check_mode in paths:
-            if not path.exists():
+            try:
+                info = path.stat()
+            except FileNotFoundError:
                 continue
-            owner = get_owner(path)
-            mode: str | None = None
-            mode_error = ""
-            if check_mode:
-                try:
-                    mode = f"0{stat.S_IMODE(os.stat(path).st_mode):o}"
-                except OSError:
-                    mode_error = f"Cannot inspect {path}."
+            except OSError:
+                checks.append(SecurityCheck(label, path, message=f"Cannot inspect {path}.", severity="err"))
+                continue
+            owner = user_name(info.st_uid) if uid is not None else ""
+            mode = f"0{stat.S_IMODE(info.st_mode):o}" if check_mode else None
 
             message = ""
             severity = ""
-            if label == "keydir" and not path.is_dir():
+            if label == "keydir" and not stat.S_ISDIR(info.st_mode):
                 message = f"{path} is a file, not a directory."
                 severity = "err"
-            elif owner and owner != me:
-                message = f"{path} is owned by {owner}, not {me}; refusing to use it."
+            elif uid is not None and info.st_uid != uid:
+                message = f"{path} is owned by {owner} (UID {info.st_uid}), not UID {uid}; refusing to use it."
                 severity = "err"
-            elif mode_error:
-                message = mode_error
-                severity = "err"
-            elif check_mode and owner and lax_perms(path):
+            elif uid is not None and check_mode and stat.S_IMODE(info.st_mode) & 0o077:
                 message = lax_perm_warning(self.keydir)
                 severity = "err"
             checks.append(SecurityCheck(label, path, owner, mode, message, severity))
         return checks
 
-    def check_runtime_perms(self, me: str) -> None:
-        for check in self.security_audit(me):
+    def check_runtime_perms(self) -> None:
+        for check in self.security_audit():
             if check.severity == "err":
                 raise KeychainError(check.message)
 

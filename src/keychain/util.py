@@ -10,7 +10,6 @@ import contextlib
 import errno
 import os
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -211,14 +210,14 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
-def get_owner(path: PathLike) -> str:
-    """Return the username that owns *path*, or '' on error / non-POSIX."""
-    if _pwd is None:
-        return ""
-    try:
-        return _pwd.getpwuid(os.stat(path).st_uid).pw_name
-    except (OSError, KeyError):
-        return ""
+def user_name(uid: int) -> str:
+    """Display a UID as a username when available; never use this for authorization."""
+    if _pwd is not None:
+        try:
+            return _pwd.getpwuid(uid).pw_name
+        except (KeyError, OSError):
+            pass
+    return str(uid)
 
 
 def current_uid() -> int | None:
@@ -229,11 +228,8 @@ def current_uid() -> int | None:
 def current_user() -> str:
     """Best-effort username for the current process."""
     uid = current_uid()
-    if _pwd is not None and uid is not None:
-        try:
-            return _pwd.getpwuid(uid).pw_name
-        except (KeyError, OSError):
-            pass
+    if uid is not None:
+        return user_name(uid)
     return os.environ.get("USER") or os.environ.get("LOGNAME") or os.environ.get("USERNAME") or ""
 
 
@@ -245,15 +241,6 @@ def get_tty() -> str:
         return os.ttyname(sys.stdin.fileno())
     except OSError:
         return ""
-
-
-def lax_perms(path: PathLike) -> bool:
-    """True if *path* is group/world readable, writable or executable."""
-    try:
-        mode = stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
-        return False
-    return bool(mode & (stat.S_IRWXG | stat.S_IRWXO))
 
 
 def lax_perm_warning(keydir: PathLike) -> str:

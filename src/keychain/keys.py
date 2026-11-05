@@ -94,7 +94,7 @@ def _resolve_bare_keys(keys: list[str], gpg_prog: str, gpg_lookup: bool) -> Reso
             continue
         if gpg_lookup:
             try:
-                r = run([gpg_prog, "--list-secret-keys", k], timeout=5)
+                r = run([gpg_prog, "--list-secret-keys", "--", k], timeout=5)
                 if r.returncode == 0:
                     result.gpg.append(k)
                     continue
@@ -128,7 +128,7 @@ def keyf_expand(paths: list[str]) -> ResolvedKeys:
 def expand_host(hostname: str) -> ResolvedKeys:
     """Expand a ``host:`` extkey into resolved SSH keys via ``ssh -nG``."""
     try:
-        r = run(["ssh", "-nG", hostname], timeout=10)
+        r = run(["ssh", "-nG", "--", hostname], timeout=10)
     except subprocess.TimeoutExpired as exc:
         raise KeychainError(f'ssh timed out while expanding host "{hostname}"') from exc
     except (FileNotFoundError, OSError):

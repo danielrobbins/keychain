@@ -233,7 +233,7 @@ class TestSshAgentLoadOutput:
         plan = self._agent(monkeypatch).prepare_load(["/home/user/.ssh/key1"], announce=False)
 
         assert plan is not None
-        assert plan.commands == [["ssh-add", "/home/user/.ssh/key1"]]
+        assert plan.commands == [["ssh-add", "--", "/home/user/.ssh/key1"]]
         assert capsys.readouterr().err == ""
 
     def test_prepare_load_quiet_suppresses_success_reports(self, monkeypatch):
@@ -243,7 +243,7 @@ class TestSshAgentLoadOutput:
 
         assert plan is not None
         assert plan.commands == [
-            ["ssh-add", "-q", "/home/user/.ssh/key1"],
+            ["ssh-add", "-q", "--", "/home/user/.ssh/key1"],
             ["ssh-add", "-q", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"],
         ]
 
@@ -261,7 +261,7 @@ class TestSshAgentLoadOutput:
 
         assert plan is not None
         assert plan.commands == [
-            ["ssh-add", "/home/user/.ssh/key1"],
+            ["ssh-add", "--", "/home/user/.ssh/key1"],
             ["ssh-add", "-s", "/usr/lib/pkcs11/opensc-pkcs11.so"],
         ]
 
