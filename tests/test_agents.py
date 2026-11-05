@@ -554,6 +554,7 @@ class TestSshAgentStop:
     def _agent(self, pid: str, cleared: list[bool]):
         state = SimpleNamespace(
             pidfile_env=SshAgentRef(sock="/tmp/agent.sock", pid=pid),
+            ssh_pid_status=lambda _pid: "unverified",
             user="tester",
             paths=SimpleNamespace(clear=lambda: cleared.append(True)),
         )
@@ -760,7 +761,9 @@ class TestSshAgentSelection:
             inherited_env=inherited,
             pidfile_env=pidfile,
             platform=SimpleNamespace(name=platform_name),
-            ssh_agent_pids=[11, 22] if ssh_agent_pids is None else ssh_agent_pids,
+            ssh_pid_status=lambda pid: "verified" if pid in (
+                [11, 22] if ssh_agent_pids is None else ssh_agent_pids
+            ) else "unverified",
         )
         return agents.SshAgent(state, _out())
 

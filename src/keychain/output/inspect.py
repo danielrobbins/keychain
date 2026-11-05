@@ -135,6 +135,8 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         ("pidfile path", str(state.pidfile_path), ""),
         ("pidfile exists", state.pidfile_exists, ""),
     ]
+    pidfile = state.pidfile_env
+    pid_status = state.ssh_pid_status(pidfile.pid_int)
     if state.pidfile_exists:
         pidf_rows.append(("SSH_AUTH_SOCK", state.pidfile_socket or "(unset)", ""))
         pidf_rows.append(("SSH_AGENT_PID", state.pidfile_pid or "(unset)", ""))
@@ -143,11 +145,14 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         pidf_rows.append(("socket valid", socket_validation.valid, sock_hint, socket_validation.severity))
         pid_hint = "" if state.pidfile_pid_alive else ("process is not running" if state.pidfile_pid else "")
         pidf_rows.append(("pid alive", state.pidfile_pid_alive, pid_hint))
+        pidf_rows.append(("process identity", pid_status, ""))
     if not state.process_listing_supported:
         pidf_rows.append(("processes", "listing not available on this platform", ""))
     else:
-        pidf_rows.append(("ssh-agent pids", _fmt_pids(state.ssh_agent_pids), ""))
-        pidf_rows.append(("gpg-agent pids", _fmt_pids(state.gpg_agent_pids), ""))
+        pidf_rows.append(("visible ssh-agent pids", _fmt_pids(state.ssh_agent_pids), ""))
+        pidf_rows.append(("visible gpg-agent pids", _fmt_pids(state.gpg_agent_pids), ""))
+    selected = state.selected_ssh_env
+    pidf_rows.append(("selected socket", selected.sock or "(none)", "responding" if selected else ""))
     sections.append(("Agent State", pidf_rows))
 
     term_w = shutil.get_terminal_size((80, 24)).columns
@@ -158,6 +163,13 @@ def render_inspect(state: KeychainState, out: Output) -> None:
     out.result()
     for line in layout.splitlines():
         out.result(" " + line)
+
+    selected_status = state.ssh_pid_status(selected.pid_int) if selected.pid_int != pidfile.pid_int else pid_status
+    if "uninspectable" in (pid_status, selected_status):
+        out.note(
+            "The PID is alive, but process details are inaccessible (for example, /proc hidepid restrictions). "
+            "Keychain can reuse a responding, user-owned socket but cannot safely stop this unverified process."
+        )
 
     out.heading("Loaded SSH keys (best available agent)")
     fps = state.loaded_ssh_fingerprints
@@ -175,7 +187,7 @@ def render_inspect(state: KeychainState, out: Output) -> None:
         if state.has_selected_ssh_agent:
             out.result(f"   {out.dim('(none loaded)')}")
         else:
-            out.result(f"   {out.dim('(no agent reachable)')}")
+            out.result(f"   {out.dim('(no usable agent selected)')}")
 
     if state.cmdline_keys or state.confallhosts:
         cli_repr = " ".join(state.cmdline_keys) or "(--confallhosts)"
@@ -217,6 +229,7 @@ def _agent_reference(
     socket_reason: str,
     socket_severity: str,
     pid_alive: bool,
+    identity: str,
 ) -> dict[str, Any]:
     return {
         "socket": {
@@ -225,7 +238,7 @@ def _agent_reference(
             "reason": socket_reason or None,
             "severity": socket_severity or None,
         },
-        "process": {"pid": pid or None, "alive": pid_alive},
+        "process": {"pid": pid or None, "alive": pid_alive, "identity": identity},
     }
 
 
@@ -295,6 +308,7 @@ def render_inspect_json(state: KeychainState) -> None:
                     state.pidfile_socket_validation.reason,
                     state.pidfile_socket_validation.severity,
                     state.pidfile_pid_alive,
+                    state.ssh_pid_status(state.pidfile_env.pid_int),
                 ),
             },
             "inherited": _agent_reference(
@@ -304,7 +318,13 @@ def render_inspect_json(state: KeychainState) -> None:
                 state.inherited_socket_validation.reason,
                 state.inherited_socket_validation.severity,
                 state.inherited_pid_alive,
+                state.ssh_pid_status(state.inherited_env.pid_int),
             ),
+            "selected": {
+                "socket": state.selected_ssh_env.sock or None,
+                "pid": state.selected_ssh_env.pid or None,
+                "source": state.ssh.env_source or None,
+            },
             "processes": {
                 "supported": state.process_listing_supported,
                 "ssh_agent_pids": list(state.ssh_agent_pids),

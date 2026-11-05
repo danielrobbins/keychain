@@ -366,7 +366,8 @@ class SshAgent:
                 out.note("Ignoring gpg-agent SSH socket; Keychain manages SSH keys with ssh-agent.")
             return None
 
-        if pid_str and agent_env.pid_int not in self.keychain_state.ssh_agent_pids:
+        pid_status = self.keychain_state.ssh_pid_status(agent_env.pid_int) if pid_str else "unset"
+        if pid_str and pid_status not in ("verified", "uninspectable"):
             out.debug(f"SSH_AGENT_PID in {source} ({pid_str}) is not a running ssh-agent; ignoring it")
             if visible:
                 self._remember_spawn_context(source, "pid is not ssh-agent")
@@ -391,7 +392,8 @@ class SshAgent:
             return None
 
         if announce:
-            out.info(f"Existing ssh-agent ({source}): {out.id(pid_str)}")
+            detail = "; process identity unavailable, socket verified" if pid_status == "uninspectable" else ""
+            out.info(f"Existing ssh-agent ({source}): {out.id(pid_str)}{detail}")
         return SshAgentRef(sock, pid_str)
 
     def select_existing(self, *, pidfile_only: bool = False, announce: bool = False) -> SshAgentRef:
@@ -519,13 +521,13 @@ class SshAgent:
     def stop(self, which: str) -> None:
         out = self.out
         out.info("Stopping ssh-agent(s)...")
+        pidf_env = self.keychain_state.pidfile_env
         if which != "all":
-            pidf_env = self.keychain_state.pidfile_env
             if pidf_env:
                 self.env = pidf_env
         pids = findpids("ssh")
         if not pids:
-            out.info("No ssh-agent(s) found running")
+            out.info("No visible ssh-agent(s) found running")
         else:
             our = self._our_pid()
             ours = our if our in pids else None
@@ -545,9 +547,9 @@ class SshAgent:
 
             rendered = out.id(" ".join(map(str, killed)))
             if which == "all":
-                out.info(f"All ssh-agents stopped: {rendered}")
+                out.info(f"Visible ssh-agents stopped: {rendered}")
             elif which == "mine":
-                out.info(f"All {out.id(self.keychain_state.user)}'s ssh-agents stopped: {rendered}")
+                out.info(f"Visible ssh-agents owned by {out.id(self.keychain_state.user)} stopped: {rendered}")
             elif which == "pidfile" and killed:
                 out.info(f"Keychain ssh-agent stopped: {out.id(killed[0])}")
             elif which == "others":
@@ -555,6 +557,9 @@ class SshAgent:
             else:
                 out.info("No keychain ssh-agent found running")
         if which != "others":
+            if pidf_env.pid_int not in pids and self.keychain_state.ssh_pid_status(pidf_env.pid_int) == "uninspectable":
+                out.warn(f"Cannot verify process identity for PID {pidf_env.pid}; not signaling it, pidfile kept.")
+                return
             self.keychain_state.paths.clear()
 
     # ---- key operations ----------------------------------------------

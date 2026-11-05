@@ -242,7 +242,7 @@ def test_render_inspect_json_emits_valid_object(paths, capsys):
         "reason": "empty",
         "severity": None,
     }
-    assert pidfile["process"] == {"pid": None, "alive": False}
+    assert pidfile["process"] == {"pid": None, "alive": False, "identity": "unset"}
     assert payload["agent_state"]["inherited"]["socket"]["reason"] == "empty"
     assert "supported" in payload["agent_state"]["processes"]
     assert isinstance(payload["keys"]["loaded_ssh_fingerprints"], list)
