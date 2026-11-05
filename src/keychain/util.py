@@ -15,7 +15,7 @@ import sys
 import time
 from collections.abc import Iterable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Union
 
 if TYPE_CHECKING:
     from .output.core import Output
@@ -183,31 +183,6 @@ class LockFile:
 # ---------------------------------------------------------------------------
 # Small POSIX helpers
 # ---------------------------------------------------------------------------
-
-
-def pid_alive(pid: int) -> bool:
-    """Best-effort process liveness probe."""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-
-        kernel32 = cast(Any, ctypes).windll.kernel32
-        handle = kernel32.OpenProcess(0x1000, False, pid)
-        if not handle:
-            return False
-        try:
-            exit_code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-                return False
-            return exit_code.value == 259
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 def user_name(uid: int) -> str:
