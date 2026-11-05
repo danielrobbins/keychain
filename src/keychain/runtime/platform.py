@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from typing import Any, cast
 
 from ..util import KeychainError, write_atomic
 
@@ -41,6 +42,16 @@ class Platform:
 
     def configure_ssh_confirmation(self, env: dict[str, str], keydir: Path) -> None:
         """Prepare a new agent's confirmation environment; normally no changes."""
+
+    def pid_alive(self, pid: int) -> bool:
+        """Best-effort liveness, not proof of agent identity or permission to signal."""
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except (OSError, OverflowError):
+            return False
+        return True
 
     @property
     def supported(self) -> bool:
@@ -187,11 +198,7 @@ class _LinuxPlatform(_PsPlatform):
         except (FileNotFoundError, PermissionError):
             # hidepid can return ENOENT for a live, non-dumpable ssh-agent.
             # Check liveness after the read, so an exit during it is not "hidden".
-            try:
-                os.kill(pid, 0)
-            except (OSError, OverflowError):
-                return False
-            return True
+            return self.pid_alive(pid)
         except OSError:
             pass
         return False
@@ -226,6 +233,27 @@ class _UnsupportedPlatform(Platform):
         self.reason = reason
 
 
+class _WindowsPlatform(_UnsupportedPlatform):
+    """Liveness for development tests; native Windows remains unsupported."""
+
+    def pid_alive(self, pid: int) -> bool:
+        if pid <= 0:
+            return False
+        import ctypes
+
+        kernel32 = cast(Any, ctypes).windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
+
+
 _UNSUPPORTED_WINDOWS_REASON = (
     "Native Windows is not a supported keychain target: there is no "
     "ssh-agent process to manage in the POSIX sense, no UNIX-domain "
@@ -251,7 +279,7 @@ def _classify(platform_name: str, has_ps: bool | None = None) -> Platform:
 
     # Native Windows is unsupported regardless of ps.
     if p == "win32":
-        return _UnsupportedPlatform("windows", _UNSUPPORTED_WINDOWS_REASON)
+        return _WindowsPlatform("windows", _UNSUPPORTED_WINDOWS_REASON)
 
     implementation: type[_PsPlatform] = _PsPlatform
     for prefixes, candidate in (

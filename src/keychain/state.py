@@ -33,7 +33,6 @@ from .runtime.platform import detect as detect_platform
 from .util import (
     KeychainError,
     current_user,
-    pid_alive,
     run,
 )
 
@@ -295,7 +294,7 @@ class KeychainState:
         if not pid:
             return False
         pid_int = self.pidfile_env.pid_int
-        return bool(pid_int and pid_alive(pid_int))
+        return bool(pid_int and self.platform.pid_alive(pid_int))
 
     # ---- inherited shell environment ----------------------------------
 
@@ -325,7 +324,7 @@ class KeychainState:
         if not pid:
             return False
         pid_int = self.inherited_env.pid_int
-        return bool(pid_int and pid_alive(pid_int))
+        return bool(pid_int and self.platform.pid_alive(pid_int))
 
     # ---- agent contents (loaded keys) ---------------------------------
 

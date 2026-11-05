@@ -137,6 +137,17 @@ def test_inherited_env_empty_when_unset(paths):
     assert st.inherited_pid == ""
 
 
+@pytest.mark.parametrize("alive", [True, False])
+def test_liveness_uses_the_selected_platform(paths, out, alive):
+    ref = SshAgentRef("/test.sock", "123")
+    paths.write(ref, out)
+    st = state.KeychainState(paths=paths, env=ref.as_dict())
+    with patch.object(st.platform, "pid_alive", return_value=alive) as probe:
+        assert st.pidfile_pid_alive is alive
+        assert st.inherited_pid_alive is alive
+    assert [call.args for call in probe.call_args_list] == [(123,), (123,)]
+
+
 def test_keydir_introspection(paths):
     st = state.KeychainState(paths=paths)
     assert st.keydir_exists is True

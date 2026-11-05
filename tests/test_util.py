@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from keychain.output.core import Output
-from keychain.util import KeychainError, LockFile, pid_alive
+from keychain.util import KeychainError, LockFile
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -147,9 +147,3 @@ class TestLockFile:
             release.set()
 
         assert sum(future.result() for future in futures) == 1
-
-
-class TestPidAlive:
-    def test_current_process_is_reported_alive(self):
-        assert pid_alive(os.getpid()) is True
-        assert os.getpid() > 0

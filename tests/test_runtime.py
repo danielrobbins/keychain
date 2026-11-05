@@ -9,11 +9,13 @@ import subprocess
 import sys
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from keychain.runtime import platform
 from keychain.util import KeychainError
+from tests.support import set_file_stat
 
 
 @pytest.fixture(autouse=True)
@@ -77,6 +79,59 @@ def test_detection_is_cached():
     assert first is second
 
 
+def test_current_process_is_alive():
+    assert platform.detect().pid_alive(os.getpid())
+
+
+@pytest.mark.parametrize("name", ["linux", "darwin", "freebsd14", "sunos5", "cygwin", "win32"])
+@pytest.mark.parametrize("pid", [0, -1])
+def test_invalid_pids_never_probe_processes(name, pid, monkeypatch):
+    monkeypatch.setattr(platform.os, "kill", lambda *_a: pytest.fail("must not signal a process group"))
+    assert not platform._classify(name, has_ps=True).pid_alive(pid)
+
+
+@pytest.mark.parametrize("name", ["linux", "android", "darwin", "freebsd14", "sunos5", "cygwin", "msys2"])
+def test_posix_liveness_uses_signal_zero(name, monkeypatch):
+    kill = Mock()
+    monkeypatch.setattr(platform.os, "kill", kill)
+    assert platform._classify(name, has_ps=True).pid_alive(123)
+    kill.assert_called_once_with(123, 0)
+
+
+@pytest.mark.parametrize("error", [ProcessLookupError(), PermissionError(), OverflowError()])
+def test_liveness_failure_is_not_proof_of_a_live_process(error, monkeypatch):
+    monkeypatch.setattr(platform.os, "kill", Mock(side_effect=error))
+    assert not platform.Platform().pid_alive(123)
+
+
+@pytest.mark.parametrize("opened,queried,exit_code,alive", [
+    (True, True, 259, True), (True, True, 0, False),
+    (True, False, 259, False), (False, False, 259, False),
+])
+def test_windows_liveness_closes_handles(opened, queried, exit_code, alive, monkeypatch):
+    import ctypes
+
+    def query(handle, code):
+        assert handle == 1234
+        code._obj.value = exit_code
+        return queried
+
+    kernel = SimpleNamespace(
+        OpenProcess=Mock(return_value=1234 if opened else 0),
+        GetExitCodeProcess=Mock(side_effect=query), CloseHandle=Mock(),
+    )
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel), raising=False)
+    p = platform._classify("win32")
+    assert not p.supported
+    assert p.pid_alive(123) is alive
+    kernel.OpenProcess.assert_called_once_with(0x1000, False, 123)
+    if opened:
+        kernel.CloseHandle.assert_called_once_with(1234)
+    else:
+        kernel.GetExitCodeProcess.assert_not_called()
+        kernel.CloseHandle.assert_not_called()
+
+
 @pytest.mark.parametrize("name", ["linux", "freebsd14", "openbsd8", "sunos5", "cygwin", "msys2"])
 def test_confirmation_environment_is_unchanged_outside_macos(name, tmp_path):
     p = platform._classify(name, has_ps=True)
@@ -97,7 +152,28 @@ def test_macos_confirmation_preserves_explicit_helper(tmp_path):
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX helper permissions")
+@pytest.mark.parametrize("condition", ["missing", "stale", "wrong-mode", "current"])
+def test_macos_confirmation_helper_install_policy(condition, tmp_path, monkeypatch):
+    p = platform._classify("darwin", has_ps=True)
+    helper = tmp_path / "ssh-askpass-macos"
+    if condition != "missing":
+        helper.write_text("stale helper" if condition == "stale" else p._ASKPASS, encoding="utf-8")
+        set_file_stat(monkeypatch, helper, mode=0o100755 if condition == "wrong-mode" else 0o100700)
+    writer = Mock()
+    monkeypatch.setattr(platform, "write_atomic", writer)
+    env = {}
+    p.configure_ssh_confirmation(env, tmp_path)
+    if condition == "current":
+        writer.assert_not_called()
+    else:
+        writer.assert_called_once_with(helper, p._ASKPASS, 0o700)
+    assert env == {"SSH_ASKPASS": str(helper), "SSH_ASKPASS_REQUIRE": "force"}
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform.startswith(("cygwin", "msys")),
+    reason="native POSIX permissions; MSYS2's filesystem may synthesize modes",
+)
 def test_macos_confirmation_repairs_helper_and_avoids_rewrites(tmp_path, monkeypatch):
     p = platform._classify("darwin", has_ps=True)
     helper = tmp_path / "ssh-askpass-macos"
