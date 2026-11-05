@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from .env import SshAgentRef
 from .output.core import Output
-from .util import KeychainError, LockFile, current_uid, get_tty, run, tempdir, unlink_quiet, write_atomic
+from .util import KeychainError, LockFile, current_uid, get_tty, run, tempdir, unlink_quiet
 
 if TYPE_CHECKING:
     from .state import KeychainState
@@ -47,34 +47,6 @@ def _split_agent_args(value: str, agent: str) -> list[str]:
         return shlex.split(value)
     except ValueError as exc:
         raise KeychainError(f"Invalid {agent} agent arguments: {exc}") from exc
-
-
-_MACOS_ASKPASS = """\
-#!/bin/sh
-[ "${SSH_ASKPASS_PROMPT-}" = "confirm" ] || exit 1
-exec /usr/bin/osascript - "$1" <<'APPLESCRIPT'
-on run argv
-    try
-        set answer to display dialog (item 1 of argv) with title "Keychain SSH Confirmation" buttons {"Deny", "Allow"} default button "Deny" cancel button "Deny"
-        if button returned of answer is "Allow" then return "yes"
-    on error number -128
-    end try
-    error number 1
-end run
-APPLESCRIPT
-"""
-
-
-def ensure_macos_askpass(path: Path) -> Path:
-    """Install Keychain's confirmation-only macOS askpass helper securely."""
-    try:
-        if path.read_text(encoding="utf-8") == _MACOS_ASKPASS and stat.S_IMODE(path.stat().st_mode) == 0o700:
-            return path
-    except OSError:
-        pass
-
-    write_atomic(path, _MACOS_ASKPASS, 0o700)
-    return path
 
 
 # ---------------------------------------------------------------------------
@@ -399,8 +371,8 @@ class SshAgent:
     def select_existing(self, *, pidfile_only: bool = False, announce: bool = False) -> SshAgentRef:
         """Select an existing SSH agent according to Keychain policy."""
         candidates = [("pidfile", self.keychain_state.pidfile_env)]
-        native_confirm = bool(self._option("confirm")) and self.keychain_state.platform.name == "darwin"
-        if not pidfile_only and not (bool(self._option("no_inherit")) or native_confirm):
+        own_agent = bool(self._option("confirm")) and self.keychain_state.platform.confirm_requires_own_agent
+        if not pidfile_only and not (bool(self._option("no_inherit")) or own_agent):
             candidates.append(("env", self.keychain_state.inherited_env))
 
         self.env = SshAgentRef()
@@ -435,7 +407,6 @@ class SshAgent:
         a = self.keychain_state.args
         paths = self.keychain_state.paths
         confirm = bool(a.get_value("confirm"))
-        native_confirm = confirm and self.keychain_state.platform.name == "darwin"
 
         if confirm and bool(a.get_value("no_gui")):
             raise KeychainError("--confirm requires graphical confirmation and cannot be combined with --no-gui")
@@ -495,12 +466,8 @@ class SshAgent:
                     raise KeychainError(f"Invalid SSH agent arguments: {exc}") from exc
                 ssh_agent_socket = dict(options)["-a"]
                 spawn_env = dict(self.keychain_state.env)
-                if native_confirm:
-                    askpass = spawn_env.get("SSH_ASKPASS")
-                    if not askpass:
-                        askpass = str(ensure_macos_askpass(paths.keydir / "ssh-askpass-macos"))
-                        spawn_env["SSH_ASKPASS"] = askpass
-                    spawn_env["SSH_ASKPASS_REQUIRE"] = "force"
+                if confirm:
+                    self.keychain_state.platform.configure_ssh_confirmation(spawn_env, paths.keydir)
                 try:
                     r = run(cmd, env=spawn_env)
                 except (FileNotFoundError, OSError) as exc:

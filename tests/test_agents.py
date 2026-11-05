@@ -760,7 +760,7 @@ class TestSshAgentSelection:
             env=inherited.as_dict(),
             inherited_env=inherited,
             pidfile_env=pidfile,
-            platform=SimpleNamespace(name=platform_name),
+            platform=platform._classify(platform_name, has_ps=True),
             ssh_pid_status=lambda pid: "verified" if pid in (
                 [11, 22] if ssh_agent_pids is None else ssh_agent_pids
             ) else "unverified",
@@ -1059,7 +1059,7 @@ class TestSshAgentStartupOutput:
     def test_macos_confirm_configures_new_agent_with_native_askpass(self, short_keydir, monkeypatch):
         """A managed macOS agent must inherit the helper needed for later signing prompts."""
         agent, paths = self._agent_with_args(short_keydir, "--confirm")
-        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        monkeypatch.setattr(agent.keychain_state, "platform", platform._classify("darwin", has_ps=True))
         captured_env = None
 
         def fake_run(cmd, *_args, **kwargs):
@@ -1090,7 +1090,7 @@ class TestSshAgentStartupOutput:
     def test_macos_confirm_preserves_external_askpass(self, short_keydir, monkeypatch):
         """An explicitly configured helper takes precedence over Keychain's macOS helper."""
         agent, paths = self._agent_with_args(short_keydir, "--confirm")
-        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        monkeypatch.setattr(agent.keychain_state, "platform", platform._classify("darwin", has_ps=True))
         agent.keychain_state.env["SSH_ASKPASS"] = "/custom/askpass"
         captured_env = None
 
@@ -1116,7 +1116,7 @@ class TestSshAgentStartupOutput:
     def test_macos_confirm_does_not_inherit_agent(self, short_keydir, monkeypatch):
         """Native confirmation requires an agent born with Keychain's askpass environment."""
         agent, paths = self._agent_with_args(short_keydir, "--confirm", inherit=True)
-        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        monkeypatch.setattr(agent.keychain_state, "platform", platform._classify("darwin", has_ps=True))
         agent.keychain_state.env.update({"SSH_AUTH_SOCK": "/tmp/inherited.sock", "SSH_AGENT_PID": "42"})
         checked_sources: list[str] = []
 
@@ -1135,7 +1135,7 @@ class TestSshAgentStartupOutput:
     def test_macos_confirm_still_reuses_pidfile_agent(self, short_keydir, monkeypatch):
         """Implicit --no-inherit must not bypass Keychain's normal pidfile lookup."""
         agent, paths = self._agent_with_args(short_keydir, "--confirm", inherit=True)
-        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name="darwin"))
+        monkeypatch.setattr(agent.keychain_state, "platform", platform._classify("darwin", has_ps=True))
         pidfile_agent = SshAgentRef(sock="/tmp/pidfile.sock", pid="42")
         paths.write(pidfile_agent, _out())
         monkeypatch.setattr(agent, "_validate_candidate", lambda _source, agent_env, **_kwargs: agent_env)
@@ -1149,7 +1149,7 @@ class TestSshAgentStartupOutput:
     def test_implicit_no_inherit_is_macos_confirm_only(self, short_keydir, monkeypatch, platform_name, extra_args):
         """Normal macOS starts and confirmed Linux starts retain inherited-agent behavior."""
         agent, _paths = self._agent_with_args(short_keydir, *extra_args, inherit=True)
-        monkeypatch.setattr(agent.keychain_state, "platform", SimpleNamespace(name=platform_name))
+        monkeypatch.setattr(agent.keychain_state, "platform", platform._classify(platform_name, has_ps=True))
         inherited = SshAgentRef(sock="/tmp/inherited.sock", pid="42")
         agent.keychain_state.env.update(inherited.as_dict())
         monkeypatch.setattr(agent, "_validate_candidate", lambda _source, agent_env, **_kwargs: agent_env)
