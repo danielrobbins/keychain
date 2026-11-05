@@ -3,12 +3,9 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import os
 import shlex
 import stat
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +19,7 @@ from .util import (
     lax_perm_warning,
     lax_perms,
     unlink_quiet,
+    write_atomic,
 )
 
 # macOS has the smallest common sockaddr_un.sun_path limit: 104 bytes,
@@ -60,14 +58,7 @@ class Pidfile:
 
     def write(self, env: SshAgentRef) -> None:
         """Write the pidfile atomically via temp file + rename."""
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent, text=True)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(self.render(env))
-            Path(tmp_name).replace(self.path)
-        except Exception:
-            unlink_quiet(tmp_name)
-            raise
+        write_atomic(self.path, self.render(env))
 
 
 @dataclass(frozen=True)
@@ -254,6 +245,9 @@ class KeychainPaths:
         return path
 
     def _ssh_agent_socket_path(self) -> Path:
+        import base64
+        import hashlib
+
         host_digest = hashlib.sha256(os.fsencode(self.host)).digest()[:6]
         socket_name = base64.urlsafe_b64encode(host_digest).decode()
         return self.keydir / f"{socket_name}.s"

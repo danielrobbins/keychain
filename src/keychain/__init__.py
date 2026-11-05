@@ -29,9 +29,8 @@ if sys.version_info < (3, 9):  # noqa: UP036
     )
     sys.exit(2)
 
-from importlib.metadata import PackageNotFoundError, version  # noqa: E402
-from importlib.resources import files  # noqa: E402
 from pathlib import Path  # noqa: E402
+from pkgutil import get_data  # noqa: E402
 
 __all__ = ["__version__"]
 
@@ -44,7 +43,7 @@ def _resolve_version() -> str:
     # built from -- never a stale value from an unrelated ``keychain``
     # package that happens to be installed system-wide.
     try:
-        text = files(__package__ or "keychain").joinpath("VERSION").read_text(encoding="utf-8").strip()
+        text = (get_data(__package__ or "keychain", "VERSION") or b"").decode("utf-8").strip()
         if text:
             return text
     except (FileNotFoundError, ModuleNotFoundError, OSError):
@@ -59,6 +58,9 @@ def _resolve_version() -> str:
         if candidate.is_file():
             return candidate.read_text(encoding="utf-8").strip() or "0.0.0"
     # 3. Fall back to installed-package metadata (pip install ., wheels, ...).
+    # Imported here: importlib.metadata costs more than the rest of startup.
+    from importlib.metadata import PackageNotFoundError, version
+
     try:
         return version("keychain")
     except PackageNotFoundError:

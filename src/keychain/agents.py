@@ -11,7 +11,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from .env import SshAgentRef
 from .output.core import Output
-from .util import KeychainError, LockFile, current_uid, get_tty, run, unlink_quiet
+from .util import KeychainError, LockFile, current_uid, get_tty, run, tempdir, unlink_quiet, write_atomic
 
 if TYPE_CHECKING:
     from .state import KeychainState
@@ -74,15 +73,7 @@ def ensure_macos_askpass(path: Path) -> Path:
     except OSError:
         pass
 
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(_MACOS_ASKPASS)
-        os.chmod(tmp_name, 0o700)
-        Path(tmp_name).replace(path)
-    except Exception:
-        unlink_quiet(tmp_name)
-        raise
+    write_atomic(path, _MACOS_ASKPASS, 0o700)
     return path
 
 
@@ -241,7 +232,7 @@ def pkcs11_provider_fingerprints(provider: str, out: Output) -> list[str] | None
     if not public_keys:
         return []
 
-    with tempfile.TemporaryDirectory(prefix="keychain-pkcs11-") as td:
+    with tempdir(prefix="keychain-pkcs11-") as td:
         fps: list[str] = []
         for i, public_key in enumerate(public_keys):
             public_key_path = Path(td) / f"provider-{i}.pub"
@@ -733,7 +724,7 @@ class GpgOperations:
 
     def warm_signing(self, gpg_keys: list[str]) -> None:
         out = self.out
-        with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
+        with tempdir(prefix="keychain-gpg-") as td:
             for index, k in enumerate(filter(None, gpg_keys)):
                 out.info(f"Warming GPG signing key: {out.id(k)}")
                 try:
@@ -759,7 +750,7 @@ class GpgOperations:
 
     def warm_decryption(self, gpg_keys: list[str]) -> None:
         out = self.out
-        with tempfile.TemporaryDirectory(prefix="keychain-gpg-") as td:
+        with tempdir(prefix="keychain-gpg-") as td:
             plain = Path(td) / "plain"
             plain.write_text("keychain\n", encoding="utf-8")
             for index, k in enumerate(filter(None, gpg_keys)):
