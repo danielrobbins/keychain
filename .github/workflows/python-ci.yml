@@ -1,9 +1,8 @@
 name: python-ci
 
-# Tiered triggering keeps PR feedback fast while still doing a full
-# cross-platform sweep on every master push, weekly, and on demand.
-# Feature-branch pushes get the fast tier (same as PRs) so contributors
-# see CI feedback before opening a PR.
+# PRs run the same full cross-platform sweep as master and tag pushes.
+# Feature-branch pushes keep the fast tier; weekly and manual runs include
+# the full sweep too.
 on:
   push:
   pull_request:
@@ -50,15 +49,15 @@ jobs:
   # -------------------------------------------------------------------------
   # Fast tier — runs on every event (PR, push, cron, dispatch).
   #
-  # Floor + ceiling on Linux + Windows/macOS-on-ceiling. Rationale:
+  # Python 3.9 + 3.14 on Linux/macOS, and 3.14 on Windows. Rationale:
   #   - 3.9 (floor) catches usage of features added later.
-  #   - 3.14 (ceiling) catches deprecations and stdlib drift.
+  #   - 3.14 catches deprecations and stdlib drift; the full sweep adds 3.15.
   #   - Windows × 3.14 catches POSIX-only assumptions; OS-portability
   #     bugs almost never differ between Python minor versions, so one
-  #     Windows job is enough for PR-time feedback.
+  #     Windows job gives early feedback before the full sweep finishes.
   #   - macOS × 3.9 catches floor-version Darwin behavior on a key
   #     supported platform.
-  #   - macOS × 3.14 catches ceiling-version Darwin-specific POSIX edges,
+  #   - macOS × 3.14 catches Darwin-specific POSIX edges,
   #     especially AF_UNIX socket path limits that Linux does not share.
   # -------------------------------------------------------------------------
   test-fast:
@@ -241,15 +240,12 @@ jobs:
           ./keychain.pyz help >/dev/null
 
   # -------------------------------------------------------------------------
-  # Full sweep — runs on master pushes, tags, weekly cron, and manual
-  # dispatch. *Skipped on PRs and feature-branch pushes* to keep PR and
-  # day-to-day feedback under a few minutes. If a branch needs the full
-  # sweep before merge (e.g. touching subprocess wiring, signal handling,
-  # path resolution), a maintainer can trigger it via the Actions tab →
-  # "Run workflow".
+  # Full sweep: required on PRs, master pushes, tags, weekly cron, and
+  # manual dispatch. Only ordinary feature-branch pushes skip this tier.
   # -------------------------------------------------------------------------
   test-full-sweep:
     if: >-
+      github.event_name == 'pull_request' ||
       github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
@@ -314,6 +310,7 @@ jobs:
       TEST_FULL_SWEEP_RESULT: ${{ needs.test-full-sweep.result }}
       TEST_FULL_SWEEP_REQUIRED: >-
         ${{
+          github.event_name == 'pull_request' ||
           github.event_name == 'schedule' ||
           github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
