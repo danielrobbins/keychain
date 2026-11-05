@@ -7,10 +7,8 @@ Targets Python 3.9+ (RHEL 8 users opt in via ``dnf module install python39``).
 from __future__ import annotations
 
 import contextlib
-import ctypes
 import errno
 import os
-import secrets
 import socket
 import stat
 import subprocess
@@ -102,7 +100,7 @@ class LockFile:
         self.acquired = False
         self.shared = shared
         self._fd = -1
-        self._token = f"{socket.gethostname()}:{os.getpid()}:{secrets.token_hex(8)}"
+        self._token = f"{socket.gethostname()}:{os.getpid()}:{os.urandom(8).hex()}"
 
     # ---- context manager ----------------------------------------------
     def __enter__(self) -> LockFile:
@@ -193,6 +191,8 @@ def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
     if os.name == "nt":
+        import ctypes
+
         kernel32 = cast(Any, ctypes).windll.kernel32
         handle = kernel32.OpenProcess(0x1000, False, pid)
         if not handle:
@@ -271,6 +271,27 @@ def unlink_quiet(*paths: PathLike) -> None:
     for p in paths:
         with contextlib.suppress(OSError):
             os.unlink(p)
+
+
+def write_atomic(path: Path, text: str, mode: int | None = None) -> None:
+    """Write *text* to *path* through a temp file in the same directory, then rename."""
+    import tempfile  # slow to import, and only writers need it
+
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        Path(tmp).replace(path)
+    finally:
+        unlink_quiet(tmp)
+
+
+def tempdir(prefix: str) -> Any:
+    import tempfile  # slow to import, and only some actions need it
+
+    return tempfile.TemporaryDirectory(prefix=prefix)
 
 
 def dedupe_sorted(items: Iterable[str]) -> list[str]:

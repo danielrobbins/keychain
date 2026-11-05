@@ -19,15 +19,18 @@ import subprocess
 import sys
 import time
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 from . import __version__, agents, keys, state
-from .coordination import ActivationCoordinator, ActivationWaiter
 from .env import SshAgentRef
 from .output.core import Output
 from .runtime import platform
 from .runtime.actions import NO_BANNER_ACTIONS, OUTPUT_ACTIONS, ROOT_ACTION
 from .runtime.config import OptionError, RuntimeConfig
 from .util import KeychainError
+
+if TYPE_CHECKING:
+    from .coordination import ActivationCoordinator, ActivationWaiter
 
 
 def _emit_eval_failure(enabled: bool) -> None:
@@ -277,6 +280,8 @@ class KeychainApp:
         return resolved
 
     def _coordinator(self) -> ActivationCoordinator:
+        from .coordination import ActivationCoordinator
+
         lockwait = self.args.get_value("lockwait")
         if lockwait is None:
             lockwait = 5

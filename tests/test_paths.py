@@ -203,7 +203,7 @@ class TestKeychainPathsWriteRead:
             calls.append((kwargs["prefix"], kwargs["suffix"], kwargs["dir"]))
             return real_mkstemp(*args, **kwargs)
 
-        with patch("keychain.paths.tempfile.mkstemp", side_effect=fake_mkstemp):
+        with patch("tempfile.mkstemp", side_effect=fake_mkstemp):
             kp.write(SshAgentRef.from_text(AGENT_SH_OUTPUT), _out())
 
         assert calls == [

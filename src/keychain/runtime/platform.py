@@ -15,6 +15,7 @@ need to override it can call :func:`reset` and then :func:`detect` with a
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -61,6 +62,18 @@ class _PosixPlatform(Platform):
 
     def process_list(self, pattern: re.Pattern, uid: int | None = None) -> list[int]:
         pids: list[int] = []
+        if self.name.startswith("linux") and os.path.isdir("/proc/self"):
+            # Spawning ps costs ~10 ms; walking /proc costs ~4 ms.
+            for entry in os.listdir("/proc"):
+                try:
+                    if not entry.isdigit() or (uid is not None and os.stat(f"/proc/{entry}").st_uid != uid):
+                        continue
+                    with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as handle:
+                        if pattern.search(handle.read().strip()):
+                            pids.append(int(entry))
+                except OSError:
+                    continue  # the process exited mid-scan
+            return pids
         try:
             proc = subprocess.Popen(
                 # illumos/Solaris treats everything after '=' in one -o

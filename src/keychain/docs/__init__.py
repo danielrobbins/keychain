@@ -16,7 +16,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from functools import cache
-from importlib.resources import files
+from pkgutil import get_data
 from typing import Any
 
 from ..output.core import Output, Span, strip_ansi
@@ -26,8 +26,7 @@ from ..util import KeychainError
 
 @cache
 def _payload() -> dict[str, Any]:
-    blob = files("keychain").joinpath("docs").joinpath("_doc_texts.json").read_text(encoding="utf-8")
-    return json.loads(blob)
+    return json.loads(get_data("keychain", "docs/_doc_texts.json") or b"{}")
 
 
 def _entry(tag: str) -> dict[str, str]:

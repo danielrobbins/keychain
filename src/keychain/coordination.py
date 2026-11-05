@@ -7,11 +7,9 @@ import contextlib
 import errno
 import json
 import os
-import secrets
 import select
 import stat
 import subprocess
-import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -21,7 +19,7 @@ from typing import Any
 
 from .output.core import ActivationPrompt, Output
 from .paths import KeychainPaths
-from .util import KeychainError, LockFile, unlink_quiet
+from .util import KeychainError, LockFile, unlink_quiet, write_atomic
 
 _CHILD_TERMINATE_TIMEOUT = 5.0
 
@@ -54,14 +52,7 @@ class CoordinationState:
         return cls(attempt, status)
 
     def save(self, path: Path) -> None:
-        fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent, text=True)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"attempt": self.attempt, "status": self.status}, handle)
-                handle.write("\n")
-            Path(name).replace(path)
-        finally:
-            unlink_quiet(name)
+        write_atomic(path, json.dumps({"attempt": self.attempt, "status": self.status}) + "\n")
 
 
 def _open_fifo(path: Path, mode: int) -> int:
@@ -198,7 +189,7 @@ class ActivationCoordinator:
         if self.no_lock or not hasattr(os, "mkfifo") or not self.can_prompt():
             return None
         with self.state_lock():
-            return ActivationWaiter(self, self.endpoint(f"wait.{os.getpid()}.{secrets.token_hex(8)}"))
+            return ActivationWaiter(self, self.endpoint(f"wait.{os.getpid()}.{os.urandom(8).hex()}"))
 
     def notify_waiters(self, attempt: str, status: str) -> None:
         for path in self.paths.waiters_dir.glob("wait.*.fifo"):
@@ -406,7 +397,7 @@ class ActivationOwner:
         self, coord: ActivationCoordinator, waiter: ActivationWaiter | None, *, exclusive: bool = False
     ) -> None:
         self.coord, self.waiter = coord, waiter
-        self.attempt = secrets.token_hex(16)
+        self.attempt = os.urandom(16).hex()
         self.gate = coord.activation_lock(shared=not exclusive)
         self.lock = coord.attempt_lock(self.attempt)
         self.status = "failed"
