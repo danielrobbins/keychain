@@ -50,8 +50,8 @@ Keychain 3 ships as a **Python zipapp** — a single executable file with no thi
 
 ```bash
 # Download from https://github.com/danielrobbins/keychain/releases
-chmod +x keychain-3.0.9.pyz
-sudo cp keychain-3.0.9.pyz /usr/local/bin/keychain
+chmod +x keychain-3.0.10.pyz
+sudo cp keychain-3.0.10.pyz /usr/local/bin/keychain
 sudo chmod 755 /usr/local/bin/keychain
 
 # Verify installation
