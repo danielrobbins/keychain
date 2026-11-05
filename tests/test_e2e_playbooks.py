@@ -568,6 +568,43 @@ def test_confallhosts_loads_identity_from_openssh_config(playbook: PlaybookRunne
     assert loaded_ssh_keys(playbook, host) == {configured_public}
 
 
+@OPENSSH_AGENT_ONLY
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="requires the OpenSSH client")
+@pytest.mark.parametrize("home_prefix", [True, False])
+@pytest.mark.parametrize("included", [True, False])
+def test_confallhosts_catch_all_with_real_openssh(playbook: PlaybookRunner, home_prefix, included):
+    host = "testhost"
+    playbook.set_host(host)
+    ssh_dir = playbook.home / ".ssh"
+    ssh_dir.mkdir()
+    configured_key = ssh_dir / "key with spaces"
+    configured_public = generate_ssh_key(configured_key)
+    identity = "~/.ssh/key with spaces" if home_prefix else str(configured_key)
+    directive = f'IdentityFile "{identity}"\n'
+    if included:
+        fragment = ssh_dir / "identities.conf"
+        fragment.write_text(directive, encoding="utf-8")
+        directive = f'Include "{fragment}"\n'
+    config = ssh_dir / "config"
+    config.write_text(f"Host *\n    {directive}", encoding="utf-8")
+    run = keys.run
+    seen_hosts = []
+
+    def isolated_ssh(command, **kwargs):
+        # OpenSSH finds config through passwd, not HOME. Only redirect that file;
+        # leave config evaluation and key loading to the real OpenSSH programs.
+        assert command == ["ssh", "-nG", "*"]
+        seen_hosts.append(command[-1])
+        return run(["ssh", "-F", str(config), *command[1:]], **kwargs)
+
+    playbook.monkeypatch.setattr(keys, "run", isolated_ssh)
+
+    playbook.run("add", "--quiet", "--immediate", "--confallhosts")
+
+    assert seen_hosts == ["*"]
+    assert loaded_ssh_keys(playbook, host) == {configured_public}
+
+
 @LINUX_AGENT_ONLY
 def test_inspect_command(playbook: PlaybookRunner):
     """Verify that keychain inspect successfully outputs state."""

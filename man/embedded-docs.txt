@@ -303,9 +303,11 @@ keychain wipe && keychain add KEYS
 
 `--clear` does not flush GnuPG's passphrase cache, even when GPG keys are also requested. Use `keychain wipe --gpg` when that separate operation is intended.
 
-== @option confallhosts: load every IdentityFile in ~/.ssh/config
+== @option confallhosts: load configured SSH identities
 
-Iterate every `Host` block in *~/.ssh/config* (excluding pure-wildcard patterns and negations) and load its `IdentityFile`. Equivalent to `--extended host:NAME` for every host. Per-host expansion is delegated to `ssh -G NAME` so include files, Match blocks, and `%d`/`%u`/`%h` tokens work exactly as OpenSSH does.
+Load identities for each concrete `Host` name listed in *~/.ssh/config*, as with `host:NAME`. If no concrete names are listed but a `Host *` block is present, evaluate that catch-all block instead. Other wildcard patterns and negations are not enumerated.
+
+OpenSSH evaluates the configuration through `ssh -G`, including applicable `Include` and `Match` rules. Keychain expands `~` home-directory prefixes in the resulting identity paths. It does not currently expand `%` tokens or `${VAR}` references left in that output.
 
 == @option ssh-allow-forwarded: adopt a forwarded SSH agent
 
