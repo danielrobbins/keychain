@@ -50,15 +50,37 @@ class Platform:
             "process listing not available on {}: {}".format(self.name, self.reason or "unsupported platform")
         )
 
+    def process_details_unavailable(self, pid: int) -> bool:
+        """Whether a live PID's identity is inaccessible, not merely absent from a scan."""
+        return False
+
     def __repr__(self):  # pragma: no cover - debugging aid
         return f"<Platform {self.name} supported={self.supported}>"
 
 
 class _PosixPlatform(Platform):
-    """POSIX-shaped userland: enumerate processes via ``ps``."""
+    """POSIX-shaped userland: enumerate visible processes via /proc or ps."""
 
     def __init__(self, name: str) -> None:
         self.name = name
+
+    def process_details_unavailable(self, pid: int) -> bool:
+        if pid <= 0 or not self.name.startswith(("linux", "android")) or not os.path.isdir("/proc/self"):
+            return False
+        try:
+            with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as handle:
+                handle.read(1)
+        except (FileNotFoundError, PermissionError):
+            # hidepid can return ENOENT for a live, non-dumpable ssh-agent.
+            # Check liveness after the read, so an exit during it is not "hidden".
+            try:
+                os.kill(pid, 0)
+            except (OSError, OverflowError):
+                return False
+            return True
+        except OSError:
+            pass
+        return False
 
     def process_list(self, pattern: re.Pattern, uid: int | None = None) -> list[int]:
         pids: list[int] = []
@@ -72,7 +94,7 @@ class _PosixPlatform(Platform):
                         if pattern.search(handle.read().strip()):
                             pids.append(int(entry))
                 except OSError:
-                    continue  # the process exited mid-scan
+                    continue  # exited mid-scan, or process details are restricted
             return pids
         try:
             proc = subprocess.Popen(

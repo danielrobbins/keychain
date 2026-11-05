@@ -233,6 +233,16 @@ class KeychainState:
             return []
         return agents.findpids("ssh")
 
+    def ssh_pid_status(self, pid: int | None) -> str:
+        """Fresh identity check; uninspectable is not permission to signal a PID."""
+        if pid is None:
+            return "unset"
+        if pid in self.ssh_agent_pids:
+            return "verified"
+        if self.platform.process_details_unavailable(pid):
+            return "uninspectable"
+        return "unverified"
+
     @cached_property
     def gpg_agent_pids(self) -> list[int]:
         if not self.process_listing_supported:
