@@ -31,6 +31,8 @@ def _run(cmd: list[str], env: dict[str, str], *, timeout: int = 30) -> subproces
         text=True,
         encoding="utf-8",
         errors="replace",
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
         timeout=timeout,
         check=False,
     )
@@ -50,6 +52,64 @@ printf '%s\n' {shlex.quote(response)}
         encoding="utf-8",
     )
     path.chmod(0o700)
+
+
+def _require_force_askpass(env, key, log, agents):
+    # Probe OpenSSH itself, not Keychain or a version number: vendors backport features.
+    started = _run(["ssh-agent", "-s"], env)
+    _assert_ok(started)
+    agent = SshAgentRef.from_text(started.stdout)
+    assert agent, started.stdout
+    agents.append(agent)
+    probe_env = agent.overlay(env)
+    result = _run(["ssh-add", str(key)], probe_env)
+    if result.returncode != 0 and not log.exists():
+        # A working display-based helper distinguishes an unsupported force mode
+        # from a broken helper, bad key, or other test setup failure.
+        probe_env.pop("SSH_ASKPASS_REQUIRE", None)
+        probe_env["DISPLAY"] = ":0"
+        _assert_ok(_run(["ssh-add", str(key)], probe_env))
+        assert log.exists(), "display-based askpass did not invoke the helper"
+        pytest.skip("installed ssh-add does not support forced askpass without DISPLAY")
+    _assert_ok(result)
+    assert log.exists(), "forced askpass did not invoke the helper"
+    log.unlink()
+
+
+@pytest.mark.parametrize("case", ["supported", "unsupported", "broken-helper", "broken-fallback", "missing-log"])
+def test_force_askpass_probe_only_skips_an_unsupported_capability(tmp_path, monkeypatch, case):
+    log = tmp_path / "askpass.log"
+    env = {"SSH_ASKPASS_REQUIRE": "force", "SSH_ASKPASS": str(tmp_path / "helper")}
+    calls = []
+    agents = []
+
+    def run(cmd, child_env):
+        calls.append((cmd, child_env.copy()))
+        if cmd == ["ssh-agent", "-s"]:
+            return subprocess.CompletedProcess(cmd, 0, "SSH_AUTH_SOCK=/test.sock; SSH_AGENT_PID=123;", "")
+        if "DISPLAY" in child_env:
+            assert "SSH_ASKPASS_REQUIRE" not in child_env
+            if case == "unsupported":
+                log.write_text("|passphrase\n")
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+        elif case in ("supported", "broken-helper"):
+            log.write_text("|passphrase\n")
+        status = 0 if case in ("supported", "missing-log") else 1
+        return subprocess.CompletedProcess(cmd, status, "", "probe diagnostic")
+
+    monkeypatch.setattr(sys.modules[__name__], "_run", run)
+    if case == "supported":
+        _require_force_askpass(env, tmp_path / "key", log, agents)
+        assert not log.exists(), "Keychain's later invocation must produce its own evidence"
+    elif case == "unsupported":
+        with pytest.raises(pytest.skip.Exception, match="without DISPLAY"):
+            _require_force_askpass(env, tmp_path / "key", log, agents)
+    else:
+        with pytest.raises(AssertionError):
+            _require_force_askpass(env, tmp_path / "key", log, agents)
+    assert len(calls) == (3 if case in ("unsupported", "broken-fallback") else 2)
+    assert agents == [SshAgentRef("/test.sock", "123")], "the fixture must clean up the probe agent"
+    assert env == {"SSH_ASKPASS_REQUIRE": "force", "SSH_ASKPASS": str(tmp_path / "helper")}
 
 
 @pytest.fixture
@@ -106,23 +166,32 @@ def _keychain_add_confirm(env: dict[str, str], key: Path) -> SshAgentRef:
 
 def test_confirmed_key_invokes_askpass_when_agent_inherits_askpass(ssh_confirm_home) -> None:
     env, key, askpass, log, agents = ssh_confirm_home
-    env.update({"SSH_ASKPASS": str(askpass), "SSH_ASKPASS_REQUIRE": "force"})
+    # The shell helper needs no X server; DISPLAY enables older OpenSSH's askpass path.
+    env.update({"SSH_ASKPASS": str(askpass), "DISPLAY": ":0"})
 
     agent = _keychain_add_confirm(env, key)
     agents.append(agent)
     result = _run(["ssh-add", "-T", f"{key}.pub"], agent.overlay(env))
 
     _assert_ok(result)
-    assert log.read_text(encoding="utf-8").startswith("confirm|")
+    hint, prompt = log.read_text(encoding="utf-8").split("|", 1)
+    assert hint in ("", "confirm")  # Older OpenSSH does not supply SSH_ASKPASS_PROMPT.
+    assert prompt.strip()
 
 
-def test_force_askpass_loads_encrypted_key_without_display(ssh_confirm_home) -> None:
+@pytest.mark.parametrize("mode", ["display", "force"])
+def test_askpass_loads_encrypted_key(ssh_confirm_home, mode) -> None:
     env, key, askpass, log, agents = ssh_confirm_home
     encrypted_key = key.with_name("id_encrypted")
     passphrase = "test passphrase"
     _assert_ok(_run(["ssh-keygen", "-q", "-t", "ed25519", "-N", passphrase, "-f", str(encrypted_key)], env))
     _write_askpass(askpass, log, passphrase)
-    env.update({"SSH_ASKPASS": str(askpass), "SSH_ASKPASS_REQUIRE": "force"})
+    env["SSH_ASKPASS"] = str(askpass)
+    if mode == "force":
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        _require_force_askpass(env, encrypted_key, log, agents)
+    else:
+        env["DISPLAY"] = ":0"
 
     agent = _keychain_add_confirm(env, encrypted_key)
     agents.append(agent)
@@ -133,11 +202,11 @@ def test_force_askpass_loads_encrypted_key_without_display(ssh_confirm_home) -> 
 
 def test_confirmed_key_cannot_replace_askpass_after_agent_start(ssh_confirm_home) -> None:
     env, key, askpass, log, agents = ssh_confirm_home
-    env.update({"SSH_ASKPASS": str(askpass.with_name("missing-askpass")), "SSH_ASKPASS_REQUIRE": "force"})
+    env.update({"SSH_ASKPASS": str(askpass.with_name("missing-askpass")), "DISPLAY": ":0"})
     agent = _keychain_add_confirm(env, key)
     agents.append(agent)
     client_env = agent.overlay(env)
-    client_env.update({"SSH_ASKPASS": str(askpass), "SSH_ASKPASS_REQUIRE": "force"})
+    client_env["SSH_ASKPASS"] = str(askpass)
 
     result = _run(["ssh-add", "-T", f"{key}.pub"], client_env)
 

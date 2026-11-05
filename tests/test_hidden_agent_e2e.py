@@ -39,7 +39,7 @@ def _namespace_probe(hidepid):
     from keychain.env import SshAgentRef
     from keychain.output.core import Output
     from keychain.paths import KeychainPaths
-    from keychain.runtime.platform import _PosixPlatform
+    from keychain.runtime.platform import _LinuxPlatform
 
     report = {
         "hidepid": hidepid,
@@ -48,7 +48,7 @@ def _namespace_probe(hidepid):
         "proc_mounts": [line for line in Path("/proc/self/mountinfo").read_text().splitlines() if " /proc " in line],
         "cases": {},
     }
-    # Selecting android tests its current ps backend on Linux, not Android itself.
+    # Both platform names use Linux /proc; this does not emulate Android's SELinux policy.
     for backend in ("linux", "android"):
         with tempfile.TemporaryDirectory(prefix="kc-hidepid-") as temporary:
             home = Path(temporary)
@@ -94,7 +94,7 @@ def _namespace_probe(hidepid):
                 comm_errno = 0
             except OSError as error:
                 comm_errno = error.errno
-            pids = _PosixPlatform(backend).process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=os.getuid())
+            pids = _LinuxPlatform(backend).process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=os.getuid())
             inspected = invoke("inspect")
             inspected_json = invoke("inspect", "--json")
             assert inspected_json.returncode == 0, inspected_json.stderr

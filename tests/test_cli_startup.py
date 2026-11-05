@@ -17,7 +17,7 @@ from tests.support import set_home
 
 @pytest.mark.skipif(os.name == "nt", reason="requires POSIX file ownership")
 @pytest.mark.parametrize("action", [["add", "--noask", "--eval"], ["env"], ["agent", "stop"]])
-@pytest.mark.parametrize("failure", ["exit", "launch"])
+@pytest.mark.parametrize("failure", ["exit", "launch", "malformed", "empty"])
 def test_failed_discovery_preserves_agent_reference(tmp_path, monkeypatch, capsys, action, failure):
     set_home(monkeypatch, tmp_path, patch_path_home=True)
     monkeypatch.delenv("KEYCHAIN_CONFIG", raising=False)
@@ -30,13 +30,16 @@ def test_failed_discovery_preserves_agent_reference(tmp_path, monkeypatch, capsy
     contents = "SSH_AUTH_SOCK=/test.sock; export SSH_AUTH_SOCK;\nSSH_AGENT_PID=123; export SSH_AGENT_PID;\n"
     pidfile.write_text(contents)
     pidfile.chmod(0o600)
-    monkeypatch.setattr(main.platform, "_cached", main.platform._PosixPlatform("cygwin"))
+    monkeypatch.setattr(main.platform, "_cached", main.platform._classify("cygwin", has_ps=True))
     monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
 
     def fail_ps(cmd, **_kwargs):
         assert cmd == ["ps", "-e", "-l"], "must not launch a replacement agent"
         if failure == "launch":
             raise FileNotFoundError("test ps missing")
+        if failure in ("malformed", "empty"):
+            stdout = b"unsupported output\n" if failure == "malformed" else b""
+            return SimpleNamespace(returncode=0, communicate=lambda: (stdout, b""))
         return SimpleNamespace(returncode=1, communicate=lambda: (b"", b"test ps failure"))
 
     monkeypatch.setattr(main.platform.subprocess, "Popen", fail_ps)
@@ -46,7 +49,8 @@ def test_failed_discovery_preserves_agent_reference(tmp_path, monkeypatch, capsy
     captured = capsys.readouterr()
     assert exc.value.code == 1
     assert "Process discovery failed" in captured.err
-    assert "test ps" in captured.err
+    if failure in ("exit", "launch"):
+        assert "test ps" in captured.err
     assert "Traceback" not in captured.err
     assert captured.out.strip() == ("false;" if "--eval" in action else "")
     assert pidfile.read_text() == contents

@@ -74,9 +74,12 @@ def test_agent_reuse_preserves_loaded_key(monkeypatch, columns):
             assert agent.pid_int in visible, {
                 "agent": agent, "uid": os.getuid(), "COLUMNS": os.environ.get("COLUMNS"),
                 "platform": repr(platform.detect()), "ps_path": shutil.which("ps"),
-                "ps": run("ps", "-e", "-l").stdout,
+                "ps": run(*platform.detect().ps_command).stdout,
                 "ssh-add": run("ssh-add", "-l", agent=agent),
             }
+            assert agent.pid_int not in platform.detect().process_list(
+                re.compile(r"(?:^|/)ssh-agent$"), os.getuid() + 1,
+            )
 
             key = str(home / "test-key")
             generated = run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key)
