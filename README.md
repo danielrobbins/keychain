@@ -1,22 +1,22 @@
 # Keychain 3
 
-Keychain orchestrates `ssh-agent` and gives you one coordinated, long-running SSH agent per user and host. For GnuPG, Keychain can also auto-warm your signing and encryption keys so they are ready for use.
+Keychain orchestrates `ssh-agent` and gives you one coordinated, long-running SSH agent per user and host. For GnuPG, Keychain can also auto-warm your signing and decryption keys so they are ready for use.
 
-Keychain 3 is the evolution of the original Bourne shell-based tool created by Daniel Robbins in 2001. It preserves the single-file deployment model that made Keychain useful for over two decades, while adding modern capabilities: coordinated multi-terminal activation, stable agent sockets, seamless cron and script integration, PKCS#11 hardware key support, explicit GPG credential warm-up, hardened security defaults, and a comprehensive test suite of 700+ unit and integration tests — now written in Python and distributed as a self-contained executable zipapp with no third-party Python dependencies.
+Keychain 3 is the evolution of the original Bourne shell-based tool created by Daniel Robbins in 2001. It preserves the single-file deployment model that made Keychain useful for over two decades, while adding modern capabilities: coordinated multi-terminal activation, stable agent sockets, seamless cron and script integration, PKCS#11 hardware key support, explicit GPG credential warm-up, hardened security defaults, and a comprehensive suite of unit and integration tests — now written in Python and distributed as a self-contained executable zipapp with no third-party Python dependencies.
 
 For background on the decision to rewrite Keychain in Python, see [Why Keychain 3 Uses Python](https://kernel-seeds.org/projects/keychain/why-python/).
 
 ## The Agent Problem Keychain Solves
 
-SSH is amazing, but entering your passphrase every time you open a terminal gets old fast. The standard `ssh-agent` helps, but it has limitations:
+SSH is amazing, but entering your passphrase every time you open a terminal gets old fast. The standard `ssh-agent` helps, but sharing it across sessions takes some setup:
 
-- **One agent per login session** — open a new terminal, get a new agent, enter your passphrase again
+- **Repeated agents and prompts**: shell startup snippets can start a fresh agent for every terminal
 - **Cron jobs can't find your agent** — background processes run in a different session
 - **No ssh-agent coordination** — individual ssh-agent processes are not aware of each other.
 
 **Keychain fixes all of this:**
 
-- **One agent per host** — all terminals share the same long-running agent
+- **One agent per user and host**: all your terminals share the same long-running agent
 - **Persistent state** — cron jobs, remote sessions, and background tasks can all reconnect
 - **Multi-terminal coordination** — when VS Code restores 5 login terminals at once, they cooperate instead of duplicating effort or competing
 
@@ -50,8 +50,8 @@ Keychain 3 ships as a **Python zipapp** — a single executable file with no thi
 
 ```bash
 # Download from https://github.com/danielrobbins/keychain/releases
-chmod +x keychain-3.0.0.pyz
-sudo cp keychain-3.0.0.pyz /usr/local/bin/keychain
+chmod +x keychain-3.0.9.pyz
+sudo cp keychain-3.0.9.pyz /usr/local/bin/keychain
 sudo chmod 755 /usr/local/bin/keychain
 
 # Verify installation
@@ -70,7 +70,9 @@ No hidden dependencies, no mystery code — everything is right there.
 
 ### Platform Support
 
-Keychain 3 is designed for POSIX-like systems with Python 3.9+ and OpenSSH, and optionally GnuPG. That includes Linux, macOS, WSL, Git Bash, the BSDs, Solaris-derived systems, and similar UNIX-like environments. Native Windows is not a supported target yet, but Windows users can run Keychain through WSL or Git Bash.
+Keychain 3 is designed for POSIX environments with Python 3.9+ and OpenSSH; GnuPG is optional. Automated CI covers **Linux, macOS, FreeBSD, OpenBSD, OmniOS (illumos), and MSYS2**. **WSL** uses Linux support; **Cygwin and Android/Termux** have platform-specific support and regression tests, but no dedicated CI jobs yet.
+
+On Windows, use WSL or the POSIX Python and OpenSSH tools provided by MSYS2 or Cygwin. Native Windows Python and Git Bash alone are not supported.
 
 ## 60-Second Quick Start
 
@@ -131,7 +133,7 @@ end
 2. If not, it starts one for you
 3. It loads your private key (prompting for the passphrase once)
 4. It writes the agent's connection info to `~/.keychain/`
-5. Every new shell after that reconnects automatically — **no more prompts**
+5. Every new shell reconnects automatically, without another passphrase prompt while the key remains loaded
 
 **Verify it worked:**
 
@@ -171,7 +173,7 @@ Your private key is stored in `~/.ssh/id_ed25519` (or similar). If someone steal
 
 **The new problem:** Now the server no longer needs your login password, but your local machine still needs the passphrase that decrypts your private key. Without an agent, that passphrase is needed every time the key is used. Open a new terminal? Enter it again. Run a cron job? It cannot prompt. You *could* remove the passphrase from the private key, but then anyone who steals the file can use it.
 
-**Enter ssh-agent:** `ssh-agent` is distributed with OpenSSH. It's a background process that holds your decrypted private key in memory. You enter the passphrase only once; `ssh-agent` caches your private key, and OpenSSH asks `ssh-agent` for it each time, instead of having to prompt *you*.
+**Enter ssh-agent:** `ssh-agent` is distributed with OpenSSH. It's a background process that holds your decrypted private key in memory. You enter the passphrase only once; OpenSSH then asks the agent to sign authentication requests, rather than retrieving the key or prompting *you* again.
 
 **The next problem:** `ssh-agent` is just a process with a socket. You still need to start it at the right time, publish its environment to future shells, keep scripts and cron jobs pointed at it, and avoid races when several terminals initialize at once.
 
@@ -254,7 +256,7 @@ Shows:
 - Parsed preferences and their effective sources
 - Keychain-relevant environment state
 - SSH and GPG tool availability
-- Agent status and socket locations
+- Agent status, socket locations, and process-visibility diagnostics
 - Keychain directory and pidfile state
 - Ownership and permission checks
 - Loaded SSH keys from the best available agent
@@ -389,7 +391,7 @@ Need your user services to access the SSH agent? From an interactive terminal, r
 eval "$(keychain add --eval --systemd ~/.ssh/id_ed25519)"
 ```
 
-This pushes the agent environment to `systemctl --user`, making it available to all your user services.
+This pushes the agent environment to `systemctl --user`, making it available to user services when they next start.
 
 For automatic startup, add `--systemd` to both Keychain invocations in the Bash or fish Quick Start recipe. The non-interactive branch retains `--noask` so it can publish the agent environment without prompting.
 
