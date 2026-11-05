@@ -93,7 +93,11 @@ class _PosixPlatform(Platform):
                     if not entry.isdigit() or (uid is not None and os.stat(f"/proc/{entry}").st_uid != uid):
                         continue
                     with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as handle:
-                        if pattern.search(handle.read().strip()):
+                        if not pattern.search(handle.read().strip()):
+                            continue
+                    with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
+                        # Skip zombie/dead tasks; the parenthesized name can contain ')'.
+                        if handle.read().rpartition(")")[2].split()[0] not in ("Z", "X", "x"):
                             pids.append(int(entry))
                 except OSError:
                     continue  # exited mid-scan, or process details are restricted

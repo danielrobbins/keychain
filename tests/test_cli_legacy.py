@@ -17,15 +17,15 @@ class TestParseArgsLegacy:
         assert ns.action == "list"
 
     def test_legacy_stop_all(self):
-        """The compat shim now treats `all` as the implicit stop default, not an explicit parsed target."""
+        """Legacy all selects every agent owned by this user, not just the pidfile agent."""
         ns = RuntimeConfig.resolve(["--stop", "all"])
         assert ns.action == "agent stop"
-        assert ns.get_value("target") is None
+        assert ns.get_value("target") == "all"
 
     def test_legacy_stop_mine(self):
         ns = RuntimeConfig.resolve(["--stop", "mine"])
         assert ns.action == "agent stop"
-        assert ns.get_value("target") == "mine"
+        assert ns.get_value("target") is None
 
     def test_legacy_stop_others(self):
         ns = RuntimeConfig.resolve(["-k", "others"])
@@ -145,7 +145,7 @@ class TestParseArgsLegacy:
         "argv,flag,replacement",
         [
             (["id_rsa", "--list"], "--list", "list"),
-            (["id_rsa", "--stop", "mine"], "--stop", "agent stop --mine"),
+            (["id_rsa", "--stop", "mine"], "--stop", "agent stop"),
         ],
     )
     @pytest.mark.skip(

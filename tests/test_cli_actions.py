@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-only
 """CLI action-resolution and handler tests."""
 
+import signal
 import subprocess
 from types import SimpleNamespace
 
 import pytest
 
-from keychain import keys, main
+from keychain import agents, keys, main
+from keychain.env import SshAgentRef
 from keychain.main import KeychainApp
 from keychain.output.core import Output
 from keychain.paths import KeychainPaths
@@ -29,6 +31,44 @@ class TestResolveAction:
         out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
         assert KeychainApp(ns, out)._resolve_action() == "agent_stop"
         assert ns.get_value("target") == "mine"
+
+    @pytest.mark.parametrize(
+        "argv, expected",
+        [
+            (["--stop", "mine"], [101]),
+            (["--stop=mine"], [101]),
+            (["-k", "mine"], [101]),
+            (["-qk", "mine"], [101]),
+            (["--stop", "all"], [101, 202]),
+            (["--stop=all"], [101, 202]),
+            (["-k", "all"], [101, 202]),
+            (["--stop", "others"], [202]),
+            (["--stop=others"], [202]),
+            (["-k", "others"], [202]),
+            (["agent", "stop"], [101]),
+            (["agent", "stop", "--mine"], [101, 202]),
+            (["agent", "stop", "--all"], [101, 202]),
+            (["agent", "stop", "--others"], [202]),
+        ],
+    )
+    def test_stop_signals_the_requested_agents(self, monkeypatch, argv, expected):
+        args = RuntimeConfig.resolve(argv)
+        out = Output.build(quiet=True, debug=False, eval_mode=False, color=False)
+        state = SimpleNamespace(
+            user="tester",
+            pidfile_env=SshAgentRef("/test.sock", "101"),
+            paths=SimpleNamespace(ensure_keydir=lambda: None, clear=lambda: None),
+        )
+        state.ssh = agents.SshAgent(state, out)
+        app = KeychainApp(args, out)
+        app._kstate = state
+        signaled = []
+        monkeypatch.setattr(agents, "findpids", lambda _prog: [101, 202])
+        monkeypatch.setattr(agents.os, "kill", lambda pid, sig: signaled.append((pid, sig)))
+
+        assert app._resolve_action() == "agent_stop"
+        assert app._handle_agent_stop_action() == 0
+        assert signaled == [(pid, signal.SIGTERM) for pid in expected]
 
     def test_agent_stop_defaults_to_pidfile_when_no_target_is_selected(self):
         """The stop handler applies its own runtime fallback when no target flag was parsed."""
