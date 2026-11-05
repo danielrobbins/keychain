@@ -97,7 +97,7 @@ See also: `topic:extkeys`, `topic:coordination`.
 
 @syntax keychain agent <start|stop> [OPTIONS]
 
-Domain command for managing agent processes without loading keys. `agent start` ensures an agent exists and can emit its environment; `agent stop` terminates agents recorded in the pidfile.
+Domain command for managing agent processes without loading keys. `agent start` ensures an agent exists and can emit its environment; `agent stop` terminates the pidfile agent, or with a target option, the user's other visible agents.
 
 == @action agent start: fork an agent if none is running (no key load)
 
@@ -105,11 +105,11 @@ Domain command for managing agent processes without loading keys. `agent start` 
 
 Start an `ssh-agent` if none is running, then optionally emit its environment for the current shell. By default, Keychain pins a spawned `ssh-agent` to a host-specific socket path under `~/.keychain/` so the agent endpoint stays stable across WSL and other early startup environments that may clean `/tmp`. This action does not load any keys; use `add` when you want prompt-and-load semantics.
 
-== @action agent stop: terminate ssh-agents (default: all in pidfile)
+== @action agent stop: terminate ssh-agents (default: the pidfile agent)
 
-@syntax keychain agent stop [--mine|--others]
+@syntax keychain agent stop [--mine|--others|--all]
 
-Terminate the ssh-agents recorded in the pidfile. Bare `agent stop` targets every recorded agent; `--mine` and `--others` narrow the kill list by owner UID.
+Terminate ssh-agents. Bare `agent stop` stops only the agent recorded in the pidfile. `--mine` and `--all` stop every visible ssh-agent owned by the calling user, and `--others` stops the user's visible agents except the pidfile agent. Agents owned by other users are never signaled.
 
 == @action list: List keys currently held by ssh-agent.
 
@@ -319,17 +319,17 @@ Don't trust `$SSH_AUTH_SOCK` / `$SSH_AGENT_PID` from the parent environment; alw
 
 Use PATH as the ssh-agent socket explicitly. When this option is not supplied, Keychain now chooses a host-specific managed socket path under `~/.keychain/` instead of letting `ssh-agent` pick a transient location under `/tmp`. Override it only when integrating with another tool that expects a specific socket path.
 
-== @option mine: terminate only this UID's agents
+== @option mine: terminate all of this user's agents
 
-Restrict the kill list to agents whose owner UID matches the calling user. Useful in shared accounts or root-cron contexts where you must not touch other users' agents.
+Terminate every visible ssh-agent owned by the calling user, not only the pidfile agent. Agents owned by other users are never signaled. Same selection as `--all`; this is not the legacy `--stop mine`, which is plain `agent stop`.
 
-== @option others: terminate agents owned by others
+== @option others: terminate this user's other agents
 
-Inverse of `--mine`: terminate only agents whose owner UID does *not* match the calling user. Rare; typically a maintenance tool.
+Terminate the calling user's visible ssh-agents except the pidfile agent. Agents owned by other users are never signaled.
 
-== @option all: terminate all candidate agents
+== @option all: terminate all of this user's agents
 
-Terminate every candidate agent recorded in the pidfile, regardless of owner. This is the default target for `keychain agent stop`.
+Terminate every visible ssh-agent owned by the calling user, not only the pidfile agent. Without any target option, `keychain agent stop` stops only the pidfile agent.
 
 == @option list-json: emit machine-readable JSON on stdout
 

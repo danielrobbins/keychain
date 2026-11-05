@@ -4,6 +4,7 @@
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -42,11 +43,19 @@ def test_native_windows_unsupported():
     assert "WSL" in p.reason or "Cygwin" in p.reason
 
 
-def test_known_posix_ps_missing():
+def test_known_posix_ps_missing(monkeypatch):
     # A known POSIX platform without ps in PATH is unsupported with a clear message.
+    monkeypatch.setattr(platform.os.path, "isdir", lambda _path: False)
     p = platform.detect(platform_override="linux", has_ps=False)
     assert p.supported is False
     assert "ps" in p.reason.lower()
+
+
+@pytest.mark.parametrize("name", ["linux", "linux2", "android"])
+def test_linux_proc_does_not_require_ps(monkeypatch, name):
+    monkeypatch.setattr(platform.os.path, "isdir", lambda path: path == "/proc/self")
+    monkeypatch.setattr(platform.shutil, "which", lambda *_a: pytest.fail("must not require ps"))
+    assert platform.detect(platform_override=name).supported
 
 
 def test_unknown_platform_with_ps():
@@ -68,6 +77,54 @@ def test_detection_is_cached():
     assert first is second
 
 
+@pytest.mark.parametrize("name, implementation", [
+    ("linux", platform._LinuxPlatform), ("android", platform._LinuxPlatform),
+    ("darwin", platform._BSDPlatform), ("freebsd14", platform._BSDPlatform),
+    ("openbsd7", platform._BSDPlatform), ("netbsd10", platform._BSDPlatform),
+    ("dragonfly6", platform._BSDPlatform), ("sunos5", platform._SolarisPlatform),
+    ("cygwin", platform._CygwinPlatform), ("msys2", platform._CygwinPlatform),
+    ("aix", platform._PsPlatform), ("unknown-posix", platform._PsPlatform),
+])
+def test_factory_selects_platform_implementation(name, implementation):
+    p = platform._classify(name, has_ps=True)
+    assert type(p) is implementation
+    assert p.name == name
+
+
+@pytest.mark.parametrize("name", ["linux", "android"])
+def test_linux_ps_fallback_is_selected_once(monkeypatch, name):
+    monkeypatch.setattr(platform.os.path, "isdir", lambda _path: False)
+    p = platform._classify(name, has_ps=True)
+    assert p.requires_ps
+    monkeypatch.setattr(platform.os.path, "isdir", lambda _path: pytest.fail("must not redetect /proc"))
+
+    def ps(command, **_kwargs):
+        assert command == ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="]
+        return SimpleNamespace(returncode=0, communicate=lambda: (b"123 1000 ssh-agent\n", b""))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", ps)
+    assert p.process_list(re.compile("^ssh-agent$"), uid=1000) == [123]
+    assert not p.process_details_unavailable(123)
+
+
+def test_ps_dialects_do_not_change_each_others_commands(monkeypatch):
+    seen = []
+
+    def ps(command, **_kwargs):
+        seen.append(command)
+        return SimpleNamespace(returncode=0, communicate=lambda: (b"123 1000 ssh-agent\n", b""))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", ps)
+    for name in ("sunos5", "freebsd14", "aix", "sunos5"):
+        p = platform._classify(name, has_ps=True)
+        p.name = "msys2"  # Labels do not reroute a previously selected implementation.
+        assert p.process_list(re.compile("^ssh-agent$")) == [123]
+    assert seen == [
+        list(platform._SolarisPlatform.ps_command), list(platform._BSDPlatform.ps_command),
+        list(platform._PsPlatform.ps_command), list(platform._SolarisPlatform.ps_command),
+    ]
+
+
 def test_unsupported_process_list_raises():
     p = platform.detect(platform_override="win32")
     with pytest.raises(RuntimeError):
@@ -85,7 +142,8 @@ def test_supported_process_list_returns_list():
 
 @pytest.mark.parametrize("state", ["R", "S", "D", "T", "t", "I", "Z", "X", "x"])
 @pytest.mark.parametrize("comm", ["ssh-agent", "ssh ) agent ("])
-def test_proc_discovery_checks_process_state(monkeypatch, state, comm):
+@pytest.mark.parametrize("name", ["linux", "android"])
+def test_proc_discovery_checks_process_state(monkeypatch, state, comm, name):
     reads = []
 
     def read(path, **_kwargs):
@@ -103,7 +161,7 @@ def test_proc_discovery_checks_process_state(monkeypatch, state, comm):
     monkeypatch.setattr(platform, "open", read, raising=False)
     monkeypatch.setattr(platform.subprocess, "Popen", lambda *_a, **_k: pytest.fail("must not run ps"))
 
-    p = platform._PosixPlatform("linux")
+    p = platform._classify(name, has_ps=True)
     assert p.process_list(re.compile(re.escape(comm) + "$"), uid=1000) == ([] if state in ("Z", "X", "x") else [123])
     assert reads == ["/proc/123/comm", "/proc/123/stat"]
     reads.clear()
@@ -112,6 +170,47 @@ def test_proc_discovery_checks_process_state(monkeypatch, state, comm):
     reads.clear()
     assert p.process_list(re.compile(re.escape(comm) + "$"), uid=2000) == []
     assert reads == []
+
+
+def test_proc_discovery_skips_task_with_empty_stat(monkeypatch):
+    # A task that exits between the comm and stat reads can yield an empty stat.
+    files = {"/proc/123/comm": "ssh-agent\n", "/proc/123/stat": "", "/proc/456/comm": "ssh-agent\n",
+             "/proc/456/stat": "456 (ssh-agent) S 1 456 456 0\n"}
+    monkeypatch.setattr(platform.os.path, "isdir", lambda _path: True)
+    monkeypatch.setattr(platform.os, "listdir", lambda _path: ["123", "456"])
+    monkeypatch.setattr(platform.os, "stat", lambda _path: SimpleNamespace(st_uid=1000))
+    monkeypatch.setattr(platform, "open", lambda path, **_kw: io.StringIO(files[path]), raising=False)
+
+    assert platform._LinuxPlatform("linux").process_list(re.compile("ssh-agent$"), uid=1000) == [456]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux /proc")
+@pytest.mark.parametrize("name", ["linux", "android"])
+@pytest.mark.parametrize("ps_available", [False, True])
+def test_real_agent_discovery_with_minimal_path(tmp_path, monkeypatch, name, ps_available):
+    agent = shutil.which("ssh-agent")
+    if not agent:
+        pytest.skip("requires ssh-agent")
+    if ps_available:
+        busybox = shutil.which("busybox")
+        if not busybox:
+            pytest.skip("requires BusyBox")
+        (tmp_path / "ps").symlink_to(busybox)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with subprocess.Popen([agent, "-D", "-a", "agent.sock"], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as child:
+        try:
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "agent.sock").exists():
+                assert child.poll() is None, child.stderr.read().decode()
+                assert time.monotonic() < deadline, "agent did not create its socket"
+                time.sleep(0.01)
+            p = platform.detect(platform_override=name)
+            assert p.supported
+            assert child.pid in p.process_list(re.compile(r"^ssh-agent$"), uid=os.getuid())
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
 
 
 @pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
@@ -124,7 +223,7 @@ def test_proc_discovery_skips_unreadable_state(monkeypatch, error):
     monkeypatch.setattr(platform.os.path, "isdir", lambda _path: True)
     monkeypatch.setattr(platform.os, "listdir", lambda _path: ["123"])
     monkeypatch.setattr(platform, "open", read, raising=False)
-    assert platform._PosixPlatform("linux").process_list(re.compile("ssh-agent")) == []
+    assert platform._LinuxPlatform("linux").process_list(re.compile("ssh-agent")) == []
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="requires Linux /proc and prctl")
@@ -150,7 +249,7 @@ os._exit(0)
             pytest.fail("child did not exit within 10 seconds")
         with open(f"/proc/{child.pid}/comm") as handle:
             assert handle.read().strip() == "ssh-agent"
-        assert child.pid not in platform._PosixPlatform("linux").process_list(
+        assert child.pid not in platform._LinuxPlatform("linux").process_list(
             re.compile(r"^ssh-agent$"), uid=os.getuid()
         )
 
@@ -159,7 +258,7 @@ os._exit(0)
 def test_process_list_with_illumos_ps(monkeypatch, uid, expected):
     """illumos consumes the remainder of each -o argument as header text."""
     rows = [
-        {"pid": "123", "uid": "1000", "comm": "/usr/bin/ssh-agent"},
+        {"pid": "123", "uid": "1000", "comm": "/path with spaces/" * 10 + "ssh-agent"},
         {"pid": "456", "uid": "2000", "comm": "ssh-agent"},
         {"pid": "789", "uid": "1000", "comm": "ssh-agent-helper"},
         {"pid": "987", "uid": "1000", "comm": "not-ssh-agent"},
@@ -174,6 +273,12 @@ def test_process_list_with_illumos_ps(monkeypatch, uid, expected):
             names, separator, header = cmd[index + 1].partition("=")
             fields.extend(names.split(","))
             headers.append(header if separator else names)
+        assert fields == ["pid", "uid", "fname"]
+        assert headers == ["", "", "KEYCHAIN_COMMAND"]
+        # Model illumos's pr_fname and its default eight-character display width.
+        width = len(headers[-1]) or 8
+        for row in rows:
+            row["fname"] = row["comm"].rsplit("/", 1)[-1][:15][:width]
         lines = [" ".join(headers)] if any(headers) else []
         lines.extend(" ".join(row[field] for field in fields) for row in rows)
         stdout = ("\n".join(lines) + "\n").encode()
@@ -201,12 +306,11 @@ def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected, columns):
         b"I     789       1     789      54000     ?       1000 15:39:13 /path with spaces/ssh-agent\n"
         b"      987       1     987      55000     ?       1000 15:39:13 /usr/bin/ssh-agent-helper\n"
         b"      988       1     988      56000     ?       1000 15:39:13 /usr/bin/ssh-agent <defunct>\n"
-        b"invalid row\n"
     )
 
     def fake_popen(cmd, **kwargs):
         assert cmd == ["ps", "-e", "-l"]
-        assert kwargs["env"] == {key: value for key, value in parent_env.items() if key != "COLUMNS"}
+        assert kwargs["env"] == {**{key: value for key, value in parent_env.items() if key != "COLUMNS"}, "LC_ALL": "C"}
         return SimpleNamespace(returncode=0, communicate=lambda: (stdout, b""))
 
     monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
@@ -218,10 +322,11 @@ def test_process_list_with_cygwin_ps(monkeypatch, name, uid, expected, columns):
 
 @pytest.mark.parametrize("name", ["cygwin", "msys", "msys2"])
 @pytest.mark.parametrize("stime", ["15:39:13", "  Nov  1", "  Nov 12"])
-def test_process_list_with_cygwin_stime(monkeypatch, name, stime):
+@pytest.mark.parametrize("status", [" ", "S", "I", "O"])
+def test_process_list_with_cygwin_stime(monkeypatch, name, stime, status):
     stdout = (
         "      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n"
-        f"      123       1     123      52000     ?       1000 {stime} /path with spaces/ssh-agent\n"
+        f"{status}     123       1     123      52000     ?       1000 {stime} /path with spaces/ssh-agent\n"
     ).encode()
 
     def fake_popen(cmd, **kwargs):
@@ -244,7 +349,7 @@ def test_failed_ps_is_not_an_empty_process_list(monkeypatch, name, status, stder
 
     monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
     with pytest.raises(KeychainError, match=f"Process discovery failed: ps exited with status {status}") as exc:
-        platform._PosixPlatform(name).process_list(re.compile("ssh-agent"))
+        platform._classify(name, has_ps=True).process_list(re.compile("ssh-agent"))
     assert (stderr.decode(errors="replace").strip() or "no error output") in str(exc.value)
 
 
@@ -255,13 +360,122 @@ def test_ps_launch_failure_is_fatal(monkeypatch, error):
 
     monkeypatch.setattr(platform.subprocess, "Popen", fail)
     with pytest.raises(KeychainError, match="Process discovery failed: cannot run ps"):
-        platform._PosixPlatform("cygwin").process_list(re.compile("ssh-agent"))
+        platform._classify("cygwin", has_ps=True).process_list(re.compile("ssh-agent"))
 
 
-@pytest.mark.parametrize("stdout", [b"", b"123 1000 other-command\n"])
+@pytest.mark.parametrize("stdout", [b"123 1000 other-command\n", b"0 0 -\n", b"\n123 1000 other-command\n\n"])
 def test_successful_ps_without_matching_agents_is_valid(monkeypatch, stdout):
     monkeypatch.setattr(
         platform.subprocess, "Popen",
         lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
     )
-    assert platform._PosixPlatform("sunos5").process_list(re.compile("ssh-agent")) == []
+    assert platform._classify("sunos5", has_ps=True).process_list(re.compile("ssh-agent")) == []
+
+
+@pytest.mark.parametrize("name", ["sunos5", "darwin", "freebsd14", "openbsd7", "netbsd", "aix", "cygwin", "msys2"])
+@pytest.mark.parametrize("stdout", [b"", b"\n", b"unsupported output\n", b"123 1000\n", b"123 uid ssh-agent\n"])
+def test_successful_but_unusable_ps_output_is_fatal(monkeypatch, name, stdout):
+    monkeypatch.setattr(
+        platform.subprocess, "Popen",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
+    )
+    with pytest.raises(KeychainError, match="Process discovery failed: ps"):
+        platform._classify(name, has_ps=True).process_list(re.compile("ssh-agent"))
+
+
+@pytest.mark.parametrize("bad_row", ["garbage", "123 1000", "-1 1000 ssh-agent", "123 -1 ssh-agent", "+123 1000 ssh-agent"])
+def test_ps_rejects_partial_results_before_uid_or_name_filtering(monkeypatch, bad_row):
+    stdout = f"123 1000 ssh-agent\n{bad_row}\n456 2000 other-command\n".encode()
+    monkeypatch.setattr(
+        platform.subprocess, "Popen",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
+    )
+    with pytest.raises(KeychainError, match="Process discovery failed: ps.*line 2"):
+        platform._classify("sunos5", has_ps=True).process_list(re.compile("ssh-agent"), uid=1000)
+
+
+@pytest.mark.parametrize("name", ["cygwin", "msys2"])
+@pytest.mark.parametrize("suffix", [b"", b"invalid row\n"])
+def test_cygwin_header_is_not_a_process_record(monkeypatch, name, suffix):
+    stdout = b"      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n" + suffix
+    monkeypatch.setattr(
+        platform.subprocess, "Popen",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
+    )
+    with pytest.raises(KeychainError, match="Process discovery failed: ps"):
+        platform._classify(name, has_ps=True).process_list(re.compile("ssh-agent"))
+
+
+@pytest.mark.parametrize("prefix", ["1", "? ", "Z "])
+def test_cygwin_ps_rejects_invalid_status_instead_of_truncating_pid(monkeypatch, prefix):
+    stdout = f"{prefix}123 1 123 52000 ? 1000 15:39:13 /usr/bin/ssh-agent\n".encode()
+    monkeypatch.setattr(
+        platform.subprocess, "Popen",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
+    )
+    with pytest.raises(KeychainError, match="Process discovery failed: ps.*line 1"):
+        platform._classify("cygwin", has_ps=True).process_list(re.compile("ssh-agent"))
+
+
+@pytest.mark.parametrize("name", ["darwin", "freebsd14", "openbsd7", "netbsd", "dragonfly6"])
+def test_bsd_ps_requests_unlimited_width(monkeypatch, name):
+    monkeypatch.setenv("COLUMNS", "8")
+    monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+    parent_env = dict(os.environ)
+    command_name = "/a very long installation directory/" * 8 + "ssh-agent"
+
+    def fake_popen(cmd, **kwargs):
+        assert cmd == ["ps", "-ww", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="]
+        assert "COLUMNS" not in kwargs["env"]
+        assert kwargs["env"]["LC_ALL"] == "C"
+        stdout = f"123 1000 {command_name}\n456 1000 {command_name}-helper\n".encode()
+        return SimpleNamespace(returncode=0, communicate=lambda: (stdout, b""))
+
+    monkeypatch.setattr(platform.subprocess, "Popen", fake_popen)
+    assert platform._classify(name, has_ps=True).process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=1000) == [123]
+    assert dict(os.environ) == parent_env
+
+
+@pytest.mark.parametrize("command_name", ["ssh-agen", "ssh-agent-helper", "not-ssh-agent", "ssh-agent <defunct>"])
+def test_ps_never_guesses_an_agent_from_a_partial_name(monkeypatch, command_name):
+    stdout = f"123 1000 {command_name}\n".encode()
+    monkeypatch.setattr(
+        platform.subprocess, "Popen",
+        lambda *_a, **_k: SimpleNamespace(returncode=0, communicate=lambda: (stdout, b"")),
+    )
+    assert platform._classify("darwin", has_ps=True).process_list(re.compile(r"(?:^|/)ssh-agent$"), uid=1000) == []
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith(("linux", "darwin", "freebsd", "openbsd", "netbsd", "dragonfly", "sunos")),
+    reason="requires POSIX ps and symlinks",
+)
+def test_real_ps_discovers_agent_launched_from_long_path(tmp_path, monkeypatch):
+    agent = shutil.which("ssh-agent")
+    ps = shutil.which("ps")
+    if not agent or not ps:
+        pytest.skip("requires ssh-agent and ps")
+    if os.path.basename(os.path.realpath(ps)).startswith("busybox"):
+        pytest.skip("BusyBox is exercised through Linux /proc, not the generic ps format")
+    directory = tmp_path / ("long installation path " * 5)
+    directory.mkdir()
+    executable = directory / "ssh-agent"
+    executable.symlink_to(agent)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "1")
+    # Force Linux's ps fallback too; normal Linux discovery already has a live test.
+    p = platform._PsPlatform("linux") if sys.platform.startswith("linux") else platform.detect()
+    with subprocess.Popen([str(executable), "-D", "-a", "agent.sock"],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE) as child:
+        try:
+            deadline = time.monotonic() + 5
+            while not (tmp_path / "agent.sock").exists():
+                assert child.poll() is None, child.stderr.read().decode()
+                assert time.monotonic() < deadline, "agent did not create its socket"
+                time.sleep(0.01)
+            assert child.pid in p.process_list(
+                re.compile(r"(?:^|/)ssh-agent$"), uid=os.getuid()
+            )
+        finally:
+            child.terminate()
+            child.wait(timeout=5)

@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: install shells and manual renderer for tests
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fish tcsh groff
+        run: sudo apt-get update && sudo apt-get install -y fish tcsh groff busybox
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -118,6 +118,77 @@ jobs:
       - name: process discovery and real agent lifecycle
         run: |
           /usr/bin/python -m pytest -v --tb=short tests/test_runtime.py tests/test_cli_startup.py tests/test_agent_lifecycle_e2e.py
+
+  # Real kernels and native ps/OpenSSH, not Linux containers or parser fixtures.
+  # Each VM uses a dedicated ordinary user and a private copy of the checkout.
+  test-freebsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1
+        with:
+          release: '14.4'
+          mem: 2048
+          cpu: 2
+          sync: rsync
+          copyback: false
+          prepare: |
+            pkg install -y python312 py312-pytest
+            pw useradd kctest -m -d /tmp/keychain-home -s /bin/sh
+          run: |
+            cp -R . /tmp/keychain-home/repo
+            chown -R kctest /tmp/keychain-home/repo
+            su - kctest -c 'cd /tmp/keychain-home/repo && /usr/local/bin/python3.12 scripts/test_posix_vm.py freebsd'
+
+  test-openbsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: vmactions/openbsd-vm@f1ca8bc8ecc5b6ef7218e5b914836e067e1546d3 # v1
+        with:
+          release: '8.0'
+          mem: 2048
+          cpu: 2
+          sync: rsync
+          copyback: false
+          prepare: |
+            pkg_add -I py3-test
+            python3 -c 'import pytest'
+            useradd -m -d /tmp/keychain-home -s /bin/sh kctest
+          run: |
+            cp -R . /tmp/keychain-home/repo
+            chown -R kctest /tmp/keychain-home/repo
+            su - kctest -c 'cd /tmp/keychain-home/repo && /usr/local/bin/python3 scripts/test_posix_vm.py openbsd'
+
+  test-omnios:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: vmactions/omnios-vm@aeee92416495d9685b2997d954f6b063ae5b832d # v1
+        with:
+          release: 'r151054'
+          mem: 2048
+          cpu: 2
+          sync: rsync
+          copyback: false
+          prepare: |
+            pkg install runtime/python-313 library/python-3/pip-313
+            python3.13 -m venv --without-pip /opt/keychain-test
+            python3.13 -m pip --python /opt/keychain-test/bin/python install 'pytest>=8,<9'
+            useradd -m -d /tmp/keychain-home -s /bin/sh kctest
+          run: |
+            cp -R . /tmp/keychain-home/repo
+            chown -R kctest /tmp/keychain-home/repo
+            su - kctest -c 'cd /tmp/keychain-home/repo && /opt/keychain-test/bin/python scripts/test_posix_vm.py sunos'
 
   # -------------------------------------------------------------------------
   # Production-target authenticity: Rocky Linux 8 + python3.9 module.
@@ -200,7 +271,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: install shells and manual renderer for tests
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y fish tcsh groff
+        run: sudo apt-get update && sudo apt-get install -y fish tcsh groff busybox
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -226,6 +297,9 @@ jobs:
       - static-analysis
       - test-fast
       - test-msys2
+      - test-freebsd
+      - test-openbsd
+      - test-omnios
       - test-rocky8-py39
       - test-full-sweep
     runs-on: ubuntu-latest
@@ -233,6 +307,9 @@ jobs:
       STATIC_ANALYSIS_RESULT: ${{ needs.static-analysis.result }}
       TEST_FAST_RESULT: ${{ needs.test-fast.result }}
       TEST_MSYS2_RESULT: ${{ needs.test-msys2.result }}
+      TEST_FREEBSD_RESULT: ${{ needs.test-freebsd.result }}
+      TEST_OPENBSD_RESULT: ${{ needs.test-openbsd.result }}
+      TEST_OMNIOS_RESULT: ${{ needs.test-omnios.result }}
       TEST_ROCKY8_RESULT: ${{ needs.test-rocky8-py39.result }}
       TEST_FULL_SWEEP_RESULT: ${{ needs.test-full-sweep.result }}
       TEST_FULL_SWEEP_REQUIRED: >-
@@ -248,6 +325,9 @@ jobs:
           echo "static-analysis: ${STATIC_ANALYSIS_RESULT}"
           echo "test-fast: ${TEST_FAST_RESULT}"
           echo "test-msys2: ${TEST_MSYS2_RESULT}"
+          echo "test-freebsd: ${TEST_FREEBSD_RESULT}"
+          echo "test-openbsd: ${TEST_OPENBSD_RESULT}"
+          echo "test-omnios: ${TEST_OMNIOS_RESULT}"
           echo "test-rocky8-py39: ${TEST_ROCKY8_RESULT}"
           echo "test-full-sweep: ${TEST_FULL_SWEEP_RESULT} (required: ${TEST_FULL_SWEEP_REQUIRED})"
 
@@ -257,6 +337,9 @@ jobs:
             "${STATIC_ANALYSIS_RESULT}" \
             "${TEST_FAST_RESULT}" \
             "${TEST_MSYS2_RESULT}" \
+            "${TEST_FREEBSD_RESULT}" \
+            "${TEST_OPENBSD_RESULT}" \
+            "${TEST_OMNIOS_RESULT}" \
             "${TEST_ROCKY8_RESULT}"
           do
             if [ "${result}" != "success" ]; then

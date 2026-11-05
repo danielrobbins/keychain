@@ -60,14 +60,89 @@ class Platform:
         return f"<Platform {self.name} supported={self.supported}>"
 
 
-class _PosixPlatform(Platform):
-    """POSIX-shaped userland: enumerate visible processes via /proc or ps."""
+class _PsPlatform(Platform):
+    """Shared ps execution and validation; subclasses own dialect differences."""
+
+    # Separate -o arguments also work on Solaris, where text after '=' is a header.
+    ps_command: tuple[str, ...] = ("ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm=")
+    ps_header: tuple[str, ...] = ()
+    requires_ps = True
 
     def __init__(self, name: str) -> None:
         self.name = name
 
+    def _parse_record(self, line: str) -> list[str]:
+        return line.split(None, 2)
+
+    def process_list(self, pattern: re.Pattern, uid: int | None = None) -> list[int]:
+        pids: list[int] = []
+        try:
+            proc = subprocess.Popen(
+                list(self.ps_command),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                # Cygwin/MSYS ps truncates command names to COLUMNS even in a pipe.
+                env={**{key: value for key, value in os.environ.items() if key != "COLUMNS"}, "LC_ALL": "C"},
+            )
+            stdout, stderr = proc.communicate()
+        except OSError as exc:
+            raise KeychainError(f"Process discovery failed: cannot run ps: {exc}") from exc
+        if proc.returncode:
+            detail = stderr.decode(errors="replace").strip() or "no error output"
+            raise KeychainError(f"Process discovery failed: ps exited with status {proc.returncode}: {detail}")
+        records = 0
+        for number, line in enumerate(stdout.decode(errors="replace").splitlines(), 1):
+            if not line.strip():
+                continue
+            if number == 1 and self.ps_header and tuple(line.split()) == self.ps_header:
+                continue
+            parts = self._parse_record(line)
+            if len(parts) != 3 or not all(re.fullmatch(r"[0-9]+", value) for value in parts[:2]):
+                raise KeychainError(f"Process discovery failed: ps returned an invalid record at line {number}")
+            pid, proc_uid = int(parts[0]), int(parts[1])
+            records += 1
+            if uid is not None and proc_uid != uid:
+                continue
+            if pattern.search(parts[2].strip()):
+                pids.append(pid)
+        if not records:
+            raise KeychainError("Process discovery failed: ps returned no process records")
+        return pids
+
+
+class _BSDPlatform(_PsPlatform):
+    # BSD ps supports unlimited width; System V ps does not share this option.
+    ps_command = ("ps", "-ww", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm=")
+
+
+class _SolarisPlatform(_PsPlatform):
+    # comm comes from bounded argv text. fname avoids path truncation;
+    # a 16-character header widens its default eight-character field.
+    ps_command = ("ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "fname=KEYCHAIN_COMMAND")
+    ps_header = ("KEYCHAIN_COMMAND",)
+
+
+class _CygwinPlatform(_PsPlatform):
+    """Cygwin and MSYS use their own fixed-column ps format."""
+
+    ps_command = ("ps", "-e", "-l")
+    ps_header = ("PID", "PPID", "PGID", "WINPID", "TTY", "UID", "STIME", "COMMAND")
+
+    def _parse_record(self, line: str) -> list[str]:
+        # The status prefix and eight-character STIME may contain spaces.
+        match = re.match(r"^[ SIO] +([0-9]+)\s+[0-9]+\s+[0-9]+\s+[0-9]+\s+\S+\s+([0-9]+) .{8} (.+)$", line)
+        return list(match.groups()) if match else []
+
+
+class _LinuxPlatform(_PsPlatform):
+    """Linux and Android prefer /proc, with ps as a fallback when unavailable."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.requires_ps = not os.path.isdir("/proc/self")
+
     def process_details_unavailable(self, pid: int) -> bool:
-        if pid <= 0 or not self.name.startswith(("linux", "android")) or not os.path.isdir("/proc/self"):
+        if pid <= 0 or self.requires_ps:
             return False
         try:
             with open(f"/proc/{pid}/comm", encoding="utf-8", errors="replace") as handle:
@@ -85,63 +160,24 @@ class _PosixPlatform(Platform):
         return False
 
     def process_list(self, pattern: re.Pattern, uid: int | None = None) -> list[int]:
+        if self.requires_ps:
+            return super().process_list(pattern, uid)
         pids: list[int] = []
-        if self.name.startswith("linux") and os.path.isdir("/proc/self"):
-            # Spawning ps costs ~10 ms; walking /proc costs ~4 ms.
-            for entry in os.listdir("/proc"):
-                try:
-                    if not entry.isdigit() or (uid is not None and os.stat(f"/proc/{entry}").st_uid != uid):
-                        continue
-                    with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as handle:
-                        if not pattern.search(handle.read().strip()):
-                            continue
-                    with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
-                        # Skip zombie/dead tasks; the parenthesized name can contain ')'.
-                        if handle.read().rpartition(")")[2].split()[0] not in ("Z", "X", "x"):
-                            pids.append(int(entry))
-                except OSError:
-                    continue  # exited mid-scan, or process details are restricted
-            return pids
-        cygwin_ps = self.name == "cygwin" or self.name.startswith("msys")
-        try:
-            proc = subprocess.Popen(
-                # illumos/Solaris treats everything after '=' in one -o
-                # argument as header text, including commas. Separate -o
-                # options preserve all three columns across POSIX hosts.
-                ["ps", "-e", "-l"] if cygwin_ps else ["ps", "-A", "-o", "pid=", "-o", "uid=", "-o", "comm="],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                # Cygwin/MSYS ps truncates command names to COLUMNS even in a pipe.
-                env={key: value for key, value in os.environ.items() if key != "COLUMNS"},
-            )
-            stdout, stderr = proc.communicate()
-        except OSError as exc:
-            raise KeychainError(f"Process discovery failed: cannot run ps: {exc}") from exc
-        if proc.returncode:
-            detail = stderr.decode(errors="replace").strip() or "no error output"
-            raise KeychainError(f"Process discovery failed: ps exited with status {proc.returncode}: {detail}")
-        for line in stdout.decode(errors="replace").splitlines():
-            if cygwin_ps:
-                # ps -l starts with a status character. STIME is eight characters
-                # wide, including spaces in dates such as "  Nov  1".
-                match = re.match(
-                    r"^.\s*(\d+)\s+\d+\s+\d+\s+\d+\s+\S+\s+(\d+) .{8} (.+)$", line
-                )
-                if not match:
-                    continue
-                parts = list(match.groups())
-            else:
-                parts = line.split(None, 2)
-            if len(parts) < 3:
-                continue
+        for entry in os.listdir("/proc"):
             try:
-                pid, proc_uid = int(parts[0]), int(parts[1])
-            except ValueError:
-                continue
-            if uid is not None and proc_uid != uid:
-                continue
-            if pattern.search(parts[2].strip()):
-                pids.append(pid)
+                if not entry.isdigit() or (uid is not None and os.stat(f"/proc/{entry}").st_uid != uid):
+                    continue
+                with open(f"/proc/{entry}/comm", encoding="utf-8", errors="replace") as handle:
+                    if not pattern.search(handle.read().strip()):
+                        continue
+                with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
+                    # Skip zombie/dead tasks; the parenthesized name can contain ')'.
+                    # An empty read means the task vanished mid-scan.
+                    fields = handle.read().rpartition(")")[2].split()
+                    if fields and fields[0] not in ("Z", "X", "x"):
+                        pids.append(int(entry))
+            except OSError:
+                continue  # exited mid-scan, or process details are restricted
         return pids
 
 
@@ -171,26 +207,36 @@ def _classify(platform_name: str, has_ps: bool | None = None) -> Platform:
 
     *has_ps* controls whether ``ps`` is considered available; pass it
     explicitly in tests to avoid probing the host's actual PATH.
-    When ``None`` (the default), :func:`_probe_ps` is called once.
+    When ``None`` (the default), :func:`_probe_ps` is called once if /proc
+    discovery is unavailable.
     """
-    if has_ps is None:
-        has_ps = _probe_ps()
-
     p = platform_name.lower()
 
     # Native Windows is unsupported regardless of ps.
     if p == "win32":
         return _UnsupportedPlatform("windows", _UNSUPPORTED_WINDOWS_REASON)
 
-    is_known_posix = (
-        p.startswith(("linux", "darwin", "freebsd", "openbsd", "netbsd", "dragonfly", "sunos", "aix", "haiku", "gnu"))
-        or p == "cygwin"
-        or p.startswith("msys")
-    )
+    implementation: type[_PsPlatform] = _PsPlatform
+    for prefixes, candidate in (
+        (("linux", "android"), _LinuxPlatform),
+        (("darwin", "freebsd", "openbsd", "netbsd", "dragonfly"), _BSDPlatform),
+        (("sunos",), _SolarisPlatform),
+        (("cygwin", "msys"), _CygwinPlatform),
+    ):
+        if p.startswith(prefixes):
+            implementation = candidate
+            break
+    platform = implementation(p)
+    if not platform.requires_ps:
+        return platform
+    if has_ps is None:
+        has_ps = _probe_ps()
+
+    is_known_posix = implementation is not _PsPlatform or p.startswith(("aix", "haiku", "gnu"))
 
     if is_known_posix:
         if has_ps:
-            return _PosixPlatform(p)
+            return platform
         return _UnsupportedPlatform(
             p,
             "ps(1) was not found in PATH on this {} system. "
@@ -200,7 +246,7 @@ def _classify(platform_name: str, has_ps: bool | None = None) -> Platform:
 
     # Unknown platform: use ps if available; refuse with a clear message otherwise.
     if has_ps:
-        return _PosixPlatform(p)
+        return platform
     return _UnsupportedPlatform(
         p,
         "Unrecognized platform '{}' and ps(1) is not in PATH. "

@@ -32,7 +32,7 @@ def test_process_details_probe(monkeypatch, name, error, alive):
     monkeypatch.setattr(platform.os.path, "isdir", lambda _path: True)
     monkeypatch.setattr(platform, "open", read, raising=False)
     monkeypatch.setattr(platform.os, "kill", kill)
-    assert platform._PosixPlatform(name).process_details_unavailable(123) is (
+    assert platform._classify(name, has_ps=True).process_details_unavailable(123) is (
         alive and error in (errno.ENOENT, errno.EACCES, errno.EPERM)
     )
 
@@ -41,7 +41,7 @@ def test_process_details_probe(monkeypatch, name, error, alive):
 def test_no_visibility_inference_without_linux_proc(monkeypatch, name, proc):
     monkeypatch.setattr(platform.os.path, "isdir", lambda _path: proc)
     monkeypatch.setattr(platform, "open", lambda *_a, **_k: pytest.fail("must not read proc"), raising=False)
-    assert not platform._PosixPlatform(name).process_details_unavailable(123)
+    assert not platform._classify(name, has_ps=True).process_details_unavailable(123)
 
 
 @pytest.mark.parametrize("pid", [-1, 0, 2**64])
@@ -56,13 +56,13 @@ def test_invalid_pid_cannot_enable_fallback(monkeypatch, pid):
     monkeypatch.setattr(platform.os.path, "isdir", lambda _path: True)
     monkeypatch.setattr(platform, "open", read, raising=False)
     monkeypatch.setattr(platform.os, "kill", kill)
-    assert not platform._PosixPlatform("linux").process_details_unavailable(pid)
+    assert not platform._LinuxPlatform("linux").process_details_unavailable(pid)
 
 
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     k = state.KeychainState(paths=KeychainPaths(keydir=tmp_path, host="test"), env={})
-    k.platform = platform._PosixPlatform("linux")
+    k.platform = platform._LinuxPlatform("linux")
     monkeypatch.setattr(agents, "findpids", lambda _name: [])
     monkeypatch.setattr(agents, "validate_ssh_socket", lambda sock: agents.SocketValidation(sock, True))
     monkeypatch.setattr(k.platform, "process_details_unavailable", lambda _pid: True)
@@ -122,4 +122,6 @@ def test_stop_never_signals_hidden_pid_and_keeps_its_reference(agent, monkeypatc
     assert [call.args[0] for call in kill.call_args_list] == ([] if which == "pidfile" else visible)
     clear.assert_not_called()
     if which != "others":
-        assert "pidfile kept" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "pidfile kept" in err
+        assert "No keychain ssh-agent found running" not in err

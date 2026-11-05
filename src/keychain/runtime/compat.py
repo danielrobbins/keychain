@@ -146,7 +146,7 @@ class Compat:
 
         Examples: ``['--list']`` -> ``['list']``,
         ``['--wipe', 'ssh']`` -> ``['wipe', '--ssh']``,
-        ``['--stop', 'mine']`` -> ``['agent', 'stop', '--mine']``,
+        ``['--stop', 'mine']`` -> ``['agent', 'stop']``,
         ``['id_ed25519']`` -> ``['add', 'id_ed25519']``.
         Unrecognised tokens are passed through so argparse can reject them."""
         out_args: list[str] = []
