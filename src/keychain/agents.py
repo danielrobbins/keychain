@@ -582,7 +582,7 @@ class SshAgent:
         env = self.env or self.select_existing()
         for k in ssh_keys:
             try:
-                r = run(["ssh-add", "-d", k], env=env.as_dict(), c_locale=False)
+                r = run(["ssh-add", "-d", "--", k], env=env.as_dict(), c_locale=False)
             except (FileNotFoundError, OSError):
                 raise KeychainError("ssh-add not found")
             if r.returncode == 0:
@@ -640,7 +640,7 @@ class SshAgent:
         commands: list[list[str]] = []
         fingerprints = [self.fingerprint(key) for key in missing]
         if missing:
-            commands.append([*base_cmd, *missing])
+            commands.append([*base_cmd, "--", *missing])
         for provider in pkcs11:
             commands.append([*base_cmd, "-s", provider])
             fingerprints.extend(pkcs11_provider_fingerprints(provider, out) or [None])

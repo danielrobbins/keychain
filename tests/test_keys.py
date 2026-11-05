@@ -10,6 +10,7 @@ the expansion in load_public_identity_files; -G alone does not expand paths.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -175,6 +176,25 @@ def test_resolve_requested_keys_treats_missing_gpg_as_unresolved(fake_home, monk
     assert out.missing == ["ABCD1234"]
 
 
+def test_gpg_lookup_keeps_dash_prefixed_key_out_of_options(fake_home, monkeypatch):
+    def lookup(command, **kwargs):
+        assert command == ["gpg", "--list-secret-keys", "--", "--version"]
+        return subprocess.CompletedProcess(command, 1, "", "not found")
+
+    monkeypatch.setattr(keys, "run", lookup)
+    result = keys.resolve_requested_keys(False, False, ["--version"], "gpg", _Out())
+    assert result.missing == ["--version"]
+
+
+def test_ssh_config_keeps_dash_prefixed_host_out_of_options(monkeypatch):
+    def lookup(command, **kwargs):
+        assert command == ["ssh", "-nG", "--", "-oIdentityFile=unwanted"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(keys, "run", lookup)
+    assert keys.expand_host("-oIdentityFile=unwanted") == keys.ResolvedKeys()
+
+
 def test_expand_host_reports_ssh_probe_timeout(monkeypatch):
     def timeout(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
@@ -199,7 +219,7 @@ def test_expand_host_resolves_identityfiles_from_openssh(monkeypatch, tmp_path):
     second.write_text("private", encoding="utf-8")
 
     def ssh_config(command, **kwargs):
-        assert command == ["ssh", "-nG", "example.com"]
+        assert command == ["ssh", "-nG", "--", "example.com"]
         assert kwargs == {"timeout": 10}
         return subprocess.CompletedProcess(
             command,
@@ -223,7 +243,7 @@ def test_expand_host_accepts_home_prefix_or_expanded_path(monkeypatch, tmp_path,
         keys, "run", lambda *_a, **_kw: subprocess.CompletedProcess([], 0, f"identityfile {identity}\n", "")
     )
 
-    assert keys.expand_host("example.com").ssh == [str(keyfile)]
+    assert [Path(path) for path in keys.expand_host("example.com").ssh] == [keyfile]
 
 
 def test_resolve_requested_keys_mixes_prefixed_and_bare(fake_home, monkeypatch):

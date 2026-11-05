@@ -141,7 +141,7 @@ class KeychainState:
             args=args,
         )
         k.out = out
-        paths.check_runtime_perms(me)
+        paths.check_runtime_perms()
         return k
 
     # ---- hostname (resolved by ``build``; reflected back for inspect) -
@@ -361,7 +361,7 @@ class KeychainState:
     @property
     def security_audit(self) -> list[SecurityCheck]:
         socket_path = self.pidfile_socket if self.pidfile_socket_valid else ""
-        return self.paths.security_audit(self.user, socket_path)
+        return self.paths.security_audit(socket_path)
 
     # ---- key resolution (reflects user's --extended / cmdline) -------
 

@@ -16,6 +16,7 @@ from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.runtime import platform
 from keychain.runtime.config import RuntimeConfig
+from tests.support import set_file_stat
 
 
 @contextmanager
@@ -299,12 +300,12 @@ def test_render_inspect_json_includes_resolved_keys_when_args(tmp_path, paths, c
 
 
 class TestSecurityAudit:
-    def test_keydir_owner_and_mode_share_one_record(self, paths):
+    def test_keydir_owner_and_mode_share_one_record(self, paths, monkeypatch):
+        set_file_stat(monkeypatch, paths.keydir, mode=0o40700)
         with (
-            patch("keychain.paths.get_owner", return_value="me"),
-            patch("keychain.paths.os.stat") as st_mock,
+            patch("keychain.paths.user_name", return_value="me"),
+            patch("keychain.paths.current_uid", return_value=1000),
         ):
-            st_mock.return_value.st_mode = 0o40700  # dir, 0700
             ks = state.KeychainState(paths=paths, user="me")
             record = next(check for check in ks.security_audit if check.label == "keydir")
             assert record.path == paths.keydir
@@ -315,12 +316,12 @@ class TestSecurityAudit:
             assert record.severity == ""
             assert record.status == "ok"
 
-    def test_keydir_lax_perms_emits_hint(self, paths):
+    def test_keydir_lax_perms_emits_hint(self, paths, monkeypatch):
+        set_file_stat(monkeypatch, paths.keydir, mode=0o40777)
         with (
-            patch("keychain.paths.get_owner", return_value="me"),
-            patch("keychain.paths.os.stat") as st_mock,
+            patch("keychain.paths.user_name", return_value="me"),
+            patch("keychain.paths.current_uid", return_value=1000),
         ):
-            st_mock.return_value.st_mode = 0o40777  # dir, 0777
             ks = state.KeychainState(paths=paths, user="me")
             row = next(check for check in ks.security_audit if check.label == "keydir")
             assert row.mode == "0777"
@@ -328,12 +329,12 @@ class TestSecurityAudit:
             assert row.severity == "err"
             assert row.status == "error"
 
-    def test_foreign_keydir_owner_emits_hint(self, paths):
+    def test_foreign_keydir_owner_emits_hint(self, paths, monkeypatch):
+        set_file_stat(monkeypatch, paths.keydir, uid=2000, mode=0o40700)
         with (
-            patch("keychain.paths.get_owner", return_value="attacker"),
-            patch("keychain.paths.os.stat") as st_mock,
+            patch("keychain.paths.user_name", return_value="attacker"),
+            patch("keychain.paths.current_uid", return_value=1000),
         ):
-            st_mock.return_value.st_mode = 0o40700
             ks = state.KeychainState(paths=paths, user="me")
             row = next(check for check in ks.security_audit if check.label == "keydir")
             assert row.owner == "attacker"

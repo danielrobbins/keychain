@@ -4,7 +4,6 @@
 import os
 import subprocess
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +11,7 @@ import pytest
 from keychain import agents, main
 from keychain.paths import KeychainPaths
 from keychain.util import KeychainError
-from tests.support import set_home
+from tests.support import set_file_stat, set_home
 
 
 @pytest.mark.skipif(os.name == "nt", reason="requires POSIX file ownership")
@@ -186,6 +185,7 @@ class TestDefaultStartupPermissions:
             lambda: SimpleNamespace(supported=True, name="linux", reason=""),
         )
         monkeypatch.setattr("keychain.state.current_user", lambda: "me")
+        monkeypatch.setattr("keychain.paths.current_uid", lambda: 1000)
         monkeypatch.setattr(
             main.KeychainApp,
             "_resolve_requested_keys",
@@ -198,22 +198,14 @@ class TestDefaultStartupPermissions:
         home = tmp_path / "home"
         keydir = home / ".keychain"
         keydir.mkdir(parents=True, mode=0o700)
-        seen: list[Path] = []
-
-        def fake_lax_perms(path):
-            seen.append(Path(path))
-            return False
-
         set_home(monkeypatch, home, patch_path_home=True)
         monkeypatch.setenv("HOSTNAME", "testhost")
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr("keychain.paths.get_owner", lambda _path: "me")
-        monkeypatch.setattr("keychain.paths.lax_perms", fake_lax_perms)
+        set_file_stat(monkeypatch, keydir, mode=0o40700)
 
         with pytest.raises(SystemExit) as exc:
             main.main([])
         assert exc.value.code in (None, 0)
-        assert seen == [keydir]
         assert "lax permissions" not in capsys.readouterr().err
 
     def test_default_startup_fails_when_resolved_home_keydir_is_lax(self, tmp_path, monkeypatch, capsys):
@@ -221,20 +213,12 @@ class TestDefaultStartupPermissions:
         home = tmp_path / "home"
         keydir = home / ".keychain"
         keydir.mkdir(parents=True, mode=0o700)
-        seen: list[Path] = []
-
-        def fake_lax_perms(path):
-            seen.append(Path(path))
-            return Path(path) == keydir
-
         set_home(monkeypatch, home, patch_path_home=True)
         monkeypatch.setenv("HOSTNAME", "testhost")
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr("keychain.paths.get_owner", lambda _path: "me")
-        monkeypatch.setattr("keychain.paths.lax_perms", fake_lax_perms)
+        set_file_stat(monkeypatch, keydir, mode=0o40777)
 
         with pytest.raises(SystemExit) as exc:
             main.main([])
         assert exc.value.code == 1
-        assert seen == [keydir]
         assert "lax permissions" in capsys.readouterr().err

@@ -6,15 +6,17 @@ import shlex
 import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
+from keychain import util
 from keychain.env import SshAgentRef
 from keychain.output.core import Output
 from keychain.paths import KeychainPaths
 from keychain.util import KeychainError
-from tests.support import set_home
+from tests.support import set_file_stat, set_home
 
 
 def _out():
@@ -328,71 +330,63 @@ class TestKeychainPathsRenderEnv:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def audited_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr("keychain.paths.current_uid", lambda: 1000)
+    monkeypatch.setattr("keychain.paths.user_name", lambda uid: {1000: "me", 2000: "attacker"}.get(uid, str(uid)))
+    set_file_stat(monkeypatch, tmp_path, mode=0o40700)
+    return KeychainPaths(keydir=tmp_path, host="h")
+
+
 class TestCheckRuntimePerms:
-    def test_no_pidfiles_no_error(self, tmp_path):
-        kp = KeychainPaths(keydir=tmp_path, host="h")
-        tmp_path.mkdir(exist_ok=True)
-        with (
-            patch("keychain.paths.get_owner", return_value="me"),
-            patch("keychain.paths.lax_perms", return_value=False),
-        ):
-            kp.check_runtime_perms("me")
+    def test_no_pidfiles_no_error(self, audited_paths):
+        audited_paths.check_runtime_perms()
+        assert [row.label for row in audited_paths.security_audit()] == ["keydir"]
 
-    def test_owned_by_us_passes(self, tmp_path):
-        kp = KeychainPaths(keydir=tmp_path, host="h")
-        kp.pidfile_path("sh").write_text("SSH_AUTH_SOCK=/tmp/foo\n")
-        with (
-            patch("keychain.paths.get_owner", return_value="me"),
-            patch("keychain.paths.lax_perms", return_value=False),
-        ):
-            kp.check_runtime_perms("me")
+    def test_owned_by_us_passes(self, audited_paths, monkeypatch):
+        pidfile = audited_paths.pidfile_path("sh")
+        pidfile.write_text("SSH_AUTH_SOCK=/tmp/foo\n")
+        set_file_stat(monkeypatch, pidfile)
+        audited_paths.check_runtime_perms()
 
-    def test_foreign_owner_raises_keychain_error(self, tmp_path):
-        kp = KeychainPaths(keydir=tmp_path, host="h")
-        kp.pidfile_path("sh").write_text("SSH_AUTH_SOCK=/tmp/foo\n")
-        with (
-            patch(
-                "keychain.paths.get_owner",
-                side_effect=lambda path: "attacker" if Path(path) == kp.pidfile_path("sh") else "me",
-            ),
-            patch("keychain.paths.lax_perms", return_value=False),
-        ):
-            with pytest.raises(KeychainError, match="owned by attacker"):
-                kp.check_runtime_perms("me")
+    @pytest.mark.parametrize(
+        "field", ["sh", "csh", "fish", "envfile", "state_file", "state_lockf", "activation_lockf", "waiters_dir"]
+    )
+    def test_foreign_runtime_owner_is_rejected(self, audited_paths, monkeypatch, field):
+        path = (
+            audited_paths.pidfile_path(field) if field in audited_paths.pid_formats else getattr(audited_paths, field)
+        )
+        path.touch()
+        set_file_stat(monkeypatch, path, uid=2000)
+        with pytest.raises(KeychainError, match="owned by attacker"):
+            audited_paths.check_runtime_perms()
 
-    def test_lax_perms_raise_keychain_error(self, tmp_path):
-        kp = KeychainPaths(keydir=tmp_path, host="h")
-        kp.pidfile_path("sh").write_text("SSH_AUTH_SOCK=/tmp/foo\n")
-        with (
-            patch("keychain.paths.get_owner", return_value="me"),
-            patch("keychain.paths.lax_perms", side_effect=lambda path: Path(path) == kp.pidfile_path("sh")),
-        ):
-            with pytest.raises(KeychainError, match="lax permissions"):
-                kp.check_runtime_perms("me")
+    def test_lax_perms_raise_keychain_error(self, audited_paths, monkeypatch):
+        pidfile = audited_paths.pidfile_path("sh")
+        pidfile.touch()
+        set_file_stat(monkeypatch, pidfile, mode=0o100644)
+        with pytest.raises(KeychainError, match="lax permissions"):
+            audited_paths.check_runtime_perms()
 
-    def test_coordination_state_is_checked(self, tmp_path):
-        kp = KeychainPaths(keydir=tmp_path, host="h")
-        kp.state_file.write_text("{}\n", encoding="utf-8")
-        with (
-            patch(
-                "keychain.paths.get_owner",
-                side_effect=lambda path: "attacker" if Path(path) == kp.state_file else "me",
-            ),
-            patch("keychain.paths.lax_perms", return_value=False),
-        ):
-            with pytest.raises(KeychainError, match="owned by attacker"):
-                kp.check_runtime_perms("me")
+    def test_each_path_is_statted_once(self, audited_paths, monkeypatch):
+        original = Path.stat
+        seen = []
+
+        def record(path, *args, **kwargs):
+            seen.append(path)
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", record)
+        audited_paths.check_runtime_perms()
+        assert audited_paths.keydir in seen
+        assert len(seen) == len(set(seen))
 
 
 class TestEnsureKeydir:
-    def test_existing_lax_directory_is_rejected_by_runtime_audit(self, tmp_path):
-        keydir = tmp_path / ".keychain"
-        keydir.mkdir(mode=0o700)
-        kp = KeychainPaths(keydir=keydir, host="h")
-
-        with patch("keychain.paths.get_owner", return_value="me"), patch("keychain.paths.lax_perms", return_value=True):
-            with pytest.raises(KeychainError, match="lax permissions"):
-                kp.check_runtime_perms("me")
+    def test_existing_lax_directory_is_rejected_by_runtime_audit(self, audited_paths, monkeypatch):
+        set_file_stat(monkeypatch, audited_paths.keydir, mode=0o40777)
+        with pytest.raises(KeychainError, match="lax permissions"):
+            audited_paths.check_runtime_perms()
 
     def test_creates_missing_directory(self, tmp_path):
         kp = KeychainPaths(keydir=tmp_path / ".keychain", host="h")
@@ -400,3 +394,78 @@ class TestEnsureKeydir:
         kp.ensure_keydir()
 
         assert kp.keydir.is_dir()
+
+
+class TestSecurityHardening:
+    @pytest.mark.parametrize("lookup_error", [KeyError, OSError])
+    @pytest.mark.parametrize(
+        "owner_uid,mode,expected",
+        [(1000, 0o40700, ""), (1000, 0o40777, "lax permissions"), (54321, 0o40700, "owned by")],
+    )
+    def test_missing_account_does_not_change_authorization(
+        self, audited_paths, monkeypatch, lookup_error, owner_uid, mode, expected
+    ):
+        def missing(_uid):
+            raise lookup_error("account lookup unavailable")
+
+        monkeypatch.setattr(util, "_pwd", SimpleNamespace(getpwuid=missing))
+        monkeypatch.setattr(util, "current_uid", lambda: 1000)
+        monkeypatch.setattr("keychain.paths.user_name", util.user_name)
+        set_file_stat(monkeypatch, audited_paths.keydir, uid=owner_uid, mode=mode)
+
+        assert util.current_user() == "1000"
+        row = audited_paths.security_audit()[0]
+        assert row.owner == str(owner_uid)
+        if expected:
+            with pytest.raises(KeychainError, match=expected):
+                audited_paths.check_runtime_perms()
+        else:
+            audited_paths.check_runtime_perms()
+
+    def test_numeric_username_cannot_authorize_another_uid(self, audited_paths, monkeypatch):
+        def lookup(uid):
+            if uid == 1000:
+                return SimpleNamespace(pw_name="54321")
+            raise KeyError(uid)
+
+        monkeypatch.setattr(util, "_pwd", SimpleNamespace(getpwuid=lookup))
+        monkeypatch.setattr(util, "current_uid", lambda: 1000)
+        monkeypatch.setattr("keychain.paths.user_name", util.user_name)
+        set_file_stat(monkeypatch, audited_paths.keydir, uid=54321, mode=0o40700)
+
+        assert util.current_user() == "54321"
+        assert audited_paths.security_audit()[0].owner == "54321"
+        with pytest.raises(KeychainError, match="not UID 1000"):
+            audited_paths.check_runtime_perms()
+
+    def test_unreadable_metadata_is_an_error(self, audited_paths, monkeypatch):
+        original = Path.stat
+
+        def unreadable(path, *args, **kwargs):
+            if path == audited_paths.keydir:
+                raise PermissionError("denied")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", unreadable)
+        with pytest.raises(KeychainError, match="Cannot inspect"):
+            audited_paths.check_runtime_perms()
+
+    def test_socket_owner_is_checked_without_requiring_private_mode(self, audited_paths, monkeypatch):
+        sock = audited_paths.keydir / "agent.sock"
+        sock.touch()
+        set_file_stat(monkeypatch, sock, mode=0o140777)
+        assert audited_paths.security_audit(str(sock))[-1].severity == ""
+        set_file_stat(monkeypatch, sock, uid=2000, mode=0o140777)
+        assert audited_paths.security_audit(str(sock))[-1].severity == "err"
+
+    def test_no_posix_uid_does_not_claim_owner_validation(self, audited_paths, monkeypatch):
+        monkeypatch.setattr("keychain.paths.current_uid", lambda: None)
+        set_file_stat(monkeypatch, audited_paths.keydir, mode=0o40777)
+        row = audited_paths.security_audit()[0]
+        assert row.owner == ""
+        assert row.severity == ""
+
+    @pytest.mark.parametrize("host", ["../evil", "a/b", "..", ".", "", "a\0b"])
+    def test_host_cannot_leave_the_keydir(self, tmp_path, host):
+        with pytest.raises(KeychainError, match="Invalid host name"):
+            KeychainPaths.build(str(tmp_path), False, host)
